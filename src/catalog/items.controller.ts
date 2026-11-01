@@ -24,6 +24,7 @@ import {
   CreateExtraDto,
   CreateItemDto,
   CreateVariantDto,
+  DeleteItemsDto,
   ReplaceComboComponentsDto,
   ReplaceExclusionsDto,
   UpdateExtraDto,
@@ -84,6 +85,14 @@ export class ItemsController {
       dto.csv,
       dto.dryRun ?? false,
     );
+  }
+
+  @ApiOperation({ summary: 'Eliminar artículos permanentemente (hard delete)' })
+  @RequirePermissions('catalog:manage')
+  @HttpCode(HttpStatus.OK)
+  @Post('bulk-delete')
+  deleteItems(@CurrentUser() user: JwtUser, @Body() dto: DeleteItemsDto) {
+    return this.items.deleteItems(user.organizationId, dto.ids);
   }
 
   @ApiOperation({ summary: 'Editar datos generales del artículo' })

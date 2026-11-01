@@ -1,6 +1,7 @@
 import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
+  ArrayMinSize,
   ArrayNotEmpty,
   IsArray,
   IsBoolean,
@@ -304,6 +305,14 @@ export class UpdateItemDto {
   @ValidateNested({ each: true })
   @Type(() => CreateVariantDto)
   variants?: CreateVariantDto[];
+}
+
+export class DeleteItemsDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(500)
+  @IsString({ each: true })
+  ids!: string[];
 }
 
 export class ReplaceExclusionsDto {

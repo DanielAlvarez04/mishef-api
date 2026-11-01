@@ -675,6 +675,86 @@ export class ItemsService {
     return { ok: true };
   }
 
+  /**
+   * Elimina artículos de forma permanente.
+   *
+   * Los pedidos históricos guardan una copia del artículo, pero la relación
+   * sigue apuntando a él: si aparece en pedidos se bloquea el borrado y se
+   * sugiere desactivarlo (igual que en inventario). Las recetas, variantes,
+   * extras y exclusiones del artículo se eliminan en cascada.
+   */
+  async deleteItems(organizationId: string | null, ids: string[]) {
+    const uniqueIds = [...new Set(ids.filter(Boolean))];
+
+    if (uniqueIds.length === 0) {
+      throw new BadRequestException('Selecciona al menos un artículo');
+    }
+
+    const items = await this.prisma.item.findMany({
+      where: { id: { in: uniqueIds }, organizationId },
+      select: { id: true, name: true, imageKey: true },
+    });
+
+    if (items.length === 0) {
+      throw new NotFoundException('Artículo no encontrado');
+    }
+
+    const itemIds = items.map((item) => item.id);
+
+    const inOrders = await this.prisma.orderItem.findMany({
+      where: { itemId: { in: itemIds } },
+      select: { item: { select: { name: true } } },
+      take: 5,
+    });
+
+    if (inOrders.length > 0) {
+      const names = [...new Set(inOrders.map((row) => row.item.name))];
+      throw new ConflictException(
+        `No se puede eliminar: ${names.join(', ')} aparece en pedidos. Desactívalo para ocultarlo de los menús`,
+      );
+    }
+
+    // Los combos activos no pueden quedarse sin uno de sus componentes.
+    const usedInCombos = await this.prisma.comboComponent.findMany({
+      where: {
+        componentItemId: { in: itemIds },
+        combo: { isActive: true },
+      },
+      select: { componentItem: { select: { name: true } } },
+      take: 5,
+    });
+
+    if (usedInCombos.length > 0) {
+      const names = [
+        ...new Set(usedInCombos.map((row) => row.componentItem.name)),
+      ];
+      throw new ConflictException(
+        `No se puede eliminar: ${names.join(', ')} es componente de un combo activo. Quítalo del combo o desactívalo`,
+      );
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      // Los componentes que apuntan a estos artículos se quitan primero: la
+      // relación es Restrict y bloquearía el borrado aunque el combo esté
+      // inactivo.
+      await tx.comboComponent.deleteMany({
+        where: { componentItemId: { in: itemIds } },
+      });
+      await tx.item.deleteMany({ where: { id: { in: itemIds } } });
+    });
+
+    // La base ya no referencia las imágenes: se limpian del bucket.
+    await Promise.all(
+      items
+        .filter((item) => item.imageKey)
+        .map((item) =>
+          deleteR2Object(item.imageKey as string).catch(() => undefined),
+        ),
+    );
+
+    return { ok: true, deletedCount: items.length };
+  }
+
   // --------------------------------------------------------------------------
   // Variantes
   // --------------------------------------------------------------------------
