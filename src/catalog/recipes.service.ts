@@ -14,6 +14,7 @@ import {
   toMoney,
 } from '../common/units';
 import { QuantityConverter } from '../common/quantity-converter.service';
+import { isEmptyPatch, sameDecimal } from '../common/patch';
 import { IngredientQuantitiesService } from './ingredient-quantities.service';
 import {
   CreateRecipeDto,
@@ -188,20 +189,60 @@ export class RecipesService {
         ? undefined
         : await this.resolveLines(organizationId, dto.ingredients);
 
-    await this.prisma.$transaction(async (tx) => {
-      await tx.recipe.update({
-        where: { id: recipe.id },
-        data: {
-          ...(dto.name !== undefined ? { name: dto.name.trim() } : {}),
-          ...(dto.description !== undefined
-            ? { description: normalizeOptional(dto.description) }
-            : {}),
-          ...(dto.categoryId !== undefined ? { categoryId: dto.categoryId } : {}),
-          ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
-        },
-      });
+    const name = dto.name === undefined ? undefined : dto.name.trim();
+    const description =
+      dto.description === undefined
+        ? undefined
+        : normalizeOptional(dto.description);
 
-      if (lines) {
+    const data: Prisma.RecipeUncheckedUpdateInput = {};
+
+    if (name !== undefined && name !== recipe.name) data.name = name;
+    if (description !== undefined && description !== recipe.description) {
+      data.description = description;
+    }
+    if (
+      dto.categoryId !== undefined &&
+      (dto.categoryId ?? null) !== recipe.categoryId
+    ) {
+      data.categoryId = dto.categoryId;
+    }
+    if (dto.isActive !== undefined && dto.isActive !== recipe.isActive) {
+      data.isActive = dto.isActive;
+    }
+
+    const currentLines =
+      lines === undefined
+        ? []
+        : await this.prisma.recipeIngredient.findMany({
+            where: { recipeId: recipe.id },
+            orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+            include: {
+              options: { orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] },
+            },
+          });
+
+    const linesChanged =
+      lines !== undefined && !sameRecipeLines(currentLines, lines);
+
+    if (
+      isEmptyPatch(data) &&
+      !linesChanged &&
+      !dto.produce &&
+      !dto.publish
+    ) {
+      return this.findOne(organizationId, id);
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      if (!isEmptyPatch(data)) {
+        await tx.recipe.update({
+          where: { id: recipe.id },
+          data,
+        });
+      }
+
+      if (linesChanged && lines) {
         await tx.recipeIngredient.deleteMany({ where: { recipeId: recipe.id } });
         await tx.recipeIngredient.createMany({
           data: lines.map((line, index) => ({
@@ -747,4 +788,46 @@ function normalizeOptional(value: string | null | undefined): string | null {
   if (value === undefined || value === null) return null;
   const trimmed = value.trim();
   return trimmed === '' ? null : trimmed;
+}
+
+/**
+ * Compara las líneas guardadas con las que llegan del formulario.
+ *
+ * El orden importa: `sortOrder` se asigna por índice, así que reordenar
+ * ingredientes sí es un cambio real.
+ */
+function sameRecipeLines(
+  current: ReadonlyArray<{
+    ingredientId: string;
+    quantity: Prisma.Decimal;
+    label: string | null;
+    isOptional: boolean;
+    options: ReadonlyArray<{
+      ingredientId: string;
+      quantity: Prisma.Decimal;
+    }>;
+  }>,
+  next: ReadonlyArray<ResolvedLine>,
+) {
+  if (current.length !== next.length) return false;
+
+  return current.every((line, index) => {
+    const target = next[index];
+
+    if (
+      line.ingredientId !== target.ingredientId ||
+      !sameDecimal(line.quantity, target.quantity) ||
+      (line.label ?? null) !== (target.label ?? null) ||
+      line.isOptional !== target.isOptional ||
+      line.options.length !== target.alternatives.length
+    ) {
+      return false;
+    }
+
+    return line.options.every(
+      (option, optionIndex) =>
+        option.ingredientId === target.alternatives[optionIndex].ingredientId &&
+        sameDecimal(option.quantity, target.alternatives[optionIndex].quantity),
+    );
+  });
 }

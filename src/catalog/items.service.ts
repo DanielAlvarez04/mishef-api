@@ -8,6 +8,7 @@ import { Prisma, CategoryKind } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { IngredientQuantitiesService } from './ingredient-quantities.service';
 import { fromCanonicalQuantity, toMoney } from '../common/units';
+import { isEmptyPatch, sameDecimal } from '../common/patch';
 import { alphabetSuffix, categoryInitials } from '../common/sku';
 import {
   deleteR2Object,
@@ -360,28 +361,54 @@ export class ItemsService {
       }
     }
 
-    await this.prisma.item.update({
-      where: { id: item.id },
-      data: {
-        name: dto.name?.trim(),
-        description:
-          dto.description === undefined
-            ? undefined
-            : normalizeOptional(dto.description),
-        sku: dto.sku === undefined ? sku : normalizeSku(dto.sku),
-        categoryId: dto.categoryId,
-        price: dto.price === undefined ? undefined : toMoney(dto.price),
-        taxRate:
-          dto.taxRate === undefined
-            ? undefined
-            : dto.taxRate === null
-              ? null
-              : new Prisma.Decimal(dto.taxRate),
-        isCombo: dto.isCombo,
-        isActive: dto.isActive,
-        sortOrder: dto.sortOrder,
-      },
-    });
+    // Solo se arma el `data` con los campos que realmente cambiaron.
+    const name = dto.name === undefined ? undefined : dto.name.trim();
+    const description =
+      dto.description === undefined
+        ? undefined
+        : normalizeOptional(dto.description);
+    const nextSku = dto.sku === undefined ? sku : normalizeSku(dto.sku);
+    const price = dto.price === undefined ? undefined : toMoney(dto.price);
+    const taxRate =
+      dto.taxRate === undefined
+        ? undefined
+        : dto.taxRate === null
+          ? null
+          : new Prisma.Decimal(dto.taxRate);
+
+    const data: Prisma.ItemUncheckedUpdateInput = {};
+
+    if (name !== undefined && name !== item.name) data.name = name;
+    if (description !== undefined && description !== item.description) {
+      data.description = description;
+    }
+    if (nextSku !== undefined && nextSku !== item.sku) data.sku = nextSku;
+    if (
+      dto.categoryId !== undefined &&
+      (dto.categoryId ?? null) !== item.categoryId
+    ) {
+      data.categoryId = dto.categoryId;
+    }
+    if (price !== undefined && !price.equals(item.price)) data.price = price;
+    if (taxRate !== undefined && !sameDecimal(taxRate, item.taxRate)) {
+      data.taxRate = taxRate;
+    }
+    if (dto.isCombo !== undefined && dto.isCombo !== item.isCombo) {
+      data.isCombo = dto.isCombo;
+    }
+    if (dto.isActive !== undefined && dto.isActive !== item.isActive) {
+      data.isActive = dto.isActive;
+    }
+    if (dto.sortOrder !== undefined && dto.sortOrder !== item.sortOrder) {
+      data.sortOrder = dto.sortOrder;
+    }
+
+    if (!isEmptyPatch(data)) {
+      await this.prisma.item.update({
+        where: { id: item.id },
+        data,
+      });
+    }
 
     if (imageKey !== undefined) {
       // Guarda la imagen en la carpeta del artículo y borra la anterior para
@@ -389,17 +416,17 @@ export class ItemsService {
       await this.applyItemImage(
         organizationId,
         item.id,
-        dto.name?.trim() || item.name,
+        name || item.name,
         imageKey,
         item.imageKey,
       );
     }
 
     if (dto.variants !== undefined) {
-      await this.syncVariants(item.id, dto.variants, sku ?? item.sku);
-    } else if (sku && sku !== item.sku) {
+      await this.syncVariants(item.id, dto.variants, nextSku ?? item.sku);
+    } else if (nextSku && nextSku !== item.sku) {
       // La base cambió sin tocar presentaciones: solo se renumeran los sufijos.
-      await this.renumberVariantSkus(item.id, sku);
+      await this.renumberVariantSkus(item.id, nextSku);
     }
 
     return this.findOne(organizationId, item.id);
@@ -431,22 +458,37 @@ export class ItemsService {
       const sku = baseSku ? `${baseSku}${alphabetSuffix(index)}` : undefined;
 
       if (match) {
-        await this.prisma.itemVariant.update({
-          where: { id: match.id },
-          data: {
-            name,
-            sku,
-            isPrimary: index === primaryIndex,
-            priceAdjust: toMoney(variant.priceAdjust ?? 0),
-            // Sin factor en el DTO se conserva el actual (recetas publicadas).
-            recipeFactor:
-              variant.recipeFactor === undefined
-                ? undefined
-                : new Prisma.Decimal(variant.recipeFactor),
-            sortOrder: variant.sortOrder ?? index,
-            isActive: variant.isActive ?? true,
-          },
-        });
+        // Solo se escribe la presentación si algo cambió de verdad.
+        const priceAdjust = toMoney(variant.priceAdjust ?? 0);
+        const recipeFactor =
+          variant.recipeFactor === undefined
+            ? undefined
+            : new Prisma.Decimal(variant.recipeFactor);
+        const sortOrder = variant.sortOrder ?? index;
+        const isActive = variant.isActive ?? true;
+        const isPrimary = index === primaryIndex;
+
+        const data: Prisma.ItemVariantUncheckedUpdateInput = {};
+
+        if (name !== match.name) data.name = name;
+        if (sku !== undefined && sku !== match.sku) data.sku = sku;
+        if (isPrimary !== match.isPrimary) data.isPrimary = isPrimary;
+        if (!priceAdjust.equals(match.priceAdjust)) {
+          data.priceAdjust = priceAdjust;
+        }
+        // Sin factor en el DTO se conserva el actual (recetas publicadas).
+        if (recipeFactor !== undefined && !recipeFactor.equals(match.recipeFactor)) {
+          data.recipeFactor = recipeFactor;
+        }
+        if (sortOrder !== match.sortOrder) data.sortOrder = sortOrder;
+        if (isActive !== match.isActive) data.isActive = isActive;
+
+        if (!isEmptyPatch(data)) {
+          await this.prisma.itemVariant.update({
+            where: { id: match.id },
+            data,
+          });
+        }
       } else {
         await this.prisma.itemVariant.create({
           data: {
@@ -516,9 +558,13 @@ export class ItemsService {
     });
 
     for (const [index, variant] of variants.entries()) {
+      const sku = `${baseSku}${alphabetSuffix(index)}`;
+
+      if (sku === variant.sku) continue;
+
       await this.prisma.itemVariant.update({
         where: { id: variant.id },
-        data: { sku: `${baseSku}${alphabetSuffix(index)}` },
+        data: { sku },
       });
     }
   }
@@ -801,22 +847,36 @@ export class ItemsService {
       }
     }
 
-    const updated = await this.prisma.itemVariant.update({
-      where: { id: variant.id },
-      data: {
-        name: dto.name?.trim(),
-        priceAdjust:
-          dto.priceAdjust === undefined
-            ? undefined
-            : toMoney(dto.priceAdjust),
-        recipeFactor:
-          dto.recipeFactor === undefined
-            ? undefined
-            : new Prisma.Decimal(dto.recipeFactor),
-        sortOrder: dto.sortOrder,
-        isActive: dto.isActive,
-      },
-    });
+    const name = dto.name === undefined ? undefined : dto.name.trim();
+    const priceAdjust =
+      dto.priceAdjust === undefined ? undefined : toMoney(dto.priceAdjust);
+    const recipeFactor =
+      dto.recipeFactor === undefined
+        ? undefined
+        : new Prisma.Decimal(dto.recipeFactor);
+
+    const data: Prisma.ItemVariantUncheckedUpdateInput = {};
+
+    if (name !== undefined && name !== variant.name) data.name = name;
+    if (priceAdjust !== undefined && !priceAdjust.equals(variant.priceAdjust)) {
+      data.priceAdjust = priceAdjust;
+    }
+    if (recipeFactor !== undefined && !recipeFactor.equals(variant.recipeFactor)) {
+      data.recipeFactor = recipeFactor;
+    }
+    if (dto.sortOrder !== undefined && dto.sortOrder !== variant.sortOrder) {
+      data.sortOrder = dto.sortOrder;
+    }
+    if (dto.isActive !== undefined && dto.isActive !== variant.isActive) {
+      data.isActive = dto.isActive;
+    }
+
+    const updated = isEmptyPatch(data)
+      ? variant
+      : await this.prisma.itemVariant.update({
+          where: { id: variant.id },
+          data,
+        });
 
     return this.findOne(organizationId, item.id).then((detail) => ({
       item: detail,
@@ -909,32 +969,54 @@ export class ItemsService {
         ? undefined
         : await this.resolveExtraIngredients(organizationId, dto.ingredients);
 
-    const updated = await this.prisma.$transaction(async (tx) => {
-      if (ingredients) {
-        await tx.itemExtraIngredient.deleteMany({
-          where: { itemExtraId: extra.id },
-        });
-      }
-
-      return tx.itemExtra.update({
-        where: { id: extra.id },
-        data: {
-          name: dto.name?.trim(),
-          price: dto.price === undefined ? undefined : toMoney(dto.price),
-          isActive: dto.isActive,
-          ...(ingredients
-            ? {
-                ingredients: {
-                  create: ingredients.map((ingredient) => ({
-                    quantity: ingredient.quantity,
-                    ingredient: { connect: { id: ingredient.ingredientId } },
-                  })),
-                },
-              }
-            : {}),
-        },
-      });
+    const currentIngredients = await this.prisma.itemExtraIngredient.findMany({
+      where: { itemExtraId: extra.id },
+      select: { ingredientId: true, quantity: true },
     });
+
+    const ingredientsChanged =
+      ingredients !== undefined &&
+      !sameIngredientQuantities(currentIngredients, ingredients);
+
+    const name = dto.name === undefined ? undefined : dto.name.trim();
+    const price = dto.price === undefined ? undefined : toMoney(dto.price);
+
+    const data: Prisma.ItemExtraUncheckedUpdateInput = {};
+
+    if (name !== undefined && name !== extra.name) data.name = name;
+    if (price !== undefined && !price.equals(extra.price)) data.price = price;
+    if (dto.isActive !== undefined && dto.isActive !== extra.isActive) {
+      data.isActive = dto.isActive;
+    }
+
+    const hasChanges = !isEmptyPatch(data) || ingredientsChanged;
+
+    const updated = hasChanges
+      ? await this.prisma.$transaction(async (tx) => {
+          if (ingredientsChanged && ingredients) {
+            await tx.itemExtraIngredient.deleteMany({
+              where: { itemExtraId: extra.id },
+            });
+          }
+
+          return tx.itemExtra.update({
+            where: { id: extra.id },
+            data: {
+              ...data,
+              ...(ingredientsChanged && ingredients
+                ? {
+                    ingredients: {
+                      create: ingredients.map((ingredient) => ({
+                        quantity: ingredient.quantity,
+                        ingredient: { connect: { id: ingredient.ingredientId } },
+                      })),
+                    },
+                  }
+                : {}),
+            },
+          });
+        })
+      : extra;
 
     return this.findOne(organizationId, item.id).then((detail) => ({
       item: detail,
@@ -979,6 +1061,33 @@ export class ItemsService {
       exclusions,
     );
 
+    const current = await this.prisma.itemIngredientExclusion.findMany({
+      where: { itemId: item.id },
+      select: { ingredientId: true, label: true },
+    });
+
+    const byIngredient = (
+      list: ReadonlyArray<{ ingredientId: string; label?: string | null }>,
+    ) =>
+      [...list].sort((left, right) =>
+        left.ingredientId.localeCompare(right.ingredientId),
+      );
+
+    const nextRows = byIngredient(normalized);
+    const currentRows = byIngredient(current);
+
+    const unchanged =
+      currentRows.length === nextRows.length &&
+      currentRows.every(
+        (row, index) =>
+          row.ingredientId === nextRows[index].ingredientId &&
+          (row.label ?? null) === (nextRows[index].label ?? null),
+      );
+
+    if (unchanged) {
+      return this.findOne(organizationId, item.id);
+    }
+
     await this.prisma.$transaction(async (tx) => {
       await tx.itemIngredientExclusion.deleteMany({
         where: { itemId: item.id },
@@ -1022,6 +1131,39 @@ export class ItemsService {
       item.id,
       components,
     );
+
+    const current = await this.prisma.comboComponent.findMany({
+      where: { comboId: item.id },
+      select: { componentItemId: true, componentVariantId: true, quantity: true },
+    });
+
+    const key = (row: {
+      componentItemId: string;
+      componentVariantId: string | null;
+    }) => `${row.componentItemId}:${row.componentVariantId ?? ''}`;
+
+    const byKey = (
+      list: ReadonlyArray<{
+        componentItemId: string;
+        componentVariantId: string | null;
+        quantity: number;
+      }>,
+    ) => [...list].sort((left, right) => key(left).localeCompare(key(right)));
+
+    const currentRows = byKey(current);
+    const nextRows = byKey(normalized);
+
+    const unchanged =
+      currentRows.length === nextRows.length &&
+      currentRows.every(
+        (row, index) =>
+          key(row) === key(nextRows[index]) &&
+          row.quantity === nextRows[index].quantity,
+      );
+
+    if (unchanged) {
+      return this.findOne(organizationId, item.id);
+    }
 
     await this.prisma.$transaction(async (tx) => {
       await tx.comboComponent.deleteMany({ where: { comboId: item.id } });
@@ -1249,5 +1391,29 @@ function normalizeOptional(value: string | undefined | null) {
 function normalizeSku(value: string | undefined | null) {
   const trimmed = value?.trim().toUpperCase();
   return trimmed ? trimmed : null;
+}
+
+/** Compara dos listas de ingredientes con cantidad sin importar el orden. */
+function sameIngredientQuantities(
+  current: ReadonlyArray<{ ingredientId: string; quantity: Prisma.Decimal }>,
+  next: ReadonlyArray<{ ingredientId: string; quantity: Prisma.Decimal }>,
+) {
+  if (current.length !== next.length) return false;
+
+  const sort = (
+    list: ReadonlyArray<{ ingredientId: string; quantity: Prisma.Decimal }>,
+  ) =>
+    [...list].sort((left, right) =>
+      left.ingredientId.localeCompare(right.ingredientId),
+    );
+
+  const left = sort(current);
+  const right = sort(next);
+
+  return left.every(
+    (row, index) =>
+      row.ingredientId === right[index].ingredientId &&
+      row.quantity.equals(right[index].quantity),
+  );
 }
 

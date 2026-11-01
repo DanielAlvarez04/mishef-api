@@ -676,13 +676,20 @@ export class AuthService {
       }
     }
 
-    const updated = await this.prisma.user.update({
-      where: { id: userId },
-      data: {
-        name: dto.name !== undefined ? dto.name.trim() || null : undefined,
-        username,
-      },
-    });
+    const name = dto.name === undefined ? undefined : dto.name.trim() || null;
+    const nameChanged = name !== undefined && name !== user.name;
+    const usernameChanged = username !== undefined && username !== user.username;
+
+    const updated =
+      nameChanged || usernameChanged
+        ? await this.prisma.user.update({
+            where: { id: userId },
+            data: {
+              ...(nameChanged ? { name } : {}),
+              ...(usernameChanged ? { username } : {}),
+            },
+          })
+        : user;
 
     return {
       id: updated.id,

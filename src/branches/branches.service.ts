@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { isEmptyPatch } from '../common/patch';
 import { BRANCH_LIMITS } from './branch-limits';
 import { CreateBranchDto, UpdateBranchDto } from './dto/branch.dto';
 
@@ -104,30 +105,39 @@ export class BranchesService {
 
     if (dto.name !== undefined) {
       const name = dto.name.trim();
-      const existing = await this.prisma.branch.findUnique({
-        where: { organizationId_name: { organizationId: orgId, name } },
-      });
 
-      if (existing && existing.id !== branch.id) {
-        throw new ConflictException('Ya existe una sucursal con ese nombre');
+      if (name !== branch.name) {
+        const existing = await this.prisma.branch.findUnique({
+          where: { organizationId_name: { organizationId: orgId, name } },
+        });
+
+        if (existing && existing.id !== branch.id) {
+          throw new ConflictException('Ya existe una sucursal con ese nombre');
+        }
+
+        data.name = name;
       }
-
-      data.name = name;
     }
 
     if (dto.address !== undefined) {
-      data.address = dto.address.trim() || null;
+      const address = dto.address.trim() || null;
+      if (address !== branch.address) data.address = address;
     }
 
     if (dto.phone !== undefined) {
-      data.phone = dto.phone.trim() || null;
+      const phone = dto.phone.trim() || null;
+      if (phone !== branch.phone) data.phone = phone;
     }
 
-    if (dto.isActive !== undefined) {
+    if (dto.isActive !== undefined && dto.isActive !== branch.isActive) {
       if (dto.isActive && !branch.isActive) {
         await this.assertWithinLimit(orgId, branch.id);
       }
       data.isActive = dto.isActive;
+    }
+
+    if (isEmptyPatch(data)) {
+      return this.serialize(branch);
     }
 
     const updated = await this.prisma.branch.update({

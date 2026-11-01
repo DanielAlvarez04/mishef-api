@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { isEmptyPatch, sameDecimal, sameStringSet } from '../common/patch';
 import {
   isValidDomain,
   normalizeDomain,
@@ -59,6 +60,18 @@ export class OrganizationsService {
   }
 
   async update(organizationId: string | null, dto: UpdateOrganizationDto) {
+    if (!organizationId) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    const current = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+    });
+
+    if (!current) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
     const data: {
       name?: string;
       domain?: string;
@@ -71,7 +84,8 @@ export class OrganizationsService {
     } = {};
 
     if (dto.name !== undefined) {
-      data.name = dto.name.trim();
+      const name = dto.name.trim();
+      if (name !== current.name) data.name = name;
     }
 
     if (dto.domain !== undefined) {
@@ -81,15 +95,17 @@ export class OrganizationsService {
         throw new BadRequestException('El dominio no es válido');
       }
 
-      const taken = await this.prisma.organization.findUnique({
-        where: { domain },
-      });
+      if (domain !== current.domain) {
+        const taken = await this.prisma.organization.findUnique({
+          where: { domain },
+        });
 
-      if (taken && taken.id !== organizationId) {
-        throw new ConflictException('Ese dominio ya está en uso');
+        if (taken && taken.id !== organizationId) {
+          throw new ConflictException('Ese dominio ya está en uso');
+        }
+
+        data.domain = domain;
       }
-
-      data.domain = domain;
     }
 
     if (dto.taxRate !== undefined) {
@@ -99,36 +115,45 @@ export class OrganizationsService {
         );
       }
 
-      data.taxRate = new Prisma.Decimal(dto.taxRate);
+      const taxRate = new Prisma.Decimal(dto.taxRate);
+      if (!sameDecimal(taxRate, current.taxRate)) data.taxRate = taxRate;
     }
 
-    if (dto.businessType !== undefined) {
+    if (dto.businessType !== undefined && dto.businessType !== current.businessType) {
       data.businessType = dto.businessType;
     }
 
-    if (dto.serviceTypes !== undefined) {
+    if (
+      dto.serviceTypes !== undefined &&
+      !sameStringSet(current.serviceTypes, dto.serviceTypes)
+    ) {
       data.serviceTypes = dto.serviceTypes;
     }
 
-    if (dto.goals !== undefined) {
+    if (dto.goals !== undefined && !sameStringSet(current.goals, dto.goals)) {
       data.goals = dto.goals;
     }
 
-    if (dto.hasBranches !== undefined) {
+    if (
+      dto.hasBranches !== undefined &&
+      dto.hasBranches !== current.hasBranches
+    ) {
       data.hasBranches = dto.hasBranches;
     }
 
-    if (dto.useCoreSuggestions !== undefined) {
+    if (
+      dto.useCoreSuggestions !== undefined &&
+      dto.useCoreSuggestions !== (current.useCoreSuggestions ?? true)
+    ) {
       data.useCoreSuggestions = dto.useCoreSuggestions;
     }
 
-    if (!organizationId) {
-      throw new NotFoundException('Organización no encontrada');
-    }
-    const organization = await this.prisma.organization.update({
-      where: { id: organizationId },
-      data,
-    });
+    const organization = isEmptyPatch(data)
+      ? current
+      : await this.prisma.organization.update({
+          where: { id: organizationId },
+          data,
+        });
 
     return {
       id: organization.id,

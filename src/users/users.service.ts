@@ -7,6 +7,7 @@ import {
 import { hash } from 'argon2';
 import { Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { sameStringSet } from '../common/patch';
 import {
   isValidUsername,
   normalizeUsername,
@@ -252,7 +253,7 @@ export class UsersService {
       await this.assertAnotherAdminExists(organizationId, userId);
     }
 
-    if (dto.isActive === false) {
+    if (dto.isActive === false && membership.isActive) {
       await this.assertNotLastActiveAdmin(organizationId, membership);
     }
 
@@ -273,13 +274,41 @@ export class UsersService {
           .join(' ') || null
       : undefined;
 
+    const nameIsDifferent =
+      nextName !== undefined && nextName !== membership.user.name;
+    const rolesChanged =
+      dto.roles !== undefined && !sameStringSet(membership.roles, dto.roles);
+    const isActiveChanged =
+      dto.isActive !== undefined && dto.isActive !== membership.isActive;
+    const branchChanged =
+      branchId !== undefined && branchId !== membership.branchId;
+
+    // Si no cambió nada, no se escribe ni se revocan sesiones.
+    if (
+      !nameIsDifferent &&
+      !passwordHash &&
+      !rolesChanged &&
+      !isActiveChanged &&
+      !branchChanged
+    ) {
+      return {
+        id: userId,
+        username: membership.user.username,
+        email: membership.user.email,
+        name: membership.user.name,
+        roles: membership.roles,
+        branchId: membership.branchId,
+        isActive: membership.isActive,
+      };
+    }
+
     return this.prisma.$transaction(async (tx) => {
-      if (nextName !== undefined || passwordHash) {
+      if (nameIsDifferent || passwordHash) {
         await tx.user.update({
           where: { id: userId },
           data: {
-            name: nextName,
-            passwordHash,
+            ...(nameIsDifferent ? { name: nextName } : {}),
+            ...(passwordHash ? { passwordHash } : {}),
           },
         });
       }
@@ -291,20 +320,23 @@ export class UsersService {
         });
       }
 
-      const updated = await tx.membership.update({
-        where: { id: membership.id },
-        data: {
-          roles: dto.roles,
-          isActive: dto.isActive,
-          ...(branchId !== undefined ? { branchId } : {}),
-        },
-      });
+      const updated =
+        rolesChanged || isActiveChanged || branchChanged
+          ? await tx.membership.update({
+              where: { id: membership.id },
+              data: {
+                ...(rolesChanged ? { roles: dto.roles } : {}),
+                ...(isActiveChanged ? { isActive: dto.isActive } : {}),
+                ...(branchChanged ? { branchId } : {}),
+              },
+            })
+          : membership;
 
       return {
         id: userId,
         username: membership.user.username,
         email: membership.user.email,
-        name: nextName !== undefined ? nextName : membership.user.name,
+        name: nameIsDifferent ? nextName : membership.user.name,
         roles: updated.roles,
         branchId: updated.branchId,
         isActive: updated.isActive,

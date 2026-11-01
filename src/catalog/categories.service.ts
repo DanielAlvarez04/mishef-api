@@ -4,8 +4,9 @@
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { CategoryKind } from '@prisma/client';
+import { CategoryKind, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { isEmptyPatch } from '../common/patch';
 import { CreateCategoryDto, UpdateCategoryDto } from './dto/category.dto';
 
 @Injectable()
@@ -80,17 +81,32 @@ export class CategoriesService {
       }
     }
 
+    const name = dto.name === undefined ? undefined : dto.name.trim();
+    const description =
+      dto.description === undefined
+        ? undefined
+        : normalizeOptional(dto.description);
+
+    const data: Prisma.CategoryUncheckedUpdateInput = {};
+
+    if (name !== undefined && name !== category.name) data.name = name;
+    if (description !== undefined && description !== category.description) {
+      data.description = description;
+    }
+    if (dto.sortOrder !== undefined && dto.sortOrder !== category.sortOrder) {
+      data.sortOrder = dto.sortOrder;
+    }
+    if (dto.isActive !== undefined && dto.isActive !== category.isActive) {
+      data.isActive = dto.isActive;
+    }
+
+    if (isEmptyPatch(data)) {
+      return category;
+    }
+
     return this.prisma.category.update({
       where: { id: category.id },
-      data: {
-        name: dto.name?.trim(),
-        description:
-          dto.description === undefined
-            ? undefined
-            : normalizeOptional(dto.description),
-        sortOrder: dto.sortOrder,
-        isActive: dto.isActive,
-      },
+      data,
     });
   }
 

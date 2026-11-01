@@ -10,6 +10,7 @@ import {
   UnitCode,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { isEmptyPatch, sameDecimal } from '../common/patch';
 import { QuantityConverter } from '../common/quantity-converter.service';
 import { categoryInitials } from '../common/sku';
 import { CORE_CATEGORIES } from '../catalog/core-categories';
@@ -602,32 +603,58 @@ export class InventoryService {
 
     const displayUnit = dto.displayUnit ?? ingredient.displayUnit;
 
-    const updated = await this.prisma.$transaction(async (tx) => {
-      const next = await tx.ingredient.update({
-        where: { id: ingredient.id },
-        data: {
-          name: dto.name?.trim(),
-          displayUnit: dto.displayUnit,
-          minStock:
-            dto.minStock === undefined
-              ? undefined
-              : toCanonicalQuantity(dto.minStock, displayUnit),
-          maxStock:
-            dto.maxStock === undefined
-              ? undefined
-              : toCanonicalQuantity(dto.maxStock, displayUnit),
-          unitCost:
-            dto.unitCost === undefined
-              ? undefined
-              : toCanonicalCost(dto.unitCost, displayUnit),
-          ...(nextCategoryId ? { categoryId: nextCategoryId } : {}),
-          ...(nextSku ? { sku: nextSku } : {}),
-          locationId: dto.locationId || null,
-          isActive: dto.isActive,
-        },
-      });
+    const name = dto.name === undefined ? undefined : dto.name.trim();
+    const minStock =
+      dto.minStock === undefined
+        ? undefined
+        : toCanonicalQuantity(dto.minStock, displayUnit);
+    const maxStock =
+      dto.maxStock === undefined
+        ? undefined
+        : toCanonicalQuantity(dto.maxStock, displayUnit);
+    const unitCost =
+      dto.unitCost === undefined
+        ? undefined
+        : toCanonicalCost(dto.unitCost, displayUnit);
 
-      return next;
+    const data: Prisma.IngredientUncheckedUpdateInput = {};
+
+    if (name !== undefined && name !== ingredient.name) data.name = name;
+    if (dto.displayUnit !== undefined && dto.displayUnit !== ingredient.displayUnit) {
+      data.displayUnit = dto.displayUnit;
+    }
+    if (minStock !== undefined && !minStock.equals(ingredient.minStock)) {
+      data.minStock = minStock;
+    }
+    if (maxStock !== undefined && !sameDecimal(maxStock, ingredient.maxStock)) {
+      data.maxStock = maxStock;
+    }
+    if (unitCost !== undefined && !sameDecimal(unitCost, ingredient.unitCost)) {
+      data.unitCost = unitCost;
+    }
+    if (nextCategoryId && nextCategoryId !== ingredient.categoryId) {
+      data.categoryId = nextCategoryId;
+    }
+    if (nextSku && nextSku !== ingredient.sku) data.sku = nextSku;
+    // Solo se toca la ubicación si el formulario la envió: así un PATCH parcial
+    // no borra la ubicación actual.
+    if (
+      dto.locationId !== undefined &&
+      (dto.locationId || null) !== ingredient.locationId
+    ) {
+      data.locationId = dto.locationId || null;
+    }
+    if (dto.isActive !== undefined && dto.isActive !== ingredient.isActive) {
+      data.isActive = dto.isActive;
+    }
+
+    if (isEmptyPatch(data)) {
+      return this.withFlags(ingredient);
+    }
+
+    const updated = await this.prisma.ingredient.update({
+      where: { id: ingredient.id },
+      data,
     });
 
     return this.withFlags(updated);
