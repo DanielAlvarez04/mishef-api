@@ -4,7 +4,12 @@
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, CategoryKind } from '@prisma/client';
+import {
+  Prisma,
+  CategoryKind,
+  OptionEffectAction,
+  OptionSelection,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { IngredientQuantitiesService } from './ingredient-quantities.service';
 import { fromCanonicalQuantity, toMoney } from '../common/units';
@@ -28,7 +33,13 @@ import {
   UpdateExtraDto,
   UpdateItemDto,
   UpdateVariantDto,
+  ComboPromotionInputDto,
 } from './dto/item.dto';
+import {
+  ItemOptionEffectInputDto,
+  ItemOptionGroupInputDto,
+} from './dto/option.dto';
+import { isNoPriceOptionGroup } from './option-presets';
 
 const itemListInclude = {
   category: { select: { id: true, name: true } },
@@ -43,9 +54,53 @@ const itemListInclude = {
     },
   },
   _count: { select: { recipes: true } },
+  comboComponents: {
+    include: {
+      componentItem: {
+        select: { id: true, name: true, price: true, isActive: true },
+      },
+      variant: { select: { id: true, name: true } },
+    },
+  },
   recipes: {
     select: { id: true, name: true, variantId: true, isActive: true },
     orderBy: { variantId: 'asc' },
+  },
+  optionGroups: {
+    orderBy: { sortOrder: 'asc' },
+    include: {
+      group: { select: { id: true, name: true } },
+      values: {
+        where: { isActive: true },
+        orderBy: [{ sortOrder: 'asc' }, { value: { name: 'asc' } }],
+        include: {
+          value: {
+            select: {
+              id: true,
+              name: true,
+              kitchenLabel: true,
+              isActive: true,
+            },
+          },
+          effects: {
+            select: {
+              id: true,
+              action: true,
+              recipeIngredientId: true,
+              ingredientId: true,
+              quantity: true,
+            },
+          },
+        },
+      },
+    },
+  },
+  promotions: { orderBy: { createdAt: 'asc' } },
+  menuItems: {
+    orderBy: { sortOrder: 'asc' },
+    include: {
+      menu: { select: { id: true, name: true, isActive: true } },
+    },
   },
 } satisfies Prisma.ItemInclude;
 
@@ -101,6 +156,41 @@ const itemDetailInclude = {
       },
     },
   },
+  optionGroups: {
+    orderBy: { sortOrder: 'asc' },
+    include: {
+      group: { select: { id: true, name: true, description: true } },
+      values: {
+        orderBy: [{ sortOrder: 'asc' }, { value: { name: 'asc' } }],
+        include: {
+          value: {
+            select: {
+              id: true,
+              name: true,
+              kitchenLabel: true,
+              isActive: true,
+            },
+          },
+          effects: {
+            select: {
+              id: true,
+              action: true,
+              recipeIngredientId: true,
+              ingredientId: true,
+              quantity: true,
+            },
+          },
+        },
+      },
+    },
+  },
+  promotions: { orderBy: { createdAt: 'asc' } },
+  menuItems: {
+    orderBy: { sortOrder: 'asc' },
+    include: {
+      menu: { select: { id: true, name: true, isActive: true } },
+    },
+  },
 } satisfies Prisma.ItemInclude;
 
 export interface ItemFilters {
@@ -117,10 +207,10 @@ export class ItemsService {
     private readonly ingredientQuantities: IngredientQuantitiesService,
   ) {}
 
-  list(organizationId: string | null, filters: ItemFilters = {}) {
+  async list(organizationId: string | null, filters: ItemFilters = {}) {
     const search = filters.search?.trim();
 
-    return this.prisma.item.findMany({
+    const items = await this.prisma.item.findMany({
       where: {
         organizationId,
         ...(filters.includeInactive ? {} : { isActive: true }),
@@ -142,6 +232,8 @@ export class ItemsService {
         { name: 'asc' },
       ],
     });
+
+    return items.map((item) => this.withMenus(item));
   }
 
   async findOne(organizationId: string | null, id: string) {
@@ -158,14 +250,35 @@ export class ItemsService {
   }
 
   /**
+   * Los artículos exponen los menús donde se usan como `menus` planos
+   * (`{ id, name, isActive }`), que es lo que consume la tabla del catálogo.
+   */
+  private withMenus<
+    T extends {
+      menuItems: Array<{
+        menu: { id: string; name: string; isActive: boolean };
+      }>;
+    },
+  >(item: T) {
+    const { menuItems, ...rest } = item;
+
+    return {
+      ...rest,
+      menus: menuItems.map((row) => row.menu),
+    };
+  }
+
+  /**
    * Las cantidades de recetas y extras se guardan en la unidad canónica del
    * ingrediente; la UI las recibe en su unidad visible.
    */
   private withDisplayUnits(
     item: Prisma.ItemGetPayload<{ include: typeof itemDetailInclude }>,
   ) {
+    const base = this.withMenus(item);
+
     return {
-      ...item,
+      ...base,
       extras: (item.extras ?? []).map((extra) => ({
         ...extra,
         ingredients: (extra.ingredients ?? []).map((item) => ({
@@ -253,6 +366,14 @@ export class ItemsService {
       })),
     );
 
+    const optionGroups = await this.validateOptionGroups(
+      organizationId,
+      null,
+      dto.optionGroups ?? [],
+    );
+
+    const promotions = this.promotionData(dto.promotions ?? []);
+
     const item = await this.prisma.item.create({
       data: {
         organizationId,
@@ -306,6 +427,27 @@ export class ItemsService {
               : {}),
           })),
         },
+        optionGroups: {
+          create: optionGroups.map((group) => ({
+            group: { connect: { id: group.groupId } },
+            isRequired: group.isRequired,
+            selection: group.selection,
+            minSelect: group.minSelect,
+            maxSelect: group.maxSelect,
+            sortOrder: group.sortOrder,
+            values: {
+              create: group.values.map((value) => ({
+                value: { connect: { id: value.valueId } },
+                priceDelta: value.priceDelta,
+                isDefault: value.isDefault,
+                sortOrder: value.sortOrder,
+                isActive: value.isActive,
+                effects: { create: value.effects },
+              })),
+            },
+          })),
+        },
+        promotions: { create: promotions },
       },
     });
 
@@ -343,6 +485,9 @@ export class ItemsService {
     if (dto.isCombo === false && item.isCombo) {
       await this.prisma.comboComponent.deleteMany({
         where: { comboId: item.id },
+      });
+      await this.prisma.comboPromotion.deleteMany({
+        where: { itemId: item.id },
       });
     }
 
@@ -427,6 +572,22 @@ export class ItemsService {
     } else if (nextSku && nextSku !== item.sku) {
       // La base cambió sin tocar presentaciones: solo se renumeran los sufijos.
       await this.renumberVariantSkus(item.id, nextSku);
+    }
+
+    if (dto.optionGroups !== undefined) {
+      await this.syncOptionGroups(
+        organizationId,
+        item.id,
+        dto.optionGroups,
+      );
+    }
+
+    if (dto.promotions !== undefined) {
+      await this.replaceComboPromotions(
+        organizationId,
+        item.id,
+        dto.promotions,
+      );
     }
 
     return this.findOne(organizationId, item.id);
@@ -1178,6 +1339,544 @@ export class ItemsService {
     });
 
     return this.findOne(organizationId, item.id);
+  }
+
+  // --------------------------------------------------------------------------
+  // Opciones y promociones de combo
+  // --------------------------------------------------------------------------
+
+  async replaceComboPromotions(
+    organizationId: string | null,
+    itemId: string,
+    promotions: ComboPromotionInputDto[],
+  ) {
+    const item = await this.getItem(organizationId, itemId);
+
+    if (!item.isCombo && promotions.length > 0) {
+      throw new BadRequestException(
+        'Solo los combos pueden tener promociones',
+      );
+    }
+
+    const normalized = this.promotionData(promotions);
+
+    const current = await this.prisma.comboPromotion.findMany({
+      where: { itemId: item.id },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const signature = (rows: ReadonlyArray<Record<string, unknown>>) =>
+      JSON.stringify(
+        rows.map((row) => ({
+          name: row.name,
+          type: row.type,
+          value: new Prisma.Decimal(row.value as Prisma.Decimal).toFixed(2),
+          startsAt: row.startsAt ? new Date(row.startsAt as Date).toISOString() : null,
+          endsAt: row.endsAt ? new Date(row.endsAt as Date).toISOString() : null,
+          daysOfWeek: [...((row.daysOfWeek as number[]) ?? [])].sort(),
+          startTime: row.startTime ?? null,
+          endTime: row.endTime ?? null,
+          isActive: row.isActive,
+        })),
+      );
+
+    if (signature(current) === signature(normalized)) {
+      return this.findOne(organizationId, item.id);
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.comboPromotion.deleteMany({ where: { itemId: item.id } });
+
+      if (normalized.length > 0) {
+        await tx.comboPromotion.createMany({
+          data: normalized.map((promotion) => ({
+            itemId: item.id,
+            ...promotion,
+          })),
+        });
+      }
+    });
+
+    return this.findOne(organizationId, item.id);
+  }
+
+  private promotionData(input: ComboPromotionInputDto[]) {
+    return input.map((promotion) => {
+      const value = toMoney(promotion.value ?? 0);
+
+      if (promotion.type === 'PERCENT' && value.gt(100)) {
+        throw new BadRequestException(
+          'El porcentaje de una promoción no puede superar 100',
+        );
+      }
+
+      const startsAt = promotion.startsAt
+        ? new Date(promotion.startsAt)
+        : null;
+      const endsAt = promotion.endsAt ? new Date(promotion.endsAt) : null;
+
+      if (startsAt && Number.isNaN(startsAt.getTime())) {
+        throw new BadRequestException('La fecha de inicio no es válida');
+      }
+      if (endsAt && Number.isNaN(endsAt.getTime())) {
+        throw new BadRequestException('La fecha de fin no es válida');
+      }
+      if (startsAt && endsAt && endsAt < startsAt) {
+        throw new BadRequestException(
+          'La fecha de fin debe ser posterior a la de inicio',
+        );
+      }
+
+      return {
+        name: promotion.name.trim(),
+        type: promotion.type,
+        value,
+        startsAt,
+        endsAt,
+        daysOfWeek: [...new Set(promotion.daysOfWeek ?? [])].sort(
+          (left, right) => left - right,
+        ),
+        startTime: promotion.startTime || null,
+        endTime: promotion.endTime || null,
+        isActive: promotion.isActive ?? true,
+      };
+    });
+  }
+
+  private async validateOptionGroups(
+    organizationId: string | null,
+    itemId: string | null,
+    input: ItemOptionGroupInputDto[],
+  ) {
+    if (input.length === 0) return [];
+
+    const groupIds = input.map((group) => group.groupId);
+
+    if (new Set(groupIds).size !== groupIds.length) {
+      throw new BadRequestException(
+        'Un grupo de opciones no puede repetirse en el artículo',
+      );
+    }
+
+    const groups = await this.prisma.optionGroup.findMany({
+      where: { id: { in: groupIds }, organizationId },
+      include: { values: { select: { id: true } } },
+    });
+
+    const assignedGroupIds = itemId
+      ? new Set(
+          (
+            await this.prisma.itemOptionGroup.findMany({
+              where: { itemId },
+              select: { groupId: true },
+            })
+          ).map((row) => row.groupId),
+        )
+      : new Set<string>();
+
+    const byId = new Map(groups.map((group) => [group.id, group]));
+
+    const ingredientIds = new Set<string>();
+    const slotIds = new Set<string>();
+
+    for (const group of input) {
+      for (const value of group.values) {
+        for (const effect of value.effects ?? []) {
+          if (effect.ingredientId) ingredientIds.add(effect.ingredientId);
+          if (effect.recipeIngredientId) {
+            slotIds.add(effect.recipeIngredientId);
+          }
+        }
+      }
+    }
+
+    const [ingredients, slots] = await Promise.all([
+      ingredientIds.size > 0
+        ? this.prisma.ingredient.findMany({
+            where: { id: { in: [...ingredientIds] }, organizationId },
+            select: { id: true },
+          })
+        : [],
+      itemId && slotIds.size > 0
+        ? this.prisma.recipeIngredient.findMany({
+            where: { id: { in: [...slotIds] }, recipe: { itemId } },
+            select: { id: true },
+          })
+        : [],
+    ]);
+
+    const knownIngredients = new Set(ingredients.map((row) => row.id));
+    const knownSlots = new Set(slots.map((row) => row.id));
+
+    return input.map((group, groupIndex) => {
+      const catalog = byId.get(group.groupId);
+
+      if (!catalog) {
+        throw new NotFoundException('Grupo de opciones no encontrado');
+      }
+
+      if (!catalog.isActive && !assignedGroupIds.has(catalog.id)) {
+        throw new BadRequestException(
+          `El grupo ${catalog.name} está desactivado`,
+        );
+      }
+
+      const selection = group.selection ?? OptionSelection.SINGLE;
+      const isRequired = group.isRequired ?? false;
+      const minSelect =
+        group.minSelect ?? (isRequired ? 1 : 0);
+      const maxSelect =
+        group.maxSelect ?? (selection === OptionSelection.SINGLE ? 1 : group.values.length);
+
+      if (selection === OptionSelection.SINGLE && maxSelect > 1) {
+        throw new BadRequestException(
+          `El grupo ${catalog.name} es de selección única`,
+        );
+      }
+
+      if (maxSelect < minSelect) {
+        throw new BadRequestException(
+          `El máximo de ${catalog.name} no puede ser menor que el mínimo`,
+        );
+      }
+
+      if (maxSelect > group.values.length) {
+        throw new BadRequestException(
+          `El grupo ${catalog.name} no tiene suficientes opciones para el máximo configurado`,
+        );
+      }
+
+      if (isRequired && minSelect < 1) {
+        throw new BadRequestException(
+          `El grupo obligatorio ${catalog.name} debe pedir al menos una opción`,
+        );
+      }
+
+      const catalogValues = new Set(catalog.values.map((value) => value.id));
+      const valueIds = group.values.map((value) => value.valueId);
+
+      if (new Set(valueIds).size !== valueIds.length) {
+        throw new BadRequestException(
+          `Un valor no puede repetirse en ${catalog.name}`,
+        );
+      }
+
+      const values = group.values.map((value, valueIndex) => {
+        if (!catalogValues.has(value.valueId)) {
+          throw new BadRequestException(
+            `La opción no pertenece al grupo ${catalog.name}`,
+          );
+        }
+
+        // Los grupos "Sin ..." no pueden cargar un precio extra: la opción
+        // solo quita un ingrediente.
+        const priceDelta = isNoPriceOptionGroup(catalog.name)
+          ? new Prisma.Decimal(0)
+          : toMoney(value.priceDelta ?? 0);
+
+        return {
+          valueId: value.valueId,
+          priceDelta,
+          isDefault: value.isDefault ?? false,
+          sortOrder: value.sortOrder ?? valueIndex,
+          isActive: value.isActive ?? true,
+          effects: (value.effects ?? []).map((effect) =>
+            this.validateOptionEffect(
+              catalog.name,
+              effect,
+              knownIngredients,
+              knownSlots,
+              Boolean(itemId),
+            ),
+          ),
+        };
+      });
+
+      const defaults = values.filter((value) => value.isDefault);
+
+      if (
+        isRequired &&
+        values.length > 0 &&
+        !values.some((value) => value.isActive)
+      ) {
+        throw new BadRequestException(
+          `El grupo obligatorio ${catalog.name} necesita al menos una opción disponible`,
+        );
+      }
+
+      if (
+        selection === OptionSelection.SINGLE &&
+        values.length > 0 &&
+        defaults.length !== 1
+      ) {
+        throw new BadRequestException(
+          `Elige una opción por defecto para ${catalog.name}`,
+        );
+      }
+
+      if (defaults.length > maxSelect) {
+        throw new BadRequestException(
+          `Las opciones por defecto de ${catalog.name} superan el máximo permitido`,
+        );
+      }
+
+      return {
+        groupId: group.groupId,
+        isRequired,
+        selection,
+        minSelect,
+        maxSelect,
+        sortOrder: group.sortOrder ?? groupIndex,
+        values,
+      };
+    });
+  }
+
+  private validateOptionEffect(
+    groupName: string,
+    effect: ItemOptionEffectInputDto,
+    knownIngredients: Set<string>,
+    knownSlots: Set<string>,
+    hasItem: boolean,
+  ) {
+    const recipeIngredientId = effect.recipeIngredientId ?? null;
+    const ingredientId = effect.ingredientId ?? null;
+
+    if (effect.action === OptionEffectAction.ADD && !ingredientId) {
+      throw new BadRequestException(
+        `El efecto de ${groupName} necesita un insumo que añadir`,
+      );
+    }
+
+    if (
+      effect.action === OptionEffectAction.REPLACE &&
+      (!recipeIngredientId || !ingredientId)
+    ) {
+      throw new BadRequestException(
+        `El reemplazo de ${groupName} necesita el insumo original y el nuevo`,
+      );
+    }
+
+    if (
+      effect.action === OptionEffectAction.REMOVE &&
+      !recipeIngredientId &&
+      !ingredientId
+    ) {
+      throw new BadRequestException(
+        `La exclusión de ${groupName} necesita un insumo o una línea de receta`,
+      );
+    }
+
+    if (ingredientId && !knownIngredients.has(ingredientId)) {
+      throw new NotFoundException('Ingrediente no encontrado');
+    }
+
+    if (recipeIngredientId && !hasItem) {
+      throw new BadRequestException(
+        'Los efectos sobre la receta se configuran después de crear la receta',
+      );
+    }
+
+    if (recipeIngredientId && !knownSlots.has(recipeIngredientId)) {
+      throw new BadRequestException(
+        'El efecto apunta a un insumo que no pertenece a la receta',
+      );
+    }
+
+    if (effect.quantity !== undefined && effect.quantity <= 0) {
+      throw new BadRequestException(
+        'La cantidad del efecto debe ser mayor que cero',
+      );
+    }
+
+    return {
+      action: effect.action,
+      recipeIngredientId,
+      ingredientId,
+      quantity:
+        effect.quantity === undefined
+          ? null
+          : new Prisma.Decimal(effect.quantity),
+    };
+  }
+
+  private async syncOptionGroups(
+    organizationId: string | null,
+    itemId: string,
+    input: ItemOptionGroupInputDto[],
+  ) {
+    const normalized = await this.validateOptionGroups(
+      organizationId,
+      itemId,
+      input,
+    );
+
+    const existing = await this.prisma.itemOptionGroup.findMany({
+      where: { itemId },
+      include: {
+        values: { include: { effects: true } },
+      },
+    });
+
+    const incoming = new Map(normalized.map((group) => [group.groupId, group]));
+    const removed = existing.filter(
+      (group) => !incoming.has(group.groupId),
+    );
+
+    await this.prisma.$transaction(async (tx) => {
+      if (removed.length > 0) {
+        await tx.itemOptionGroup.deleteMany({
+          where: { id: { in: removed.map((group) => group.id) } },
+        });
+      }
+
+      for (const group of normalized) {
+        const current = existing.find(
+          (candidate) => candidate.groupId === group.groupId,
+        );
+
+        if (!current) {
+          await tx.itemOptionGroup.create({
+            data: {
+              itemId,
+              groupId: group.groupId,
+              isRequired: group.isRequired,
+              selection: group.selection,
+              minSelect: group.minSelect,
+              maxSelect: group.maxSelect,
+              sortOrder: group.sortOrder,
+              values: {
+                create: group.values.map((value) => ({
+                  valueId: value.valueId,
+                  priceDelta: value.priceDelta,
+                  isDefault: value.isDefault,
+                  sortOrder: value.sortOrder,
+                  isActive: value.isActive,
+                  effects: { create: value.effects },
+                })),
+              },
+            },
+          });
+          continue;
+        }
+
+        const groupData: Prisma.ItemOptionGroupUncheckedUpdateInput = {};
+
+        if (group.isRequired !== current.isRequired) {
+          groupData.isRequired = group.isRequired;
+        }
+        if (group.selection !== current.selection) {
+          groupData.selection = group.selection;
+        }
+        if (group.minSelect !== current.minSelect) {
+          groupData.minSelect = group.minSelect;
+        }
+        if (group.maxSelect !== current.maxSelect) {
+          groupData.maxSelect = group.maxSelect;
+        }
+        if (group.sortOrder !== current.sortOrder) {
+          groupData.sortOrder = group.sortOrder;
+        }
+
+        if (!isEmptyPatch(groupData)) {
+          await tx.itemOptionGroup.update({
+            where: { id: current.id },
+            data: groupData,
+          });
+        }
+
+        const incomingValues = new Map(
+          group.values.map((value) => [value.valueId, value]),
+        );
+        const removedValues = current.values.filter(
+          (value) => !incomingValues.has(value.valueId),
+        );
+
+        if (removedValues.length > 0) {
+          await tx.itemOptionValue.deleteMany({
+            where: { id: { in: removedValues.map((value) => value.id) } },
+          });
+        }
+
+        for (const value of group.values) {
+          const match = current.values.find(
+            (candidate) => candidate.valueId === value.valueId,
+          );
+
+          if (!match) {
+            await tx.itemOptionValue.create({
+              data: {
+                itemOptionGroupId: current.id,
+                valueId: value.valueId,
+                priceDelta: value.priceDelta,
+                isDefault: value.isDefault,
+                sortOrder: value.sortOrder,
+                isActive: value.isActive,
+                effects: { create: value.effects },
+              },
+            });
+            continue;
+          }
+
+          const valueData: Prisma.ItemOptionValueUncheckedUpdateInput = {};
+
+          if (!value.priceDelta.equals(match.priceDelta)) {
+            valueData.priceDelta = value.priceDelta;
+          }
+          if (value.isDefault !== match.isDefault) {
+            valueData.isDefault = value.isDefault;
+          }
+          if (value.sortOrder !== match.sortOrder) {
+            valueData.sortOrder = value.sortOrder;
+          }
+          if (value.isActive !== match.isActive) {
+            valueData.isActive = value.isActive;
+          }
+
+          if (!isEmptyPatch(valueData)) {
+            await tx.itemOptionValue.update({
+              where: { id: match.id },
+              data: valueData,
+            });
+          }
+
+          if (this.effectsSignature(value.effects) !== this.effectsSignature(match.effects)) {
+            await tx.itemOptionEffect.deleteMany({
+              where: { itemOptionValueId: match.id },
+            });
+
+            if (value.effects.length > 0) {
+              await tx.itemOptionEffect.createMany({
+                data: value.effects.map((effect) => ({
+                  itemOptionValueId: match.id,
+                  ...effect,
+                })),
+              });
+            }
+          }
+        }
+      }
+    });
+  }
+
+  private effectsSignature(
+    effects: ReadonlyArray<{
+      action: OptionEffectAction;
+      recipeIngredientId?: string | null;
+      ingredientId?: string | null;
+      quantity?: Prisma.Decimal | null;
+    }>,
+  ) {
+    return JSON.stringify(
+      [...effects]
+        .map(
+          (effect) =>
+            `${effect.action}|${effect.recipeIngredientId ?? ''}|${
+              effect.ingredientId ?? ''
+            }|${effect.quantity ? new Prisma.Decimal(effect.quantity).toFixed(4) : ''}`,
+        )
+        .sort(),
+    );
   }
 
   // --------------------------------------------------------------------------

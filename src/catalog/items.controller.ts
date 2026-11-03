@@ -26,6 +26,7 @@ import {
   CreateVariantDto,
   DeleteItemsDto,
   ReplaceComboComponentsDto,
+  ReplaceComboPromotionsDto,
   ReplaceExclusionsDto,
   UpdateExtraDto,
   UpdateItemDto,
@@ -232,6 +233,21 @@ export class ItemsController {
       user.organizationId,
       id,
       dto.components,
+    );
+  }
+
+  @ApiOperation({ summary: 'Reemplazar promociones del combo' })
+  @RequirePermissions('catalog:manage')
+  @Put(':id/promotions')
+  replaceComboPromotions(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Body() dto: ReplaceComboPromotionsDto,
+  ) {
+    return this.items.replaceComboPromotions(
+      user.organizationId,
+      id,
+      dto.promotions,
     );
   }
 }

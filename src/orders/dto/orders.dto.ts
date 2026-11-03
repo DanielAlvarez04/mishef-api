@@ -28,7 +28,14 @@ export class RoundItemExtraDto {
   quantity?: number;
 }
 
-/** Línea de una ronda: producto + variante + extras + exclusiones. */
+/** Opción elegida dentro de un grupo (ej. "Salsa roja"). */
+export class RoundItemOptionDto {
+  @IsString()
+  @MaxLength(40)
+  itemOptionValueId!: string;
+}
+
+/** Línea de una ronda: producto + variante + opciones + extras + exclusiones. */
 export class RoundItemDto {
   @IsString()
   @MaxLength(40)
@@ -56,6 +63,14 @@ export class RoundItemDto {
   @ValidateNested({ each: true })
   @Type(() => RoundItemExtraDto)
   extras?: RoundItemExtraDto[];
+
+  /** Opciones de los grupos configurados en el artículo. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @ValidateNested({ each: true })
+  @Type(() => RoundItemOptionDto)
+  options?: RoundItemOptionDto[];
 
   @IsOptional()
   @IsArray()

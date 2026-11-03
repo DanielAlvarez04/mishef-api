@@ -18,7 +18,8 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
-import { UnitCode } from '@prisma/client';
+import { UnitCode, PromotionType } from '@prisma/client';
+import { ItemOptionGroupInputDto } from './option.dto';
 
 export class CreateVariantDto {
   @IsString()
@@ -172,6 +173,59 @@ export class ComboComponentInputDto {
   quantity?: number;
 }
 
+/** Promoción de un combo: descuento, 2x1 o vigencia por horario. */
+export class ComboPromotionInputDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(80)
+  name!: string;
+
+  @IsEnum(PromotionType)
+  type!: PromotionType;
+
+  /** Porcentaje (0-100) o importe fijo en MXN. BOGO lo ignora. */
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  value?: number;
+
+  @IsOptional()
+  @IsString()
+  startsAt?: string | null;
+
+  @IsOptional()
+  @IsString()
+  endsAt?: string | null;
+
+  /** 0 = domingo … 6 = sábado. Vacío = todos los días. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(7)
+  @IsInt({ each: true })
+  @Min(0, { each: true })
+  @Max(6, { each: true })
+  daysOfWeek?: number[];
+
+  /** Hora local "HH:MM"; ambas vacías = todo el día. */
+  @IsOptional()
+  @IsString()
+  @Matches(/^([01]\d|2[0-3]):[0-5]\d$/, {
+    message: 'La hora debe tener el formato HH:MM',
+  })
+  startTime?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^([01]\d|2[0-3]):[0-5]\d$/, {
+    message: 'La hora debe tener el formato HH:MM',
+  })
+  endTime?: string | null;
+
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+}
+
 export class CreateItemDto {
   @IsString()
   @MinLength(1)
@@ -242,6 +296,20 @@ export class CreateItemDto {
   @ValidateNested({ each: true })
   @Type(() => ComboComponentInputDto)
   comboComponents?: ComboComponentInputDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @ValidateNested({ each: true })
+  @Type(() => ItemOptionGroupInputDto)
+  optionGroups?: ItemOptionGroupInputDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => ComboPromotionInputDto)
+  promotions?: ComboPromotionInputDto[];
 }
 
 export class UpdateItemDto {
@@ -305,6 +373,22 @@ export class UpdateItemDto {
   @ValidateNested({ each: true })
   @Type(() => CreateVariantDto)
   variants?: CreateVariantDto[];
+
+  /** Configuración completa de grupos de opciones del artículo. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @ValidateNested({ each: true })
+  @Type(() => ItemOptionGroupInputDto)
+  optionGroups?: ItemOptionGroupInputDto[];
+
+  /** Promociones del combo; reemplaza la lista completa. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => ComboPromotionInputDto)
+  promotions?: ComboPromotionInputDto[];
 }
 
 export class DeleteItemsDto {
@@ -330,4 +414,12 @@ export class ReplaceComboComponentsDto {
   @ValidateNested({ each: true })
   @Type(() => ComboComponentInputDto)
   components!: ComboComponentInputDto[];
+}
+
+export class ReplaceComboPromotionsDto {
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => ComboPromotionInputDto)
+  promotions!: ComboPromotionInputDto[];
 }

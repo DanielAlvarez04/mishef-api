@@ -6,17 +6,24 @@
 } from '@nestjs/common';
 import {
   InventoryMovementType,
+  OptionEffectAction,
+  OptionSelection,
   OrderRoundStatus,
   OrderStatus,
   PaymentStatus,
   Prisma,
+  PromotionType,
   UnitCode,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { AnalyticsService } from '../analytics/analytics.service';
+import { ANALYTICS_EVENTS } from '../analytics/analytics.events';
+import { isNoPriceOptionGroup } from '../catalog/option-presets';
 import {
   CancelOrderDto,
   CreateOrderDto,
   RoundItemDto,
+  RoundItemOptionDto,
   SendRoundDto,
   TransitionRoundDto,
 } from './dto/orders.dto';
@@ -51,6 +58,7 @@ const roundInclude: Prisma.OrderRoundInclude = {
     orderBy: { id: 'asc' },
     include: {
       extras: true,
+      options: true,
       exclusions: {
         include: {
           ingredient: {
@@ -93,7 +101,7 @@ const orderInclude: Prisma.OrderInclude = {
 };
 
 const kitchenInclude: Prisma.OrderRoundInclude = {
-  items: { include: { extras: true, exclusions: true } },
+  items: { include: { extras: true, options: true, exclusions: true } },
   order: {
     select: {
       id: true,
@@ -124,6 +132,7 @@ export class OrdersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly events: OrdersEventsService,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   // --------------------------------------------------------------------------
@@ -273,7 +282,7 @@ export class OrdersService {
       select: { taxRate: true },
     }) : { taxRate: new Prisma.Decimal(0) };
 
-    const items = await this.buildItems(
+    const { items, selections } = await this.buildItems(
       organizationId,
       dto.items,
       organization.taxRate,
@@ -312,6 +321,86 @@ export class OrdersService {
       roundId: round.id,
       status: round.status,
     });
+
+    const orderLabel = order.tableNumber
+      ? `Mesa ${order.tableNumber}`
+      : order.isTakeaway
+        ? 'Para llevar'
+        : 'Pedido';
+
+    await this.analytics.recordMany([
+      {
+        name: ANALYTICS_EVENTS.orderRoundSent,
+        organizationId,
+        branchId: order.branchId,
+        userId,
+        subjectType: 'order',
+        subjectId: orderId,
+        subjectName: orderLabel,
+        orderId,
+        amount: items.reduce(
+          (sum, item) => sum.plus(item.subtotal),
+          new Prisma.Decimal(0),
+        ),
+        metadata: {
+          roundId: round.id,
+          lines: items.length,
+        } as Prisma.InputJsonValue,
+      },
+      ...items.map((item) => ({
+        name: ANALYTICS_EVENTS.itemSold,
+        organizationId,
+        branchId: order.branchId,
+        userId,
+        subjectType: 'item',
+        subjectId: item.itemId,
+        subjectName: item.itemName,
+        itemId: item.itemId,
+        orderId,
+        quantity: item.quantity,
+        amount: item.subtotal,
+        metadata: {
+          roundId: round.id,
+          variantName: item.variantName,
+        } as Prisma.InputJsonValue,
+      })),
+      ...selections.map((selection) => ({
+        name: ANALYTICS_EVENTS.optionGroupSelected,
+        organizationId,
+        branchId: order.branchId,
+        userId,
+        subjectType: 'optionGroup',
+        subjectId: selection.groupId,
+        subjectName: selection.groupName,
+        itemId: selection.itemId,
+        orderId,
+        quantity: selection.quantity,
+        metadata: {
+          roundId: round.id,
+          valueId: selection.valueId,
+          valueName: selection.valueName,
+          isDefault: selection.isDefault,
+        } as Prisma.InputJsonValue,
+      })),
+      ...selections.map((selection) => ({
+        name: ANALYTICS_EVENTS.optionValueSelected,
+        organizationId,
+        branchId: order.branchId,
+        userId,
+        subjectType: 'optionValue',
+        subjectId: selection.valueId,
+        subjectName: selection.valueName,
+        itemId: selection.itemId,
+        orderId,
+        quantity: selection.quantity,
+        metadata: {
+          roundId: round.id,
+          groupId: selection.groupId,
+          groupName: selection.groupName,
+          isDefault: selection.isDefault,
+        } as Prisma.InputJsonValue,
+      })),
+    ]);
 
     return round;
   }
@@ -556,12 +645,43 @@ export class OrdersService {
         variants: true,
         extras: true,
         ingredientExclusions: true,
+        optionGroups: {
+          orderBy: { sortOrder: 'asc' },
+          include: {
+            group: { select: { id: true, name: true, isActive: true } },
+            values: {
+              orderBy: [{ sortOrder: 'asc' }, { value: { name: 'asc' } }],
+              include: {
+                value: {
+                  select: {
+                    id: true,
+                    name: true,
+                    kitchenLabel: true,
+                    isActive: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+        promotions: { where: { isActive: true } },
       },
     });
 
     const byId = new Map(catalogItems.map((item) => [item.id, item]));
 
-    return items.map((line) => {
+    const selections: Array<{
+      itemId: string;
+      itemName: string;
+      groupId: string;
+      groupName: string;
+      valueId: string;
+      valueName: string;
+      quantity: number;
+      isDefault: boolean;
+    }> = [];
+
+    const rows = items.map((line) => {
       const item = byId.get(line.itemId);
 
       if (!item) {
@@ -627,13 +747,35 @@ export class OrdersService {
       );
 
       const quantity = line.quantity ?? 1;
+      const options = this.resolveItemOptions(item, line.options ?? []);
 
-      const unitPrice = extras.reduce(
-        (sum, extra) => sum.plus(extra.price),
-        item.price.plus(variant?.priceAdjust ?? 0),
+      for (const option of options) {
+        selections.push({
+          itemId: item.id,
+          itemName: item.name,
+          groupId: option.groupId,
+          groupName: option.groupName,
+          valueId: option.valueId,
+          valueName: option.valueName,
+          quantity,
+          isDefault: option.isDefault,
+        });
+      }
+
+      const unitPrice = options.reduce(
+        (sum, option) => sum.plus(option.priceDelta),
+        extras.reduce(
+          (sum, extra) => sum.plus(extra.price),
+          item.price.plus(variant?.priceAdjust ?? 0),
+        ),
       );
 
-      const subtotal = unitPrice.times(quantity).toDecimalPlaces(2);
+      const gross = unitPrice.times(quantity).toDecimalPlaces(2);
+      const promotion = item.isCombo
+        ? this.bestComboPromotion(item.promotions, unitPrice, quantity)
+        : null;
+      const discountAmount = promotion?.discount ?? new Prisma.Decimal(0);
+      const subtotal = gross.minus(discountAmount).toDecimalPlaces(2);
       const taxRate = item.taxRate ?? defaultTaxRate;
       const taxAmount = taxRate.gt(0)
         ? subtotal.minus(subtotal.dividedBy(taxRate.plus(1))).toDecimalPlaces(2)
@@ -650,6 +792,7 @@ export class OrdersService {
         quantity,
         notes: line.notes?.trim() || null,
         subtotal,
+        discountAmount,
         extras: {
           create: extras.map((extra) => ({
             itemExtraId: extra.id,
@@ -657,9 +800,270 @@ export class OrdersService {
             extraPrice: extra.price,
           })),
         },
+        options: {
+          create: options.map((option) => ({
+            itemOptionValueId: option.itemOptionValueId,
+            groupName: option.groupName,
+            optionName: option.optionName,
+            kitchenLabel: option.kitchenLabel,
+            priceDelta: option.priceDelta,
+          })),
+        },
         exclusions: { create: exclusions },
       };
     });
+
+    return { items: rows, selections };
+  }
+
+  /**
+   * Resuelve la selección de opciones de una línea.
+   *
+   * Si el cliente no manda nada para un grupo se aplican las opciones por
+   * defecto (lo que el POS muestra preseleccionado). Valida obligatoriedad,
+   * mínimos/máximos, selección única y que cada opción pertenezca al artículo.
+   */
+  private resolveItemOptions(
+    item: {
+      name: string;
+      optionGroups: Array<{
+        id: string;
+        isRequired: boolean;
+        selection: OptionSelection;
+        minSelect: number;
+        maxSelect: number | null;
+        group: { id: string; name: string; isActive: boolean };
+        values: Array<{
+          id: string;
+          valueId: string;
+          priceDelta: Prisma.Decimal;
+          isDefault: boolean;
+          isActive: boolean;
+          value: {
+            id: string;
+            name: string;
+            kitchenLabel: string | null;
+            isActive: boolean;
+          };
+        }>;
+      }>;
+    },
+    selections: RoundItemOptionDto[],
+  ) {
+    const available = new Map<
+      string,
+      {
+        /** Id de la asignación grupo-artículo (para agrupar la selección). */
+        assignmentId: string;
+        /** Id del grupo de la biblioteca (para analítica). */
+        groupId: string;
+        groupName: string;
+        valueId: string;
+        valueName: string;
+        priceDelta: Prisma.Decimal;
+        isDefault: boolean;
+        optionName: string;
+        kitchenLabel: string | null;
+      }
+    >();
+
+    for (const group of item.optionGroups) {
+      if (!group.group.isActive) continue;
+
+      // Los grupos "Sin ..." nunca suman al precio, aunque el dato histórico
+      // tenga un cargo guardado.
+      const noPrice = isNoPriceOptionGroup(group.group.name);
+
+      for (const value of group.values) {
+        if (!value.isActive || !value.value.isActive) continue;
+
+        available.set(value.id, {
+          assignmentId: group.id,
+          groupId: group.group.id,
+          groupName: group.group.name,
+          valueId: value.valueId,
+          valueName: value.value.name,
+          priceDelta: noPrice ? new Prisma.Decimal(0) : value.priceDelta,
+          isDefault: value.isDefault,
+          optionName: value.value.name,
+          kitchenLabel: value.value.kitchenLabel ?? value.value.name,
+        });
+      }
+    }
+
+    const chosenByGroup = new Map<string, string[]>();
+    const seen = new Set<string>();
+
+    for (const selection of selections) {
+      if (seen.has(selection.itemOptionValueId)) {
+        throw new BadRequestException(
+          'Una opción no puede repetirse en la misma línea',
+        );
+      }
+      seen.add(selection.itemOptionValueId);
+
+      const option = available.get(selection.itemOptionValueId);
+
+      if (!option) {
+        throw new BadRequestException(
+          `La opción elegida no pertenece a ${item.name}`,
+        );
+      }
+
+      const current = chosenByGroup.get(option.assignmentId) ?? [];
+      current.push(selection.itemOptionValueId);
+      chosenByGroup.set(option.assignmentId, current);
+    }
+
+    const result: Array<{
+      itemOptionValueId: string;
+      groupId: string;
+      groupName: string;
+      valueId: string;
+      valueName: string;
+      optionName: string;
+      kitchenLabel: string | null;
+      priceDelta: Prisma.Decimal;
+      isDefault: boolean;
+    }> = [];
+
+    for (const group of item.optionGroups) {
+      if (!group.group.isActive) continue;
+
+      const activeValues = group.values.filter(
+        (value) => value.isActive && value.value.isActive,
+      );
+      let chosen = chosenByGroup.get(group.id) ?? [];
+
+      if (chosen.length === 0) {
+        chosen = activeValues
+          .filter((value) => value.isDefault)
+          .map((value) => value.id);
+      }
+
+      const maxSelect =
+        group.maxSelect ??
+        (group.selection === OptionSelection.SINGLE
+          ? 1
+          : activeValues.length);
+
+      if (chosen.length === 0 && group.isRequired) {
+        throw new BadRequestException(
+          `Elige ${group.group.name} para ${item.name}`,
+        );
+      }
+
+      if (group.selection === OptionSelection.SINGLE && chosen.length > 1) {
+        throw new BadRequestException(
+          `${group.group.name} solo admite una opción`,
+        );
+      }
+
+      if (chosen.length > maxSelect) {
+        throw new BadRequestException(
+          `Elige como máximo ${maxSelect} opciones de ${group.group.name}`,
+        );
+      }
+
+      if (chosen.length > 0 && chosen.length < group.minSelect) {
+        throw new BadRequestException(
+          `Elige al menos ${group.minSelect} opciones de ${group.group.name}`,
+        );
+      }
+
+      for (const id of chosen) {
+        const option = available.get(id);
+
+        if (!option) {
+          throw new BadRequestException(
+            `La opción elegida no pertenece a ${item.name}`,
+          );
+        }
+
+        result.push({
+          itemOptionValueId: id,
+          groupId: option.groupId,
+          groupName: option.groupName,
+          valueId: option.valueId,
+          valueName: option.valueName,
+          optionName: option.optionName,
+          kitchenLabel: option.kitchenLabel,
+          priceDelta: option.priceDelta,
+          isDefault: option.isDefault,
+        });
+      }
+    }
+
+    return result;
+  }
+
+  /** Mejor promoción aplicable a una línea de combo (descuento máximo). */
+  private bestComboPromotion(
+    promotions: Array<{
+      name: string;
+      type: PromotionType;
+      value: Prisma.Decimal;
+      startsAt: Date | null;
+      endsAt: Date | null;
+      daysOfWeek: number[];
+      startTime: string | null;
+      endTime: string | null;
+      isActive: boolean;
+    }>,
+    unitPrice: Prisma.Decimal,
+    quantity: number,
+  ) {
+    const now = new Date();
+    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(
+      now.getMinutes(),
+    ).padStart(2, '0')}`;
+
+    let best: { name: string; discount: Prisma.Decimal } | null = null;
+
+    for (const promotion of promotions) {
+      if (!promotion.isActive) continue;
+      if (promotion.startsAt && promotion.startsAt > now) continue;
+      if (promotion.endsAt && promotion.endsAt < now) continue;
+
+      if (
+        promotion.daysOfWeek.length > 0 &&
+        !promotion.daysOfWeek.includes(now.getDay())
+      ) {
+        continue;
+      }
+
+      if (promotion.startTime && promotion.endTime) {
+        const inWindow =
+          promotion.startTime <= promotion.endTime
+            ? hhmm >= promotion.startTime && hhmm <= promotion.endTime
+            : hhmm >= promotion.startTime || hhmm <= promotion.endTime;
+
+        if (!inWindow) continue;
+      }
+
+      const gross = unitPrice.times(quantity);
+      let discount: Prisma.Decimal;
+
+      if (promotion.type === PromotionType.PERCENT) {
+        discount = gross.times(promotion.value).dividedBy(100);
+      } else if (promotion.type === PromotionType.FIXED) {
+        discount = promotion.value.times(quantity);
+      } else {
+        // 2x1: una unidad gratis por cada par.
+        discount = unitPrice.times(Math.floor(quantity / 2));
+      }
+
+      if (discount.gt(gross)) discount = gross;
+      discount = discount.toDecimalPlaces(2);
+
+      if (discount.lte(0)) continue;
+
+      if (!best || discount.gt(best.discount)) {
+        best = { name: promotion.name, discount };
+      }
+    }
+
+    return best;
   }
 
   /** Recalcula los totales de la cuenta ignorando las rondas canceladas. */
@@ -720,6 +1124,11 @@ export class OrdersService {
         extras: true,
         exclusions: true,
         ingredientChoices: true,
+        options: {
+          include: {
+            itemOptionValue: { include: { effects: true } },
+          },
+        },
         item: {
           include: {
             variants: { select: { id: true, recipeFactor: true } },
@@ -932,6 +1341,16 @@ function consumptionForItem(item: {
     recipeIngredientId: string;
     ingredientId: string;
   }>;
+  options: Array<{
+    itemOptionValue: {
+      effects: Array<{
+        action: OptionEffectAction;
+        recipeIngredientId: string | null;
+        ingredientId: string | null;
+        quantity: Prisma.Decimal | null;
+      }>;
+    } | null;
+  }>;
   item: {
     isCombo: boolean;
     variants: VariantLike[];
@@ -964,6 +1383,52 @@ function consumptionForItem(item: {
   );
   const lines: ConsumptionLine[] = [];
 
+  // Efectos de las opciones elegidas sobre la receta: reemplazar un slot,
+  // quitar un insumo/slot o añadir consumo extra.
+  const slotReplacements = new Map<
+    string,
+    { ingredientId: string; quantity: Prisma.Decimal | null }
+  >();
+  const slotRemovals = new Set<string>();
+  const ingredientRemovals = new Set<string>();
+  const additions: Array<{
+    ingredientId: string;
+    quantity: Prisma.Decimal;
+  }> = [];
+
+  for (const option of item.options) {
+    for (const effect of option.itemOptionValue?.effects ?? []) {
+      if (effect.action === OptionEffectAction.ADD && effect.ingredientId) {
+        additions.push({
+          ingredientId: effect.ingredientId,
+          quantity: effect.quantity ?? new Prisma.Decimal(1),
+        });
+        continue;
+      }
+
+      if (
+        effect.action === OptionEffectAction.REPLACE &&
+        effect.recipeIngredientId &&
+        effect.ingredientId
+      ) {
+        slotReplacements.set(effect.recipeIngredientId, {
+          ingredientId: effect.ingredientId,
+          quantity: effect.quantity,
+        });
+        continue;
+      }
+
+      if (effect.action === OptionEffectAction.REMOVE) {
+        if (effect.recipeIngredientId) {
+          slotRemovals.add(effect.recipeIngredientId);
+        }
+        if (effect.ingredientId) {
+          ingredientRemovals.add(effect.ingredientId);
+        }
+      }
+    }
+  }
+
   const pushRecipe = (
     recipes: RecipeLike[],
     variantId: string | null,
@@ -989,16 +1454,23 @@ function consumptionForItem(item: {
     const totalMultiplier = multiplier.times(factor);
 
     for (const line of recipe.ingredients) {
+      if (slotRemovals.has(line.id)) {
+        continue;
+      }
+
+      const replacement = slotReplacements.get(line.id);
       const chosenIngredientId = choices.get(line.id);
       const option = chosenIngredientId
         ? line.options.find(
             (candidate) => candidate.ingredientId === chosenIngredientId,
           )
         : undefined;
-      const ingredientId = option?.ingredientId ?? line.ingredientId;
-      const quantity = option?.quantity ?? line.quantity;
+      const ingredientId =
+        replacement?.ingredientId ?? option?.ingredientId ?? line.ingredientId;
+      const quantity =
+        replacement?.quantity ?? option?.quantity ?? line.quantity;
 
-      if (excluded.has(ingredientId)) {
+      if (excluded.has(ingredientId) || ingredientRemovals.has(ingredientId)) {
         continue;
       }
 
@@ -1042,6 +1514,17 @@ function consumptionForItem(item: {
         quantity: line.quantity,
       });
     }
+  }
+
+  for (const addition of additions) {
+    if (
+      excluded.has(addition.ingredientId) ||
+      ingredientRemovals.has(addition.ingredientId)
+    ) {
+      continue;
+    }
+
+    lines.push(addition);
   }
 
   return lines;

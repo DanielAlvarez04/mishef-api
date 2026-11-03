@@ -97,62 +97,86 @@ enum CategoryKind {
   RECIPE
 }
 
+/// Cómo se elige dentro de un grupo de opciones.
+enum OptionSelection {
+  SINGLE
+  MULTIPLE
+}
+
+/// Efecto de una opción sobre la receta de un artículo.
+enum OptionEffectAction {
+  ADD
+  REPLACE
+  REMOVE
+}
+
+/// Tipo de promoción configurable de un combo.
+enum PromotionType {
+  PERCENT
+  FIXED
+  BOGO
+}
+
 // ============================================================================
 // Identidad y organización
 // ============================================================================
 
 model Organization {
-  id                String   @id @default(cuid())
-  name              String
-  slug              String   @unique
-  domain            String?  @unique // dominio de los usuarios del equipo (ej. naranjapimienta.cafe)
-  taxRate           Decimal  @default(0.16) @db.Decimal(5, 4) // IVA por defecto del negocio (0.16 = 16 %)
-  isActive          Boolean  @default(true)
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  domain    String?  @unique // dominio de los usuarios del equipo (ej. naranjapimienta.cafe)
+  taxRate   Decimal  @default(0.16) @db.Decimal(5, 4) // IVA por defecto del negocio (0.16 = 16 %)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // Onboarding fields
-  businessType    String?      // Giro principal: restaurante, cafetería, etc.
-  serviceTypes    String[]     @default([]) // Modelo de servicio: mesa, mostrador, etc.
-  goals           String[]     @default([]) // Objetivos: inventario, costos, etc.
-  hasBranches     Boolean      @default(false) // "Tengo sucursales"
+  businessType        String? // Giro principal: restaurante, cafetería, etc.
+  serviceTypes        String[] @default([]) // Modelo de servicio: mesa, mostrador, etc.
+  goals               String[] @default([]) // Objetivos: inventario, costos, etc.
+  hasBranches         Boolean  @default(false) // "Tengo sucursales"
   /// Mostrar/activar la sección de insumos core sugeridos en Configuración.
-  useCoreSuggestions Boolean  @default(true)
+  useCoreSuggestions  Boolean  @default(true)
+  /// Mostrar/activar los grupos de opciones core sugeridos en el editor de artículos.
+  useCoreOptionGroups Boolean  @default(true)
 
-  memberships             Membership[]
-  branches                Branch[]
-  orders                  Order[]
-  payments                Payment[]
-  inventoryMovements      InventoryMovement[]
-  auditLogs               AuditLog[]
-  categories              Category[]
-  items                   Item[]
-  ingredients             Ingredient[]
-  recipes                 Recipe[]
-  ingredientCategories    IngredientCategory[]
-  ingredientLocations     IngredientLocation[]
+  memberships          Membership[]
+  branches             Branch[]
+  orders               Order[]
+  payments             Payment[]
+  inventoryMovements   InventoryMovement[]
+  auditLogs            AuditLog[]
+  categories           Category[]
+  items                Item[]
+  ingredients          Ingredient[]
+  recipes              Recipe[]
+  ingredientCategories IngredientCategory[]
+  ingredientLocations  IngredientLocation[]
+  optionGroups         OptionGroup[]
+  menus                Menu[]
 }
 
 model User {
-  id                     String      @id @default(cuid())
-  email                  String?     @unique
-  username               String?     @unique // login de cuentas internas (minúsculas)
-  passwordHash           String?
-  name                   String?
-  googleId               String?     @unique // `sub` de Google (OpenID Connect)
-  isActive               Boolean     @default(true)
-  emailVerified          Boolean     @default(false)
-  twoFactorEnabled       Boolean     @default(false)
-  onboardedAt            DateTime? // null hasta completar el onboarding
-  createdAt              DateTime    @default(now())
-  updatedAt              DateTime    @updatedAt
+  id               String    @id @default(cuid())
+  email            String?   @unique
+  username         String?   @unique // login de cuentas internas (minúsculas)
+  passwordHash     String?
+  name             String?
+  googleId         String?   @unique // `sub` de Google (OpenID Connect)
+  isActive         Boolean   @default(true)
+  emailVerified    Boolean   @default(false)
+  twoFactorEnabled Boolean   @default(false)
+  onboardedAt      DateTime? // null hasta completar el onboarding
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   memberships            Membership[]
   authSessions           AuthSession[]
   twoFactorCodes         TwoFactorCode[]
   orders                 Order[]
-  payments               Payment[]   @relation("PaymentUser")
-  confirmedPayments      Payment[]   @relation("PaymentConfirmedBy")
+  payments               Payment[]               @relation("PaymentUser")
+  confirmedPayments      Payment[]               @relation("PaymentConfirmedBy")
   inventoryMovements     InventoryMovement[]
   auditLogs              AuditLog[]
   emailVerificationToken EmailVerificationToken?
@@ -172,9 +196,9 @@ model Membership {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch         Branch?   @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?       @relation(fields: [branchId], references: [id], onDelete: SetNull)
 
   @@unique([userId, organizationId])
   @@index([organizationId])
@@ -193,12 +217,12 @@ model Branch {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  memberships    Membership[]
-  stock          BranchStock[]
-  movements      InventoryMovement[]
-  orders         Order[]
-  payments       Payment[]
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  memberships  Membership[]
+  stock        BranchStock[]
+  movements    InventoryMovement[]
+  orders       Order[]
+  payments     Payment[]
 
   @@unique([organizationId, name])
   @@index([organizationId, isActive])
@@ -212,7 +236,7 @@ model BranchStock {
   id           String   @id @default(cuid())
   branchId     String
   ingredientId String
-  quantity     Decimal  @db.Decimal(12, 4) @default(0.0000)
+  quantity     Decimal  @default(0.0000) @db.Decimal(12, 4)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -224,61 +248,61 @@ model BranchStock {
 }
 
 model AuthSession {
-  id                  String   @id @default(cuid())
+  id                  String    @id @default(cuid())
   userId              String
-  refreshTokenHash    String   @unique
+  refreshTokenHash    String    @unique
   expiresAt           DateTime // expiración del refresh token actual
   absoluteExpiresAt   DateTime // expiración absoluta de la sesión (límite de rotación)
   revokedAt           DateTime?
-  revokedReason       String?  // "LOGOUT", "ROTATED", "REUSE_DETECTED", "PASSWORD_CHANGED"
+  revokedReason       String? // "LOGOUT", "ROTATED", "REUSE_DETECTED", "PASSWORD_CHANGED"
   replacedBySessionId String?
   userAgent           String?
   ip                  String?
   lastUsedAt          DateTime?
-  createdAt           DateTime @default(now())
+  createdAt           DateTime  @default(now())
 
-  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, revokedAt])
   @@index([expiresAt])
 }
 
 model EmailVerificationToken {
-  id        String   @id @default(cuid())
-  userId    String   @unique
-  tokenHash String   @unique
+  id        String    @id @default(cuid())
+  userId    String    @unique
+  tokenHash String    @unique
   expiresAt DateTime
   usedAt    DateTime?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model TwoFactorCode {
-  id          String           @id
-  userId      String
-  purpose     TwoFactorPurpose
-  codeHash    String
-  expiresAt   DateTime
-  attempts    Int              @default(0)
-  consumedAt  DateTime?
-  createdAt   DateTime         @default(now())
+  id         String           @id
+  userId     String
+  purpose    TwoFactorPurpose
+  codeHash   String
+  expiresAt  DateTime
+  attempts   Int              @default(0)
+  consumedAt DateTime?
+  createdAt  DateTime         @default(now())
 
-  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, purpose, createdAt])
   @@index([expiresAt])
 }
 
 model PasswordResetToken {
-  id        String   @id @default(cuid())
-  userId    String   @unique
-  tokenHash String   @unique
+  id        String    @id @default(cuid())
+  userId    String    @unique
+  tokenHash String    @unique
   expiresAt DateTime
   usedAt    DateTime?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 // ============================================================================
@@ -286,22 +310,22 @@ model PasswordResetToken {
 // ============================================================================
 
 model Category {
-  id          String   @id @default(cuid())
+  id             String       @id @default(cuid())
   organizationId String?
   /// Identificador estable de las categorías core (breakfast, sauces, …).
-  code        String?
-  name        String
-  description String?
-  isCore      Boolean  @default(false) // true = parte del core, no editable
-  kind        CategoryKind @default(ARTICLE)
-  isActive    Boolean  @default(true)
-  sortOrder   Int      @default(0)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  code           String?
+  name           String
+  description    String?
+  isCore         Boolean      @default(false) // true = parte del core, no editable
+  kind           CategoryKind @default(ARTICLE)
+  isActive       Boolean      @default(true)
+  sortOrder      Int          @default(0)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
 
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  items       Item[]
-  recipes     Recipe[]
+  items        Item[]
+  recipes      Recipe[]
 
   @@unique([organizationId, kind, name])
   @@unique([kind, code])
@@ -312,33 +336,36 @@ model Category {
 /// Artículo del catálogo (lo que se vende en el POS).
 /// La tabla sigue llamándose `Product` para no migrar la base.
 model Item {
-  id            String   @id @default(cuid())
+  id             String   @id @default(cuid())
   organizationId String?
-  categoryId    String?
-  name          String
-  description   String?
-  sku           String?  // Código interno / importación CSV
-  imageKey      String?  // Objeto en R2 (nombre hasheado); la URL se deriva
-  imageUrl      String?
+  categoryId     String?
+  name           String
+  description    String?
+  sku            String? // Código interno / importación CSV
+  imageKey       String? // Objeto en R2 (nombre hasheado); la URL se deriva
+  imageUrl       String?
   /// Nombre normalizado y legible de la imagen (sin guiones ni extensión).
-  imageName     String?
-  price         Decimal  @db.Decimal(12, 2) // Precio final con IVA incluido
-  taxRate       Decimal? @db.Decimal(5, 4) // Tasa aplicable; null = no configurada (no se asume ninguna)
-  isActive      Boolean  @default(true)
-  isCombo       Boolean  @default(false)
-  sortOrder     Int      @default(0)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  imageName      String?
+  price          Decimal  @db.Decimal(12, 2) // Precio final con IVA incluido
+  taxRate        Decimal? @db.Decimal(5, 4) // Tasa aplicable; null = no configurada (no se asume ninguna)
+  isActive       Boolean  @default(true)
+  isCombo        Boolean  @default(false)
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  organization  Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  category      Category?    @relation(fields: [categoryId], references: [id])
-  variants      ItemVariant[]
-  extras        ItemExtra[]
-  recipes       Recipe[]
-  orderItems    OrderItem[]  @relation("OrderItemRef")
+  organization         Organization?             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category             Category?                 @relation(fields: [categoryId], references: [id])
+  variants             ItemVariant[]
+  extras               ItemExtra[]
+  recipes              Recipe[]
+  orderItems           OrderItem[]               @relation("OrderItemRef")
   ingredientExclusions ItemIngredientExclusion[]
-  comboComponents ComboComponent[] @relation("ComboComponents")
-  componentOf   ComboComponent[]   @relation("ComboPartOf")
+  optionGroups         ItemOptionGroup[]
+  promotions           ComboPromotion[]
+  comboComponents      ComboComponent[]          @relation("ComboComponents")
+  componentOf          ComboComponent[]          @relation("ComboPartOf")
+  menuItems            MenuItem[]
 
   @@unique([organizationId, sku])
   @@index([organizationId, isActive])
@@ -347,24 +374,24 @@ model Item {
 }
 
 model ItemVariant {
-  id          String   @id @default(cuid())
-  itemId      String   @map("productId")
-  name        String   // ej: "Chico", "Regular", "Grande", "Sin azúcar"
+  id           String   @id @default(cuid())
+  itemId       String   @map("productId")
+  name         String // ej: "Chico", "Regular", "Grande", "Sin azúcar"
   /// SKU propio: el del artículo más el sufijo de la presentación (XVA101A).
-  sku         String?
+  sku          String?
   /// Presentación que el menú muestra por defecto. Solo una por artículo.
-  isPrimary   Boolean  @default(false)
-  priceAdjust Decimal  @db.Decimal(12, 2) @default(0.0000)
+  isPrimary    Boolean  @default(false)
+  priceAdjust  Decimal  @default(0.0000) @db.Decimal(12, 2)
   /// Multiplicador del consumo de la receta base. Regular = 1.
-  recipeFactor Decimal @db.Decimal(6, 3) @default(1)
-  isActive    Boolean  @default(true)
-  sortOrder   Int      @default(0)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  recipeFactor Decimal  @default(1) @db.Decimal(6, 3)
+  isActive     Boolean  @default(true)
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  item        Item  @relation(fields: [itemId], references: [id], onDelete: Cascade)
-  orderItems  OrderItem[]
-  recipes     Recipe[]
+  item            Item             @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  orderItems      OrderItem[]
+  recipes         Recipe[]
   comboComponents ComboComponent[]
 
   @@index([itemId])
@@ -372,20 +399,204 @@ model ItemVariant {
 }
 
 model ItemExtra {
-  id          String   @id @default(cuid())
-  itemId      String   @map("productId")
-  name        String
-  price       Decimal  @db.Decimal(12, 2)
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id        String   @id @default(cuid())
+  itemId    String   @map("productId")
+  name      String
+  price     Decimal  @db.Decimal(12, 2)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  item        Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  item            Item                  @relation(fields: [itemId], references: [id], onDelete: Cascade)
   orderItemExtras OrderItemExtra[]
-  ingredients ItemExtraIngredient[]
+  ingredients     ItemExtraIngredient[]
 
   @@index([itemId])
   @@map("ProductExtra")
+}
+
+// ============================================================================
+// Opciones configurables (grupos, valores y efectos)
+// ============================================================================
+
+/// Grupo de opciones del negocio (salsas, proteínas, leches, extras, "sin…").
+/// Los grupos sugeridos por la app son plantillas: al usarlos se crea uno
+/// propio de la organización para que se pueda editar sin afectar a otros.
+model OptionGroup {
+  id             String   @id @default(cuid())
+  organizationId String?
+  name           String
+  description    String?
+  sortOrder      Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization?     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  values       OptionValue[]
+  itemGroups   ItemOptionGroup[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId, isActive])
+}
+
+/// Valor de un grupo ("Salsa roja", "Bistec", "Leche de almendra").
+model OptionValue {
+  id           String   @id @default(cuid())
+  groupId      String
+  name         String
+  /// Texto que se muestra a cocina; si falta se usa `name`.
+  kitchenLabel String?
+  sortOrder    Int      @default(0)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  group      OptionGroup       @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  itemValues ItemOptionValue[]
+
+  @@unique([groupId, name])
+  @@index([groupId])
+}
+
+/// Asignación de un grupo a un artículo, con sus reglas de selección.
+model ItemOptionGroup {
+  id         String          @id @default(cuid())
+  itemId     String
+  groupId    String
+  isRequired Boolean         @default(false)
+  selection  OptionSelection @default(SINGLE)
+  minSelect  Int             @default(0)
+  maxSelect  Int?
+  sortOrder  Int             @default(0)
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+
+  item   Item              @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  group  OptionGroup       @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  values ItemOptionValue[]
+
+  @@unique([itemId, groupId])
+  @@index([itemId])
+  @@index([groupId])
+}
+
+/// Valor del grupo para un artículo concreto: aquí vive el precio y el default.
+/// El mismo valor ("Bistec") puede costar distinto en dos platillos.
+model ItemOptionValue {
+  id                String   @id @default(cuid())
+  itemOptionGroupId String
+  valueId           String
+  priceDelta        Decimal  @default(0) @db.Decimal(12, 2)
+  /// Opción que el POS preselecciona. Solo una por grupo.
+  isDefault         Boolean  @default(false)
+  sortOrder         Int      @default(0)
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  itemOptionGroup ItemOptionGroup    @relation(fields: [itemOptionGroupId], references: [id], onDelete: Cascade)
+  value           OptionValue        @relation(fields: [valueId], references: [id], onDelete: Cascade)
+  effects         ItemOptionEffect[]
+  orderOptions    OrderItemOption[]
+
+  @@unique([itemOptionGroupId, valueId])
+  @@index([itemOptionGroupId])
+  @@index([valueId])
+}
+
+/// Efecto de una opción sobre la receta (solo recetas publicadas).
+/// - REPLACE: cambia el insumo de un slot de la receta.
+/// - ADD: añade consumo de inventario.
+/// - REMOVE: quita un slot o un insumo.
+model ItemOptionEffect {
+  id                 String             @id @default(cuid())
+  itemOptionValueId  String
+  action             OptionEffectAction
+  /// Slot de la receta a reemplazar o quitar (null en ADD).
+  recipeIngredientId String?
+  /// Insumo que entra (REPLACE/ADD) o que se quita (REMOVE por insumo).
+  ingredientId       String?
+  quantity           Decimal?           @db.Decimal(12, 4)
+
+  itemOptionValue  ItemOptionValue   @relation(fields: [itemOptionValueId], references: [id], onDelete: Cascade)
+  recipeIngredient RecipeIngredient? @relation(fields: [recipeIngredientId], references: [id], onDelete: Cascade)
+  ingredient       Ingredient?       @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+
+  @@index([itemOptionValueId])
+  @@index([recipeIngredientId])
+  @@index([ingredientId])
+}
+
+/// Promoción de un combo (descuento por porcentaje, importe fijo o 2x1).
+/// `daysOfWeek` vacío = todos los días; las horas son "HH:MM" locales.
+model ComboPromotion {
+  id         String        @id @default(cuid())
+  itemId     String
+  name       String
+  type       PromotionType
+  /// Porcentaje (0-100) o importe fijo en MXN. BOGO lo ignora.
+  value      Decimal       @default(0) @db.Decimal(12, 2)
+  startsAt   DateTime?
+  endsAt     DateTime?
+  daysOfWeek Int[]         @default([])
+  startTime  String?
+  endTime    String?
+  isActive   Boolean       @default(true)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([itemId, isActive])
+}
+
+// ============================================================================
+// Menús (colecciones curadas de artículos para filtrar el POS)
+// ============================================================================
+
+/// Colección de artículos y combos, opcionalmente programada por día/horario.
+/// No se vende ni tiene precio: solo organiza/filtra el catálogo del POS.
+model Menu {
+  id             String  @id @default(cuid())
+  organizationId String?
+  name           String
+  description    String?
+  isActive       Boolean @default(true)
+  sortOrder      Int     @default(0)
+
+  /// Vigencia recurrente. `daysOfWeek` vacío = todos los días.
+  daysOfWeek Int[]   @default([])
+  startTime  String? // "HH:MM" local
+  endTime    String? // "HH:MM" local; admite cruce de medianoche
+
+  /// Vigencia por fechas (opcional).
+  startsAt DateTime?
+  endsAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  items        MenuItem[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId, isActive])
+}
+
+/// Artículo incluido en un menú, con su orden dentro de la colección.
+model MenuItem {
+  id        String @id @default(cuid())
+  menuId    String
+  itemId    String
+  sortOrder Int    @default(0)
+
+  menu Menu @relation(fields: [menuId], references: [id], onDelete: Cascade)
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([menuId, itemId])
+  @@index([menuId])
+  @@index([itemId])
 }
 
 // ============================================================================
@@ -396,35 +607,40 @@ model Ingredient {
   id             String   @id @default(cuid())
   organizationId String?
   name           String
-  sku            String?  // Código interno / referencia proveedor
-  /** Unidad canónica de almacenamiento: siempre G, ML o UNIT. */
+  sku            String? // Código interno / referencia proveedor
+  /**
+   * Unidad canónica de almacenamiento: siempre G, ML o UNIT.
+   */
   baseUnit       UnitCode @default(UNIT)
-  /** Unidad con la que el usuario ve y captura las cantidades (misma dimensión). */
+  /**
+   * Unidad con la que el usuario ve y captura las cantidades (misma dimensión).
+   */
   displayUnit    UnitCode @default(UNIT)
-  currentStock   Decimal  @db.Decimal(12, 4) @default(0.0000)
-  minStock       Decimal  @db.Decimal(12, 4) @default(0.0000)
+  currentStock   Decimal  @default(0.0000) @db.Decimal(12, 4)
+  minStock       Decimal  @default(0.0000) @db.Decimal(12, 4)
   maxStock       Decimal? @db.Decimal(12, 4) // Existencia máxima (opcional)
   unitCost       Decimal? @db.Decimal(12, 6) // Costo por unidad canónica
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  categoryId     String?
-  locationId     String?
+  categoryId String?
+  locationId String?
 
-  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  category       IngredientCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  location       IngredientLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
-  recipeIngredients RecipeIngredient[]
-  ingredientOptions RecipeIngredientOption[]
-  orderChoices OrderItemIngredientChoice[]
-  producedByRecipe Recipe? @relation("RecipeProducedIngredient")
-  inventoryMovements InventoryMovement[]
-  equivalences   IngredientEquivalence[]
-  exclusions     ItemIngredientExclusion[]
-  extraIngredients ItemExtraIngredient[]
+  organization        Organization?               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category            IngredientCategory?         @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  location            IngredientLocation?         @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  recipeIngredients   RecipeIngredient[]
+  ingredientOptions   RecipeIngredientOption[]
+  orderChoices        OrderItemIngredientChoice[]
+  producedByRecipe    Recipe?                     @relation("RecipeProducedIngredient")
+  inventoryMovements  InventoryMovement[]
+  equivalences        IngredientEquivalence[]
+  exclusions          ItemIngredientExclusion[]
+  extraIngredients    ItemExtraIngredient[]
   orderItemExclusions OrderItemExclusion[]
-  branchStocks   BranchStock[]
+  optionEffects       ItemOptionEffect[]
+  branchStocks        BranchStock[]
 
   @@unique([organizationId, name])
   @@unique([organizationId, sku])
@@ -437,36 +653,36 @@ model Ingredient {
 /// (ej. 1 taza de harina = 120 g). Nunca se deduce masa ↔ volumen.
 /// Las unidades implicadas se normalizan a la canónica de su dimensión.
 model IngredientCategory {
-  id            String   @id @default(cuid())
+  id             String   @id @default(cuid())
   organizationId String?
-  name          String
-  description   String?
-  isCore        Boolean  @default(false) // true = parte del core de la app, no editable
-  isActive      Boolean  @default(true)
-  sortOrder     Int      @default(0)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  name           String
+  description    String?
+  isCore         Boolean  @default(false) // true = parte del core de la app, no editable
+  isActive       Boolean  @default(true)
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  organization  Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  ingredients   Ingredient[]
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ingredients  Ingredient[]
 
   @@unique([organizationId, name])
   @@index([organizationId, isActive])
 }
 
 model IngredientLocation {
-  id            String   @id @default(cuid())
+  id             String   @id @default(cuid())
   organizationId String?
-  name          String
-  description   String?
-  isCore        Boolean  @default(false) // true = parte del core de la app, no editable
-  isActive      Boolean  @default(true)
-  sortOrder     Int      @default(0)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  name           String
+  description    String?
+  isCore         Boolean  @default(false) // true = parte del core de la app, no editable
+  isActive       Boolean  @default(true)
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  organization  Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  ingredients   Ingredient[]
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ingredients  Ingredient[]
 
   @@unique([organizationId, name])
   @@index([organizationId, isActive])
@@ -482,7 +698,7 @@ model IngredientEquivalence {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
 
   @@unique([ingredientId, fromUnit, toUnit])
   @@index([ingredientId])
@@ -496,8 +712,8 @@ model ItemIngredientExclusion {
   label        String?
   createdAt    DateTime @default(now())
 
-  item         Item       @relation(fields: [itemId], references: [id], onDelete: Cascade)
-  ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  item       Item       @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
 
   @@unique([itemId, ingredientId])
   @@index([itemId])
@@ -515,9 +731,9 @@ model ComboComponent {
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
-  combo              Item         @relation("ComboComponents", fields: [comboId], references: [id], onDelete: Cascade)
-  componentItem      Item         @relation("ComboPartOf", fields: [componentItemId], references: [id], onDelete: Restrict)
-  variant            ItemVariant? @relation(fields: [componentVariantId], references: [id], onDelete: Restrict)
+  combo         Item         @relation("ComboComponents", fields: [comboId], references: [id], onDelete: Cascade)
+  componentItem Item         @relation("ComboPartOf", fields: [componentItemId], references: [id], onDelete: Restrict)
+  variant       ItemVariant? @relation(fields: [componentVariantId], references: [id], onDelete: Restrict)
 
   @@unique([comboId, componentItemId, componentVariantId])
   @@index([comboId])
@@ -526,13 +742,13 @@ model ComboComponent {
 
 /// Consumo de inventario de un extra (cantidad en la unidad canónica del ingrediente).
 model ItemExtraIngredient {
-  id             String   @id @default(cuid())
-  itemExtraId    String   @map("productExtraId")
-  ingredientId   String
-  quantity       Decimal  @db.Decimal(12, 4)
+  id           String  @id @default(cuid())
+  itemExtraId  String  @map("productExtraId")
+  ingredientId String
+  quantity     Decimal @db.Decimal(12, 4)
 
-  itemExtra      ItemExtra  @relation(fields: [itemExtraId], references: [id], onDelete: Cascade)
-  ingredient     Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  itemExtra  ItemExtra  @relation(fields: [itemExtraId], references: [id], onDelete: Cascade)
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
 
   @@unique([itemExtraId, ingredientId])
   @@index([ingredientId])
@@ -540,28 +756,28 @@ model ItemExtraIngredient {
 }
 
 model Recipe {
-  id            String   @id @default(cuid())
-  organizationId String?
+  id                   String    @id @default(cuid())
+  organizationId       String?
   /// `null` = receta independiente (aún no publicada como artículo).
-  itemId        String?  @map("productId")
-  variantId     String? // null = receta base del artículo
-  categoryId    String?
-  name          String
-  description   String?
+  itemId               String?   @map("productId")
+  variantId            String? // null = receta base del artículo
+  categoryId           String?
+  name                 String
+  description          String?
   /// Insumo que produce esta receta (ej. salsa verde). Único por receta.
-  producesIngredientId String? @unique
-  yieldQuantity Decimal? @db.Decimal(12, 4)
-  yieldUnit     UnitCode?
-  isActive      Boolean  @default(true)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  producesIngredientId String?   @unique
+  yieldQuantity        Decimal?  @db.Decimal(12, 4)
+  yieldUnit            UnitCode?
+  isActive             Boolean   @default(true)
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 
-  organization  Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  item          Item?  @relation(fields: [itemId], references: [id], onDelete: Cascade)
-  variant       ItemVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
-  category      Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  producesIngredient Ingredient? @relation("RecipeProducedIngredient", fields: [producesIngredientId], references: [id], onDelete: SetNull)
-  ingredients   RecipeIngredient[]
+  organization       Organization?      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  item               Item?              @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  variant            ItemVariant?       @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  category           Category?          @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  producesIngredient Ingredient?        @relation("RecipeProducedIngredient", fields: [producesIngredientId], references: [id], onDelete: SetNull)
+  ingredients        RecipeIngredient[]
 
   @@unique([itemId, variantId])
   @@index([organizationId])
@@ -570,20 +786,21 @@ model Recipe {
 }
 
 model RecipeIngredient {
-  id            String   @id @default(cuid())
-  recipeId      String
+  id           String  @id @default(cuid())
+  recipeId     String
   /// Insumo default del slot (puede cambiarse al pedir entre las alternativas).
-  ingredientId  String
+  ingredientId String
   /// Nombre del slot (ej. "Leche"); si falta se usa el nombre del insumo.
-  label         String?
-  quantity      Decimal  @db.Decimal(12, 4) // Cantidad en la unidad canónica del ingrediente
-  isOptional    Boolean  @default(false)
-  sortOrder     Int      @default(0)
+  label        String?
+  quantity     Decimal @db.Decimal(12, 4) // Cantidad en la unidad canónica del ingrediente
+  isOptional   Boolean @default(false)
+  sortOrder    Int     @default(0)
 
-  recipe        Recipe   @relation(fields: [recipeId], references: [id], onDelete: Cascade)
-  ingredient    Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  recipe        Recipe                      @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  ingredient    Ingredient                  @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
   options       RecipeIngredientOption[]
   orderChoices  OrderItemIngredientChoice[]
+  optionEffects ItemOptionEffect[]
 
   @@unique([recipeId, ingredientId])
   @@index([recipeId])
@@ -593,11 +810,11 @@ model RecipeIngredient {
 /// Alternativa de un ingrediente de receta (ej. leche deslactosada o de coco).
 /// Cada alternativa guarda su propia cantidad en la unidad canónica de su insumo.
 model RecipeIngredientOption {
-  id                 String   @id @default(cuid())
+  id                 String  @id @default(cuid())
   recipeIngredientId String
   ingredientId       String
-  quantity           Decimal  @db.Decimal(12, 4)
-  sortOrder          Int      @default(0)
+  quantity           Decimal @db.Decimal(12, 4)
+  sortOrder          Int     @default(0)
 
   recipeIngredient RecipeIngredient @relation(fields: [recipeIngredientId], references: [id], onDelete: Cascade)
   ingredient       Ingredient       @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
@@ -624,31 +841,31 @@ model OrderItemIngredientChoice {
 }
 
 model InventoryMovement {
-  id              String   @id @default(cuid())
-  organizationId  String
-  branchId        String?
+  id             String                @id @default(cuid())
+  organizationId String
+  branchId       String?
   /// `null` si el producto se eliminó; el kardex se conserva.
-  ingredientId    String?
+  ingredientId   String?
   /// Nombre del producto en el momento del movimiento (snapshot).
-  ingredientName  String
+  ingredientName String
   /// Unidad visible del producto en el momento del movimiento.
-  displayUnit     UnitCode
-  userId          String?
-  type            InventoryMovementType
-  quantity        Decimal  @db.Decimal(12, 4) // Positivo = entrada, Negativo = salida
-  stockAfter      Decimal? @db.Decimal(12, 4) // Saldo resultante (kardex auditable)
-  reason          String?
-  referenceId     String?  // ID de orden, ronda, etc.
-  referenceType   String?  // "ORDER_ROUND", "ADJUSTMENT", etc.
-  dedupeKey       String?  @unique // idempotencia de consumos
-  createdAt       DateTime @default(now())
+  displayUnit    UnitCode
+  userId         String?
+  type           InventoryMovementType
+  quantity       Decimal               @db.Decimal(12, 4) // Positivo = entrada, Negativo = salida
+  stockAfter     Decimal?              @db.Decimal(12, 4) // Saldo resultante (kardex auditable)
+  reason         String?
+  referenceId    String? // ID de orden, ronda, etc.
+  referenceType  String? // "ORDER_ROUND", "ADJUSTMENT", etc.
+  dedupeKey      String?               @unique // idempotencia de consumos
+  createdAt      DateTime              @default(now())
 
-  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch          Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
   // `SetNull`: el kardex se conserva aunque se elimine el producto.
-  ingredient      Ingredient?  @relation(fields: [ingredientId], references: [id], onDelete: SetNull)
+  ingredient   Ingredient?  @relation(fields: [ingredientId], references: [id], onDelete: SetNull)
   // `SetNull`: el kardex se conserva aunque se elimine la cuenta del autor.
-  user            User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, createdAt])
   @@index([branchId, createdAt])
@@ -661,45 +878,45 @@ model InventoryMovement {
 // ============================================================================
 
 model Order {
-  id            String   @id @default(cuid())
+  id             String      @id @default(cuid())
   organizationId String?
-  branchId      String?
-  tableNumber   String?
-  isTakeaway    Boolean  @default(false)
-  status        OrderStatus @default(OPEN)
-  subtotal      Decimal  @db.Decimal(12, 2) @default(0.0000)
-  taxTotal      Decimal  @db.Decimal(12, 2) @default(0.0000)
-  total         Decimal  @db.Decimal(12, 2) @default(0.0000)
-  idempotencyKey String? @unique
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  branchId       String?
+  tableNumber    String?
+  isTakeaway     Boolean     @default(false)
+  status         OrderStatus @default(OPEN)
+  subtotal       Decimal     @default(0.0000) @db.Decimal(12, 2)
+  taxTotal       Decimal     @default(0.0000) @db.Decimal(12, 2)
+  total          Decimal     @default(0.0000) @db.Decimal(12, 2)
+  idempotencyKey String?     @unique
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
 
-  organization  Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch        Branch?    @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?       @relation(fields: [branchId], references: [id], onDelete: SetNull)
   // `SetNull`: al eliminar la cuenta del usuario el pedido se conserva sin autor.
-  user          User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
-  userId        String?
-  rounds        OrderRound[]
-  payments      Payment[]
+  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userId       String?
+  rounds       OrderRound[]
+  payments     Payment[]
 
   @@index([organizationId, status, createdAt])
   @@index([branchId, status, createdAt])
 }
 
 model OrderRound {
-  id            String   @id @default(cuid())
-  orderId       String
-  status        OrderRoundStatus @default(PENDING)
-  idempotencyKey String? @unique
-  sentAt        DateTime?
-  startedAt     DateTime?
-  readyAt       DateTime?
-  deliveredAt   DateTime?
-  cancelledAt   DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id             String           @id @default(cuid())
+  orderId        String
+  status         OrderRoundStatus @default(PENDING)
+  idempotencyKey String?          @unique
+  sentAt         DateTime?
+  startedAt      DateTime?
+  readyAt        DateTime?
+  deliveredAt    DateTime?
+  cancelledAt    DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
 
-  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order         Order                @relation(fields: [orderId], references: [id], onDelete: Cascade)
   items         OrderItem[]
   statusHistory OrderStatusHistory[]
 
@@ -708,25 +925,28 @@ model OrderRound {
 }
 
 model OrderItem {
-  id            String   @id @default(cuid())
-  orderRoundId  String
-  itemId        String   @map("productId")
-  itemVariantId String?  @map("productVariantId")
+  id             String   @id @default(cuid())
+  orderRoundId   String
+  itemId         String   @map("productId")
+  itemVariantId  String?  @map("productVariantId")
   // Copia histórica del catálogo al momento del pedido
-  itemName      String   @map("productName")
-  variantName   String?
-  itemPrice     Decimal  @db.Decimal(12, 2) @map("productPrice")
-  taxRate       Decimal? @db.Decimal(5, 4)
-  taxAmount     Decimal  @db.Decimal(12, 2) @default(0)
-  quantity      Int      @default(1)
-  notes         String?
-  subtotal      Decimal  @db.Decimal(12, 2)
+  itemName       String   @map("productName")
+  variantName    String?
+  itemPrice      Decimal  @map("productPrice") @db.Decimal(12, 2)
+  taxRate        Decimal? @db.Decimal(5, 4)
+  taxAmount      Decimal  @default(0) @db.Decimal(12, 2)
+  quantity       Int      @default(1)
+  notes          String?
+  subtotal       Decimal  @db.Decimal(12, 2)
+  /// Descuento aplicado por una promoción del combo (no altera `itemPrice`).
+  discountAmount Decimal  @default(0) @db.Decimal(12, 2)
 
-  orderRound    OrderRound @relation(fields: [orderRoundId], references: [id], onDelete: Cascade)
-  item          Item   @relation("OrderItemRef", fields: [itemId], references: [id], onDelete: Restrict)
-  variant       ItemVariant? @relation(fields: [itemVariantId], references: [id])
-  extras        OrderItemExtra[]
-  exclusions    OrderItemExclusion[]
+  orderRound        OrderRound                  @relation(fields: [orderRoundId], references: [id], onDelete: Cascade)
+  item              Item                        @relation("OrderItemRef", fields: [itemId], references: [id], onDelete: Restrict)
+  variant           ItemVariant?                @relation(fields: [itemVariantId], references: [id])
+  extras            OrderItemExtra[]
+  exclusions        OrderItemExclusion[]
+  options           OrderItemOption[]
   ingredientChoices OrderItemIngredientChoice[]
 
   @@index([orderRoundId])
@@ -734,16 +954,33 @@ model OrderItem {
 }
 
 model OrderItemExtra {
-  id            String   @id @default(cuid())
-  orderItemId   String
-  itemExtraId   String?  @map("productExtraId")
-  extraName     String
-  extraPrice    Decimal  @db.Decimal(12, 2)
+  id          String  @id @default(cuid())
+  orderItemId String
+  itemExtraId String? @map("productExtraId")
+  extraName   String
+  extraPrice  Decimal @db.Decimal(12, 2)
 
-  orderItem     OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
-  itemExtra     ItemExtra? @relation(fields: [itemExtraId], references: [id])
+  orderItem OrderItem  @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  itemExtra ItemExtra? @relation(fields: [itemExtraId], references: [id])
 
   @@index([orderItemId])
+}
+
+/// Opción elegida en una línea, con snapshot para cocina, ticket y reportes.
+model OrderItemOption {
+  id                String  @id @default(cuid())
+  orderItemId       String
+  itemOptionValueId String?
+  groupName         String
+  optionName        String
+  kitchenLabel      String?
+  priceDelta        Decimal @default(0) @db.Decimal(12, 2)
+
+  orderItem       OrderItem        @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  itemOptionValue ItemOptionValue? @relation(fields: [itemOptionValueId], references: [id], onDelete: SetNull)
+
+  @@index([orderItemId])
+  @@index([itemOptionValueId])
 }
 
 /// Ingredientes que el cliente pidió quitar. Se descuentan de la receta al
@@ -753,25 +990,25 @@ model OrderItemExclusion {
   orderItemId  String
   ingredientId String
 
-  orderItem    OrderItem  @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
-  ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
+  orderItem  OrderItem  @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  ingredient Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
 
   @@unique([orderItemId, ingredientId])
   @@index([ingredientId])
 }
 
 model OrderStatusHistory {
-  id            String   @id @default(cuid())
-  orderRoundId  String
+  id             String   @id @default(cuid())
+  orderRoundId   String
   previousStatus String?
-  newStatus     String
-  changedById   String?
-  changedAt     DateTime @default(now())
-  reason        String?
+  newStatus      String
+  changedById    String?
+  changedAt      DateTime @default(now())
+  reason         String?
 
-  orderRound    OrderRound @relation(fields: [orderRoundId], references: [id], onDelete: Cascade)
+  orderRound OrderRound @relation(fields: [orderRoundId], references: [id], onDelete: Cascade)
   // `SetNull`: la traza de estados se conserva sin autor si se borra la cuenta.
-  changedBy     User?    @relation(fields: [changedById], references: [id], onDelete: SetNull)
+  changedBy  User?      @relation(fields: [changedById], references: [id], onDelete: SetNull)
 
   @@index([orderRoundId])
   @@index([changedAt])
@@ -782,27 +1019,27 @@ model OrderStatusHistory {
 // ============================================================================
 
 model Payment {
-  id            String   @id @default(cuid())
+  id             String        @id @default(cuid())
   organizationId String?
-  branchId      String?
-  orderId       String
-  userId        String?
-  method        PaymentMethod
-  amount        Decimal  @db.Decimal(12, 2)
-  status        PaymentStatus @default(PENDING)
-  paidAt        DateTime?
-  confirmedAt   DateTime?
-  confirmedById String?
-  idempotencyKey String? @unique
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  branchId       String?
+  orderId        String
+  userId         String?
+  method         PaymentMethod
+  amount         Decimal       @db.Decimal(12, 2)
+  status         PaymentStatus @default(PENDING)
+  paidAt         DateTime?
+  confirmedAt    DateTime?
+  confirmedById  String?
+  idempotencyKey String?       @unique
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
-  organization  Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch        Branch?    @relation(fields: [branchId], references: [id], onDelete: SetNull)
-  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?       @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  order        Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
   // `SetNull`: el pago sobrevive al borrado de la cuenta que lo registró.
-  user          User?    @relation("PaymentUser", fields: [userId], references: [id], onDelete: SetNull)
-  confirmedBy   User?    @relation("PaymentConfirmedBy", fields: [confirmedById], references: [id], onDelete: SetNull)
+  user         User?         @relation("PaymentUser", fields: [userId], references: [id], onDelete: SetNull)
+  confirmedBy  User?         @relation("PaymentConfirmedBy", fields: [confirmedById], references: [id], onDelete: SetNull)
 
   @@index([organizationId, status, createdAt])
   @@index([branchId, createdAt])
@@ -810,21 +1047,59 @@ model Payment {
 }
 
 model AuditLog {
-  id            String   @id @default(cuid())
+  id             String   @id @default(cuid())
   organizationId String?
-  userId        String?
-  action        String
-  entity        String
-  entityId      String?
-  oldValues     Json?
-  newValues     Json?
-  createdAt     DateTime @default(now())
+  userId         String?
+  action         String
+  entity         String
+  entityId       String?
+  oldValues      Json?
+  newValues      Json?
+  createdAt      DateTime @default(now())
 
-  organization  Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   // `SetNull`: la auditoría se conserva aunque la cuenta ya no exista.
-  user          User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, createdAt])
   @@index([userId])
   @@index([entity, entityId])
+}
+
+// ============================================================================
+// Anal�tica de uso (eventos append-only para reportes y modelos predictivos)
+// ============================================================================
+
+/// Evento de uso del sistema (opciones, ventas, men�s, POS...).
+///
+/// Sin claves for�neas a prop�sito: el hist�rico debe sobrevivir al borrado o
+/// renombrado de grupos, art�culos, men�s y pedidos. Los nombres se guardan
+/// como snapshot (`subjectName` y `metadata`) para que los reportes no cambien.
+model AnalyticsEvent {
+  id             String   @id @default(cuid())
+  organizationId String?
+  branchId       String?
+  userId         String?
+  /// Nombre del evento, p. ej. "option_group.selected".
+  name           String
+  /// Entidad protagonista: "optionGroup", "optionValue", "item", "menu", "order".
+  subjectType    String?
+  subjectId      String?
+  /// Snapshot del nombre de la entidad protagonista.
+  subjectName    String?
+  itemId         String?
+  orderId        String?
+  menuId         String?
+  quantity       Decimal  @default(0) @db.Decimal(12, 4)
+  amount         Decimal  @default(0) @db.Decimal(12, 2)
+  /// Datos libres del evento (valor elegido, posici�n, etc.).
+  metadata       Json?
+  occurredAt     DateTime @default(now())
+
+  @@index([organizationId, name, occurredAt])
+  @@index([subjectType, subjectId, occurredAt])
+  @@index([itemId, occurredAt])
+  @@index([menuId, occurredAt])
+  @@index([orderId])
+  @@index([occurredAt])
 }
