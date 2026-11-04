@@ -158,6 +158,19 @@ export class CreateRecipeDto {
   @IsBoolean()
   isActive?: boolean;
 
+  /**
+   * Artículo existente al que se vincula la receta (crear la receta desde el
+   * diálogo unificado del artículo). Si llega, no se publica un artículo nuevo.
+   */
+  @IsOptional()
+  @IsString()
+  itemId?: string;
+
+  /** Presentación concreta del artículo; null/omitido = receta base. */
+  @IsOptional()
+  @IsString()
+  variantId?: string;
+
   @IsOptional()
   @IsArray()
   @ArrayNotEmpty()
@@ -197,6 +210,11 @@ export class UpdateRecipeDto {
   @IsBoolean()
   isActive?: boolean;
 
+  /** Clave en R2 de la imagen propia de la receta; `null` la quita. */
+  @IsOptional()
+  @IsString()
+  imageKey?: string | null;
+
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(200)
@@ -213,6 +231,11 @@ export class UpdateRecipeDto {
   @ValidateNested()
   @Type(() => RecipeProductionInputDto)
   produce?: RecipeProductionInputDto;
+
+  /** Desvincula el insumo producido (apagar el switch «Insumo»). */
+  @IsOptional()
+  @IsBoolean()
+  clearProduce?: boolean;
 }
 
 export class ProduceRecipeDto {

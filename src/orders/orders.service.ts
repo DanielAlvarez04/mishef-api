@@ -835,7 +835,8 @@ export class OrdersService {
         group: { id: string; name: string; isActive: boolean };
         values: Array<{
           id: string;
-          valueId: string;
+          valueId: string | null;
+          customName: string | null;
           priceDelta: Prisma.Decimal;
           isDefault: boolean;
           isActive: boolean;
@@ -844,7 +845,7 @@ export class OrdersService {
             name: string;
             kitchenLabel: string | null;
             isActive: boolean;
-          };
+          } | null;
         }>;
       }>;
     },
@@ -875,18 +876,20 @@ export class OrdersService {
       const noPrice = isNoPriceOptionGroup(group.group.name);
 
       for (const value of group.values) {
-        if (!value.isActive || !value.value.isActive) continue;
+        if (!value.isActive || (value.value && !value.value.isActive)) continue;
+
+        const valueName = value.customName ?? value.value?.name ?? 'Opción';
 
         available.set(value.id, {
           assignmentId: group.id,
           groupId: group.group.id,
           groupName: group.group.name,
-          valueId: value.valueId,
-          valueName: value.value.name,
+          valueId: value.valueId ?? value.id,
+          valueName,
           priceDelta: noPrice ? new Prisma.Decimal(0) : value.priceDelta,
           isDefault: value.isDefault,
-          optionName: value.value.name,
-          kitchenLabel: value.value.kitchenLabel ?? value.value.name,
+          optionName: valueName,
+          kitchenLabel: value.value?.kitchenLabel ?? valueName,
         });
       }
     }
@@ -931,7 +934,7 @@ export class OrdersService {
       if (!group.group.isActive) continue;
 
       const activeValues = group.values.filter(
-        (value) => value.isActive && value.value.isActive,
+        (value) => value.isActive && (!value.value || value.value.isActive),
       );
       let chosen = chosenByGroup.get(group.id) ?? [];
 

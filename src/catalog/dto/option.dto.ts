@@ -130,10 +130,22 @@ export class ItemOptionEffectInputDto {
 
 /** Valor del grupo aplicado a un artículo: precio, default y efectos. */
 export class ItemOptionValueInputDto {
+  /** Valor de la biblioteca. Excluyente con `customName`. */
+  @IsOptional()
   @IsString()
   @MinLength(1)
   @MaxLength(40)
-  valueId!: string;
+  valueId?: string;
+
+  /**
+   * Opción propia del artículo. No modifica el grupo de la biblioteca.
+   * Excluyente con `valueId`.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(80)
+  customName?: string;
 
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })

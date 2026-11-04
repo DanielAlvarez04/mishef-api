@@ -1,6 +1,7 @@
 ﻿import { Module } from '@nestjs/common';
 import { CategoriesController } from './categories.controller';
 import { CategoriesService } from './categories.service';
+import { CatalogEntriesService } from './catalog-entries.service';
 import { ItemsController } from './items.controller';
 import { ItemsService } from './items.service';
 import { MenusController } from './menus.controller';
@@ -24,6 +25,7 @@ import { UnitsController } from './units.controller';
   ],
   providers: [
     CategoriesService,
+    CatalogEntriesService,
     ItemsService,
     MenusService,
     OptionsService,
@@ -31,5 +33,6 @@ import { UnitsController } from './units.controller';
     CatalogImportService,
     IngredientQuantitiesService,
   ],
+  exports: [CatalogEntriesService],
 })
 export class CatalogModule {}

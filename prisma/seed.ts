@@ -538,7 +538,7 @@ async function main() {
     });
 
     if (!salsaRecipe) {
-      await prisma.recipe.create({
+      const salsa = await prisma.recipe.create({
         data: {
           organizationId: org.id,
           name: 'Salsa verde',
@@ -567,6 +567,15 @@ async function main() {
             ],
           },
         },
+      });
+
+      // Receta independiente: estrena su propia entrada de catálogo.
+      await prisma.catalogEntry.create({
+        data: { id: salsa.id, organizationId: org.id },
+      });
+      await prisma.recipe.update({
+        where: { id: salsa.id },
+        data: { catalogEntryId: salsa.id },
       });
     }
 
@@ -682,49 +691,61 @@ async function ensureItem(
     return existing;
   }
 
-  return prisma.item.create({
-    data: {
-      organizationId,
-      categoryId: data.categoryId,
-      sku: data.sku,
-      name: data.name,
-      description: data.description,
-      price: data.price,
-      taxRate: data.taxRate,
-      isCombo: data.isCombo ?? false,
-      sortOrder: data.sortOrder ?? 0,
-      variants: {
-        create: data.variants ?? [],
+  return prisma.$transaction(async (tx) => {
+    const created = await tx.item.create({
+      data: {
+        organizationId,
+        categoryId: data.categoryId,
+        sku: data.sku,
+        name: data.name,
+        description: data.description,
+        price: data.price,
+        taxRate: data.taxRate,
+        isCombo: data.isCombo ?? false,
+        sortOrder: data.sortOrder ?? 0,
+        variants: {
+          create: data.variants ?? [],
+        },
+        extras: {
+          create: (data.extras ?? []).map((extra) => ({
+            name: extra.name,
+            price: extra.price,
+            ingredients: {
+              create: extra.ingredients.map((ingredient) => ({
+                quantity: ingredient.quantity,
+                ingredient: { connect: { id: ingredient.ingredientId } },
+              })),
+            },
+          })),
+        },
+        ingredientExclusions: {
+          create: (data.exclusions ?? []).map((exclusion) => ({
+            label: exclusion.label,
+            ingredient: { connect: { id: exclusion.ingredientId } },
+          })),
+        },
+        comboComponents: {
+          create: (data.comboComponents ?? []).map((component) => ({
+            quantity: component.quantity,
+            componentItem: { connect: { id: component.componentItemId } },
+            ...(component.componentVariantId
+              ? { variant: { connect: { id: component.componentVariantId } } }
+              : {}),
+          })),
+        },
       },
-      extras: {
-        create: (data.extras ?? []).map((extra) => ({
-          name: extra.name,
-          price: extra.price,
-          ingredients: {
-            create: extra.ingredients.map((ingredient) => ({
-              quantity: ingredient.quantity,
-              ingredient: { connect: { id: ingredient.ingredientId } },
-            })),
-          },
-        })),
-      },
-      ingredientExclusions: {
-        create: (data.exclusions ?? []).map((exclusion) => ({
-          label: exclusion.label,
-          ingredient: { connect: { id: exclusion.ingredientId } },
-        })),
-      },
-      comboComponents: {
-        create: (data.comboComponents ?? []).map((component) => ({
-          quantity: component.quantity,
-          componentItem: { connect: { id: component.componentItemId } },
-          ...(component.componentVariantId
-            ? { variant: { connect: { id: component.componentVariantId } } }
-            : {}),
-        })),
-      },
-    },
-    include: { variants: true },
+      include: { variants: true },
+    });
+
+    await tx.catalogEntry.create({
+      data: { id: created.id, organizationId },
+    });
+
+    return tx.item.update({
+      where: { id: created.id },
+      data: { catalogEntryId: created.id },
+      include: { variants: true },
+    });
   });
 }
 
@@ -762,7 +783,7 @@ async function ensureRecipe(
     });
   }
 
-  return prisma.recipe.create({
+  const recipe = await prisma.recipe.create({
     data: {
       organizationId,
       itemId,
@@ -773,6 +794,34 @@ async function ensureRecipe(
       },
     },
   });
+
+  // La receta comparte la entrada del artículo (o la estrena si faltaba).
+  const item = await prisma.item.findUniqueOrThrow({
+    where: { id: itemId },
+    select: { catalogEntryId: true },
+  });
+
+  let catalogEntryId = item.catalogEntryId;
+
+  if (!catalogEntryId) {
+    await prisma.catalogEntry.upsert({
+      where: { id: itemId },
+      create: { id: itemId, organizationId },
+      update: {},
+    });
+    await prisma.item.update({
+      where: { id: itemId },
+      data: { catalogEntryId: itemId },
+    });
+    catalogEntryId = itemId;
+  }
+
+  await prisma.recipe.update({
+    where: { id: recipe.id },
+    data: { catalogEntryId },
+  });
+
+  return recipe;
 }
 
 main().catch((err) => {

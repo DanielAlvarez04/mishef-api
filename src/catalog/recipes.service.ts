@@ -15,6 +15,7 @@ import {
 } from '../common/units';
 import { QuantityConverter } from '../common/quantity-converter.service';
 import { isEmptyPatch, sameDecimal } from '../common/patch';
+import { CatalogEntriesService } from './catalog-entries.service';
 import { IngredientQuantitiesService } from './ingredient-quantities.service';
 import {
   CreateRecipeDto,
@@ -35,8 +36,25 @@ const ingredientSelect = {
 } as const;
 
 const recipeInclude = {
+  catalogEntry: {
+    select: { id: true, imageKey: true, imageUrl: true, imageName: true },
+  },
   category: { select: { id: true, name: true } },
-  item: { select: { id: true, name: true, sku: true, price: true, isActive: true } },
+  item: {
+    select: {
+      id: true,
+      name: true,
+      sku: true,
+      price: true,
+      isActive: true,
+      isCombo: true,
+      catalogEntry: { select: { imageKey: true, imageUrl: true } },
+      variants: {
+        where: { isActive: true },
+        orderBy: [{ sortOrder: 'asc' as const }, { name: 'asc' as const }],
+      },
+    },
+  },
   producesIngredient: {
     select: {
       id: true,
@@ -85,6 +103,7 @@ export class RecipesService {
     private readonly prisma: PrismaService,
     private readonly ingredientQuantities: IngredientQuantitiesService,
     private readonly quantities: QuantityConverter,
+    private readonly catalogEntries: CatalogEntriesService,
   ) {}
 
   async list(organizationId: string | null, filters: RecipeFilters = {}) {
@@ -134,12 +153,53 @@ export class RecipesService {
       await this.assertCategory(organizationId, dto.categoryId);
     }
 
+    if (dto.itemId) {
+      if (dto.publish) {
+        throw new BadRequestException(
+          'El artículo ya existe: vincula la receta sin volver a publicarlo',
+        );
+      }
+
+      const item = await this.prisma.item.findFirst({
+        where: { id: dto.itemId, organizationId },
+        select: { id: true },
+      });
+
+      if (!item) {
+        throw new NotFoundException('Artículo no encontrado');
+      }
+
+      if (dto.variantId) {
+        const variant = await this.prisma.itemVariant.findFirst({
+          where: { id: dto.variantId, itemId: item.id },
+          select: { id: true },
+        });
+
+        if (!variant) {
+          throw new NotFoundException('Presentación no encontrada');
+        }
+      }
+
+      // La base (variantId null) no está cubierta por el @@unique de Prisma
+      // porque Postgres considera distintos los NULL: se valida aquí.
+      const existing = await this.prisma.recipe.findFirst({
+        where: { itemId: item.id, variantId: dto.variantId ?? null },
+        select: { id: true },
+      });
+
+      if (existing) {
+        throw new ConflictException('El artículo ya tiene una receta');
+      }
+    }
+
     const lines = await this.resolveLines(organizationId, dto.ingredients ?? []);
 
     const recipeId = await this.prisma.$transaction(async (tx) => {
       const recipe = await tx.recipe.create({
         data: {
           organizationId,
+          itemId: dto.itemId ?? null,
+          variantId: dto.variantId ?? null,
           name,
           description: normalizeOptional(dto.description),
           categoryId: dto.categoryId ?? null,
@@ -161,6 +221,40 @@ export class RecipesService {
             })),
           },
         },
+      });
+
+      // Identidad del catálogo: si la receta se vincula a un artículo, comparte
+      // su entrada; si es independiente, estrena una con su propio id.
+      let catalogEntryId = recipe.id;
+
+      if (dto.itemId) {
+        const linked = await tx.item.findUniqueOrThrow({
+          where: { id: dto.itemId },
+          select: { id: true, catalogEntryId: true },
+        });
+
+        catalogEntryId = linked.catalogEntryId ?? linked.id;
+
+        if (!linked.catalogEntryId) {
+          await tx.catalogEntry.upsert({
+            where: { id: linked.id },
+            create: { id: linked.id, organizationId },
+            update: {},
+          });
+          await tx.item.update({
+            where: { id: linked.id },
+            data: { catalogEntryId: linked.id },
+          });
+        }
+      } else {
+        await tx.catalogEntry.create({
+          data: { id: recipe.id, organizationId },
+        });
+      }
+
+      await tx.recipe.update({
+        where: { id: recipe.id },
+        data: { catalogEntryId },
       });
 
       if (dto.produce) {
@@ -197,6 +291,18 @@ export class RecipesService {
 
     const data: Prisma.RecipeUncheckedUpdateInput = {};
 
+    if (dto.produce && dto.clearProduce) {
+      throw new BadRequestException(
+        'No se puede convertir en insumo y desvincularlo a la vez',
+      );
+    }
+
+    if (dto.clearProduce && recipe.producesIngredientId) {
+      data.producesIngredientId = null;
+      data.yieldQuantity = null;
+      data.yieldUnit = null;
+    }
+
     if (name !== undefined && name !== recipe.name) data.name = name;
     if (description !== undefined && description !== recipe.description) {
       data.description = description;
@@ -229,7 +335,9 @@ export class RecipesService {
       isEmptyPatch(data) &&
       !linesChanged &&
       !dto.produce &&
-      !dto.publish
+      !dto.publish &&
+      !dto.clearProduce &&
+      dto.imageKey === undefined
     ) {
       return this.findOne(organizationId, id);
     }
@@ -309,6 +417,23 @@ export class RecipesService {
       }
     });
 
+    if (dto.imageKey !== undefined) {
+      const entryId =
+        recipe.catalogEntryId ??
+        (await this.catalogEntries.ensureForRecipe(
+          organizationId,
+          recipe.id,
+        ));
+
+      // La imagen vive en la entrada compartida con el artículo publicado.
+      await this.catalogEntries.applyImage(
+        organizationId,
+        entryId,
+        name || recipe.name,
+        dto.imageKey,
+      );
+    }
+
     return this.findOne(organizationId, id);
   }
 
@@ -322,6 +447,9 @@ export class RecipesService {
     }
 
     await this.prisma.recipe.delete({ where: { id: recipe.id } });
+
+    // Si no queda artículo ni otra receta, se borra la entrada y su imagen.
+    await this.catalogEntries.deleteIfOrphan(recipe.catalogEntryId);
 
     return { ok: true };
   }
@@ -353,6 +481,11 @@ export class RecipesService {
 
     const itemId = recipe.itemId;
 
+    const item = await this.prisma.item.findUnique({
+      where: { id: itemId },
+      select: { catalogEntryId: true },
+    });
+
     await this.prisma.$transaction(async (tx) => {
       const orders = await tx.orderItem.count({ where: { itemId } });
 
@@ -371,6 +504,10 @@ export class RecipesService {
         await tx.item.delete({ where: { id: itemId } });
       }
     });
+
+    // La entrada suele seguir viva porque la receta la comparte; si el artículo
+    // era el único dueño, se limpia ahora.
+    await this.catalogEntries.deleteIfOrphan(item?.catalogEntryId);
 
     return this.findOne(organizationId, id);
   }
@@ -543,7 +680,13 @@ export class RecipesService {
     const categoryId = dto.categoryId ?? recipe.categoryId ?? null;
 
     if (categoryId) {
-      await this.assertCategory(organizationId, categoryId);
+      // Al publicar, la categoría elegida explícitamente es de artículo; si se
+      // hereda la de la receta se mantiene la validación histórica.
+      await this.assertCategory(
+        organizationId,
+        categoryId,
+        dto.categoryId ? CategoryKind.ARTICLE : CategoryKind.RECIPE,
+      );
     }
 
     const sku = dto.sku?.trim() || null;
@@ -568,10 +711,26 @@ export class RecipesService {
             { name: 'Grande', priceAdjust: 0, recipeFactor: 1.3, sortOrder: 2 },
           ];
 
+    // La receta ya tiene una entrada (la crea `create`). Si viene de datos
+    // históricos sin entrada, se estrena aquí con su propio id.
+    let catalogEntryId = recipe.catalogEntryId;
+
+    if (!catalogEntryId) {
+      await tx.catalogEntry.create({
+        data: { id: recipe.id, organizationId },
+      });
+      catalogEntryId = recipe.id;
+      await tx.recipe.update({
+        where: { id: recipe.id },
+        data: { catalogEntryId },
+      });
+    }
+
     const item = await tx.item.create({
       data: {
         organizationId,
         categoryId,
+        catalogEntryId,
         name: recipe.name,
         description: recipe.description,
         sku,
@@ -702,7 +861,11 @@ export class RecipesService {
     return recipe;
   }
 
-  private async assertCategory(organizationId: string | null, categoryId: string) {
+  private async assertCategory(
+    organizationId: string | null,
+    categoryId: string,
+    kind: CategoryKind = CategoryKind.RECIPE,
+  ) {
     const category = await this.prisma.category.findFirst({
       where: {
         id: categoryId,
@@ -719,9 +882,11 @@ export class RecipesService {
       throw new BadRequestException('La categoría está desactivada');
     }
 
-    if (category.kind !== CategoryKind.RECIPE) {
+    if (category.kind !== kind) {
       throw new BadRequestException(
-        'La categoría no es de recetas y preparaciones',
+        kind === CategoryKind.ARTICLE
+          ? 'La categoría no es de artículos'
+          : 'La categoría no es de recetas y preparaciones',
       );
     }
   }
@@ -754,8 +919,28 @@ export class RecipesService {
       };
     });
 
+    const { catalogEntry, item, ...rest } = recipe;
+
+    // La imagen vive en la entrada compartida. Se aplana igual que en los
+    // artículos para no cambiar el contrato de la web.
+    const flatItem = item
+      ? (() => {
+          const { catalogEntry: itemEntry, ...itemRest } = item;
+
+          return {
+            ...itemRest,
+            imageKey: itemEntry?.imageKey ?? null,
+            imageUrl: itemEntry?.imageUrl ?? null,
+          };
+        })()
+      : null;
+
     return {
-      ...recipe,
+      ...rest,
+      imageKey: catalogEntry?.imageKey ?? null,
+      imageUrl: catalogEntry?.imageUrl ?? null,
+      imageName: catalogEntry?.imageName ?? null,
+      item: flatItem,
       ingredients,
       estimatedCost: complete && recipe.ingredients.length > 0 ? cost : null,
       hasCompleteCost: complete && recipe.ingredients.length > 0,

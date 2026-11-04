@@ -36,9 +36,12 @@ export class UploadsService {
   /**
    * Firma una subida directa del navegador a R2.
    *
-   * La imagen se sube a la carpeta de la entidad (`{org}/{tab}/{id}/`), así que
-   * la entidad ya debe existir: el diálogo guarda primero el artículo y luego
-   * sube la imagen. No hay área temporal ni objetos huérfanos.
+   * La imagen se sube a la carpeta de la entidad (`{org}/{página}/{id}/`), así
+   * que la entidad ya debe existir: el diálogo guarda primero el artículo o la
+   * receta y luego sube la imagen. No hay área temporal ni objetos huérfanos.
+   *
+   * En `catalog`, `entityId` es el `CatalogEntry.id` (la identidad compartida
+   * por la receta y su artículo), no el id de la fila.
    *
    * El `Content-Type` va firmado, así que el objeto se guarda con el tipo
    * declarado. R2 no permite fijar el tamaño en la firma de un PUT: el límite
@@ -69,14 +72,7 @@ export class UploadsService {
       );
     }
 
-    const exists =
-      module === 'catalog'
-        ? await this.prisma.item.count({
-            where: { id: entityId, organizationId },
-          })
-        : await this.prisma.ingredient.count({
-            where: { id: entityId, organizationId },
-          });
+    const exists = await this.countEntity(module, entityId, organizationId);
 
     if (!exists) {
       throw new NotFoundException('La entidad no existe en este negocio');
@@ -98,5 +94,32 @@ export class UploadsService {
       expiresIn: UPLOAD_URL_EXPIRES_IN,
       maxBytes,
     };
+  }
+
+  /**
+   * Comprueba que la entidad existe en la organización del usuario.
+   *
+   * Cada página nueva añade su caso aquí (con su modelo y permiso). Las que
+   * todavía no tienen cargas responden 400 en vez de consultar otra tabla.
+   */
+  private async countEntity(
+    module: UploadModule,
+    entityId: string,
+    organizationId: string | null,
+  ): Promise<number> {
+    switch (module) {
+      case 'catalog':
+        return this.prisma.catalogEntry.count({
+          where: { id: entityId, organizationId },
+        });
+      case 'inventory':
+        return this.prisma.ingredient.count({
+          where: { id: entityId, organizationId },
+        });
+      default:
+        throw new BadRequestException(
+          `El módulo "${module}" todavía no admite cargas`,
+        );
+    }
   }
 }

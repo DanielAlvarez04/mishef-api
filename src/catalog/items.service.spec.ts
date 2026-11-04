@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { CatalogEntriesService } from './catalog-entries.service';
 import { IngredientQuantitiesService } from './ingredient-quantities.service';
 import { ItemsService } from './items.service';
 
@@ -11,6 +12,7 @@ function build() {
   const prisma = {
     item: {
       findFirst: jest.fn(),
+      findMany: jest.fn().mockResolvedValue([]),
       create: jest.fn(),
       update: jest.fn(),
     },
@@ -36,16 +38,26 @@ function build() {
     },
     category: { findFirst: jest.fn() },
     ingredient: { findFirst: jest.fn() },
+    catalogEntry: { create: jest.fn(), upsert: jest.fn() },
     $transaction: jest.fn(),
   };
+
+  prisma.$transaction.mockImplementation((fn) => fn(prisma));
 
   const quantities = {
     resolve: jest.fn().mockResolvedValue([]),
   } as unknown as IngredientQuantitiesService;
 
+  const catalogEntries = {
+    ensureForItem: jest.fn(),
+    applyImage: jest.fn(),
+    deleteIfOrphan: jest.fn(),
+  } as unknown as CatalogEntriesService;
+
   const service = new ItemsService(
     prisma as unknown as PrismaService,
     quantities,
+    catalogEntries,
   );
 
   return { service, prisma };
@@ -80,7 +92,12 @@ describe('ItemsService — validaciones de alta', () => {
     const { service, prisma } = build();
     prisma.item.findFirst
       .mockResolvedValueOnce(null) // SKU libre
-      .mockResolvedValueOnce({ id: 'p1', sku: 'CAF-01' }); // detalle posterior
+      .mockResolvedValueOnce({
+        id: 'p1',
+        sku: 'CAF-01',
+        menuItems: [],
+        catalogEntry: null,
+      }); // detalle posterior
     prisma.item.create.mockResolvedValue({ id: 'p1' });
 
     await service.create('o1', { name: 'Latte', sku: 'caf-01', price: 55 });

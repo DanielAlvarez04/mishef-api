@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { ServiceUnavailableException } from '@nestjs/common';
 import {
+  CopyObjectCommand,
   DeleteObjectCommand,
   HeadObjectCommand,
   PutObjectCommand,
@@ -25,7 +26,18 @@ export const IMAGE_CONTENT_TYPES = {
 
 export type ImageContentType = keyof typeof IMAGE_CONTENT_TYPES;
 
-export type UploadModule = 'catalog' | 'inventory';
+/**
+ * Módulos de carga. El valor coincide con la página/ruta de la app, no con el
+ * tipo de contenido: así una receta y un artículo viven bajo `catalog/`.
+ */
+export type UploadModule =
+  | 'catalog'
+  | 'inventory'
+  | 'users'
+  | 'menus'
+  | 'kitchen'
+  | 'reports'
+  | 'settings';
 
 /**
  * Las variables se leen en cada llamada: `dotenv` corre después de los imports.
@@ -83,15 +95,17 @@ export function r2Client(): S3Client {
 }
 
 /**
- * Clave del objeto con la que el navegador sube la imagen.
+ * Clave del objeto con la que el navegador sube el archivo.
  *
- * - El negocio va primero y luego el tab (`catalog`, `inventory`): permite
- *   reglas de ciclo de vida, auditoría y una futura migración a bucket privado
- *   por cliente.
- * - Cada entidad tiene su carpeta: `{org}/{tab}/{itemId}/`.
+ * - El negocio va primero y luego la página (`catalog`, `inventory`, `users`…):
+ *   permite reglas de ciclo de vida, auditoría y una futura migración a bucket
+ *   privado por cliente.
+ * - Cada entidad tiene su carpeta: `{org}/{página}/{entityId}/`. Para el
+ *   catálogo, `entityId` es el `CatalogEntry.id`, compartido por la receta y su
+ *   artículo.
  * - El nombre es un hash: no expone el nombre del artículo en un bucket
  *   público ni permite enumerar objetos. El nombre legible vive en la base
- *   (`Item.imageName`).
+ *   (`CatalogEntry.imageName`).
  */
 export function buildObjectKey(
   organizationId: string,
@@ -104,15 +118,24 @@ export function buildObjectKey(
     .digest('hex')
     .slice(0, 32);
 
-  return `${organizationId}/${module}/${entityId}/${hash}.${IMAGE_CONTENT_TYPES[contentType]}`;
+  return `${assetFolder(organizationId, module, entityId)}/${hash}.${IMAGE_CONTENT_TYPES[contentType]}`;
 }
 
-/** Carpeta de un artículo concreto: `{org}/catalog/{itemId}`. */
-export function itemImageFolder(
+/** Carpeta de un módulo/entidad: `{org}/{página}/{entityId}`. */
+export function assetFolder(
   organizationId: string,
-  itemId: string,
+  module: UploadModule,
+  entityId: string,
 ): string {
-  return `${organizationId}/catalog/${itemId}`;
+  return `${organizationId}/${module}/${entityId}`;
+}
+
+/** Carpeta de un elemento del catálogo: `{org}/catalog/{entryId}`. */
+export function catalogFolder(
+  organizationId: string,
+  catalogEntryId: string,
+): string {
+  return assetFolder(organizationId, 'catalog', catalogEntryId);
 }
 
 /**
@@ -203,4 +226,23 @@ export async function deleteR2Object(key: string): Promise<void> {
   } catch {
     // Se ignora: el objeto huérfano se puede limpiar con una regla de ciclo de vida.
   }
+}
+
+/**
+ * Copia un objeto dentro del bucket (server-side, sin descargarlo).
+ *
+ * Se usa en migraciones de rutas: primero se copia, luego se actualiza la base
+ * y al final se borra el original.
+ */
+export async function copyR2Object(
+  sourceKey: string,
+  targetKey: string,
+): Promise<void> {
+  await r2Client().send(
+    new CopyObjectCommand({
+      Bucket: r2Bucket(),
+      CopySource: `${r2Bucket()}/${sourceKey}`,
+      Key: targetKey,
+    }),
+  );
 }

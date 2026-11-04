@@ -183,17 +183,27 @@ export class CatalogImportService {
           result.updated += 1;
         } else {
           if (!dryRun) {
-            await this.prisma.item.create({
-              data: {
-                organizationId,
-                name,
-                description,
-                sku,
-                categoryId: category?.id ?? null,
-                price,
-                taxRate,
-                isActive: isActive ?? true,
-              },
+            await this.prisma.$transaction(async (tx) => {
+              const created = await tx.item.create({
+                data: {
+                  organizationId,
+                  name,
+                  description,
+                  sku,
+                  categoryId: category?.id ?? null,
+                  price,
+                  taxRate,
+                  isActive: isActive ?? true,
+                },
+              });
+
+              await tx.catalogEntry.create({
+                data: { id: created.id, organizationId },
+              });
+              await tx.item.update({
+                where: { id: created.id },
+                data: { catalogEntryId: created.id },
+              });
             });
           }
           result.created += 1;

@@ -15,14 +15,7 @@ import { IngredientQuantitiesService } from './ingredient-quantities.service';
 import { fromCanonicalQuantity, toMoney } from '../common/units';
 import { isEmptyPatch, sameDecimal } from '../common/patch';
 import { alphabetSuffix, categoryInitials } from '../common/sku';
-import {
-  deleteR2Object,
-  imageSnapshotName,
-  itemImageFolder,
-  maxUploadBytes,
-  objectSize,
-  publicUrlForKey,
-} from '../uploads/r2';
+import { CatalogEntriesService } from './catalog-entries.service';
 import {
   ComboComponentInputDto,
   CreateExtraDto,
@@ -42,6 +35,9 @@ import {
 import { isNoPriceOptionGroup } from './option-presets';
 
 const itemListInclude = {
+  catalogEntry: {
+    select: { id: true, imageKey: true, imageUrl: true, imageName: true },
+  },
   category: { select: { id: true, name: true } },
   variants: { orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] },
   extras: { orderBy: { name: 'asc' } },
@@ -105,6 +101,9 @@ const itemListInclude = {
 } satisfies Prisma.ItemInclude;
 
 const itemDetailInclude = {
+  catalogEntry: {
+    select: { id: true, imageKey: true, imageUrl: true, imageName: true },
+  },
   category: { select: { id: true, name: true } },
   variants: {
     orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
@@ -205,6 +204,7 @@ export class ItemsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly ingredientQuantities: IngredientQuantitiesService,
+    private readonly catalogEntries: CatalogEntriesService,
   ) {}
 
   async list(organizationId: string | null, filters: ItemFilters = {}) {
@@ -258,12 +258,22 @@ export class ItemsService {
       menuItems: Array<{
         menu: { id: string; name: string; isActive: boolean };
       }>;
+      catalogEntry: {
+        imageKey: string | null;
+        imageUrl: string | null;
+        imageName: string | null;
+      } | null;
     },
   >(item: T) {
-    const { menuItems, ...rest } = item;
+    const { menuItems, catalogEntry, ...rest } = item;
 
+    // La imagen vive en la entrada compartida; la API la expone plana para no
+    // cambiar el contrato que ya consumen la tabla y las tarjetas.
     return {
       ...rest,
+      imageKey: catalogEntry?.imageKey ?? null,
+      imageUrl: catalogEntry?.imageUrl ?? null,
+      imageName: catalogEntry?.imageName ?? null,
       menus: menuItems.map((row) => row.menu),
     };
   }
@@ -374,81 +384,100 @@ export class ItemsService {
 
     const promotions = this.promotionData(dto.promotions ?? []);
 
-    const item = await this.prisma.item.create({
-      data: {
-        organizationId,
-        categoryId: dto.categoryId ?? null,
-        name,
-        description: normalizeOptional(dto.description),
-        sku,
-        price: toMoney(dto.price),
-        taxRate:
-          dto.taxRate === undefined || dto.taxRate === null
-            ? null
-            : new Prisma.Decimal(dto.taxRate),
-        isCombo,
-        sortOrder: dto.sortOrder ?? 0,
-        variants: {
-          create: variants.map((variant, index) => ({
-            name: variant.name.trim(),
-            sku: `${sku}${alphabetSuffix(index)}`,
-            isPrimary: index === primary,
-            priceAdjust: toMoney(variant.priceAdjust ?? 0),
-            recipeFactor: new Prisma.Decimal(variant.recipeFactor ?? 1),
-            sortOrder: variant.sortOrder ?? index,
-            isActive: variant.isActive ?? true,
-          })),
+    const item = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.item.create({
+        data: {
+          organizationId,
+          categoryId: dto.categoryId ?? null,
+          name,
+          description: normalizeOptional(dto.description),
+          sku,
+          price: toMoney(dto.price),
+          taxRate:
+            dto.taxRate === undefined || dto.taxRate === null
+              ? null
+              : new Prisma.Decimal(dto.taxRate),
+          isCombo,
+          sortOrder: dto.sortOrder ?? 0,
+          variants: {
+            create: variants.map((variant, index) => ({
+              name: variant.name.trim(),
+              sku: `${sku}${alphabetSuffix(index)}`,
+              isPrimary: index === primary,
+              priceAdjust: toMoney(variant.priceAdjust ?? 0),
+              recipeFactor: new Prisma.Decimal(variant.recipeFactor ?? 1),
+              sortOrder: variant.sortOrder ?? index,
+              isActive: variant.isActive ?? true,
+            })),
+          },
+          extras: {
+            create: extras.map((extra) => ({
+              name: extra.name,
+              price: extra.price,
+              isActive: extra.isActive,
+              ingredients: {
+                create: extra.ingredients.map((ingredient) => ({
+                  quantity: ingredient.quantity,
+                  ingredient: { connect: { id: ingredient.ingredientId } },
+                })),
+              },
+            })),
+          },
+          ingredientExclusions: {
+            create: exclusions.map((exclusion) => ({
+              label: exclusion.label,
+              ingredient: { connect: { id: exclusion.ingredientId } },
+            })),
+          },
+          comboComponents: {
+            create: components.map((component) => ({
+              quantity: component.quantity,
+              componentItem: { connect: { id: component.componentItemId } },
+              ...(component.componentVariantId
+                ? {
+                    variant: { connect: { id: component.componentVariantId } },
+                  }
+                : {}),
+            })),
+          },
+          optionGroups: {
+            create: optionGroups.map((group) => ({
+              group: { connect: { id: group.groupId } },
+              isRequired: group.isRequired,
+              selection: group.selection,
+              minSelect: group.minSelect,
+              maxSelect: group.maxSelect,
+              sortOrder: group.sortOrder,
+              values: {
+                create: group.values.map((value) => ({
+                  ...(value.valueId
+                    ? { value: { connect: { id: value.valueId } } }
+                    : {}),
+                  customName: value.customName,
+                  priceDelta: value.priceDelta,
+                  isDefault: value.isDefault,
+                  sortOrder: value.sortOrder,
+                  isActive: value.isActive,
+                  effects: { create: value.effects },
+                })),
+              },
+            })),
+          },
+          promotions: { create: promotions },
         },
-        extras: {
-          create: extras.map((extra) => ({
-            name: extra.name,
-            price: extra.price,
-            isActive: extra.isActive,
-            ingredients: {
-              create: extra.ingredients.map((ingredient) => ({
-                quantity: ingredient.quantity,
-                ingredient: { connect: { id: ingredient.ingredientId } },
-              })),
-            },
-          })),
-        },
-        ingredientExclusions: {
-          create: exclusions.map((exclusion) => ({
-            label: exclusion.label,
-            ingredient: { connect: { id: exclusion.ingredientId } },
-          })),
-        },
-        comboComponents: {
-          create: components.map((component) => ({
-            quantity: component.quantity,
-            componentItem: { connect: { id: component.componentItemId } },
-            ...(component.componentVariantId
-              ? { variant: { connect: { id: component.componentVariantId } } }
-              : {}),
-          })),
-        },
-        optionGroups: {
-          create: optionGroups.map((group) => ({
-            group: { connect: { id: group.groupId } },
-            isRequired: group.isRequired,
-            selection: group.selection,
-            minSelect: group.minSelect,
-            maxSelect: group.maxSelect,
-            sortOrder: group.sortOrder,
-            values: {
-              create: group.values.map((value) => ({
-                value: { connect: { id: value.valueId } },
-                priceDelta: value.priceDelta,
-                isDefault: value.isDefault,
-                sortOrder: value.sortOrder,
-                isActive: value.isActive,
-                effects: { create: value.effects },
-              })),
-            },
-          })),
-        },
-        promotions: { create: promotions },
-      },
+      });
+
+      // La entrada nace con el id del artículo: la carpeta `catalog/{id}/`
+      // coincide con el artículo y no cambia si luego se le vincula una receta.
+      await tx.catalogEntry.create({
+        data: { id: created.id, organizationId },
+      });
+      await tx.item.update({
+        where: { id: created.id },
+        data: { catalogEntryId: created.id },
+      });
+
+      return created;
     });
 
     return this.findOne(organizationId, item.id);
@@ -556,14 +585,16 @@ export class ItemsService {
     }
 
     if (imageKey !== undefined) {
-      // Guarda la imagen en la carpeta del artículo y borra la anterior para
-      // que solo quede una por artículo.
-      await this.applyItemImage(
+      const entryId =
+        item.catalogEntryId ??
+        (await this.catalogEntries.ensureForItem(organizationId, item.id));
+
+      // La imagen vive en la entrada compartida con la receta, si existe.
+      await this.catalogEntries.applyImage(
         organizationId,
-        item.id,
+        entryId,
         name || item.name,
         imageKey,
-        item.imageKey,
       );
     }
 
@@ -730,70 +761,6 @@ export class ItemsService {
     }
   }
 
-  /**
-   * Guarda la imagen del artículo y borra la anterior.
-   *
-   * La subida ya fue directa a `{org}/catalog/{itemId}/{hash}.{ext}`, así que
-   * aquí solo se valida la clave, se comprueba el tamaño real y se elimina el
-   * objeto anterior: solo queda una imagen por artículo en el bucket.
-   */
-  private async applyItemImage(
-    organizationId: string | null,
-    itemId: string,
-    name: string,
-    imageKey: string | null,
-    previousKey: string | null,
-  ) {
-    if (imageKey === previousKey) return;
-
-    if (!organizationId) {
-      throw new BadRequestException(
-        'Selecciona una organización antes de guardar imágenes',
-      );
-    }
-
-    if (imageKey === null) {
-      await this.prisma.item.update({
-        where: { id: itemId },
-        data: { imageKey: null, imageUrl: null, imageName: null },
-      });
-
-      // La base ya no apunta a la imagen: el objeto puede borrarse.
-      if (previousKey) await deleteR2Object(previousKey);
-      return;
-    }
-
-    const folder = itemImageFolder(organizationId, itemId);
-
-    if (!imageKey.startsWith(`${folder}/`)) {
-      throw new BadRequestException('La imagen no pertenece a este artículo');
-    }
-
-    // R2 no permite fijar el tamaño en la firma del PUT: se comprueba aquí.
-    const size = await objectSize(imageKey);
-    const maxBytes = maxUploadBytes();
-
-    if (size !== null && size > maxBytes) {
-      await deleteR2Object(imageKey);
-      throw new BadRequestException(
-        `La imagen supera el máximo de ${Math.round(maxBytes / 1024 / 1024)} MB`,
-      );
-    }
-
-    await this.prisma.item.update({
-      where: { id: itemId },
-      data: {
-        imageKey,
-        imageUrl: publicUrlForKey(imageKey),
-        // Nombre legible en la base; en R2 el objeto va hasheado.
-        imageName: imageSnapshotName(name),
-      },
-    });
-
-    // Solo una imagen por artículo: la anterior deja de existir en el bucket.
-    if (previousKey) await deleteR2Object(previousKey);
-  }
-
   /** Prefijo del SKU: `X` + dos letras de la categoría (XVA, XBE…). */
   private articleSkuPrefix(categoryName: string | null): string {
     return `X${categoryInitials(categoryName ?? 'General', 2)}`;
@@ -899,7 +866,7 @@ export class ItemsService {
 
     const items = await this.prisma.item.findMany({
       where: { id: { in: uniqueIds }, organizationId },
-      select: { id: true, name: true, imageKey: true },
+      select: { id: true, name: true, catalogEntryId: true },
     });
 
     if (items.length === 0) {
@@ -950,13 +917,12 @@ export class ItemsService {
       await tx.item.deleteMany({ where: { id: { in: itemIds } } });
     });
 
-    // La base ya no referencia las imágenes: se limpian del bucket.
+    // La base ya no referencia las entradas: se borran las que quedaron sin
+    // artículo ni receta, junto con su objeto de R2.
     await Promise.all(
-      items
-        .filter((item) => item.imageKey)
-        .map((item) =>
-          deleteR2Object(item.imageKey as string).catch(() => undefined),
-        ),
+      items.map((item) =>
+        this.catalogEntries.deleteIfOrphan(item.catalogEntryId),
+      ),
     );
 
     return { ok: true, deletedCount: items.length };
@@ -1460,7 +1426,7 @@ export class ItemsService {
 
     const groups = await this.prisma.optionGroup.findMany({
       where: { id: { in: groupIds }, organizationId },
-      include: { values: { select: { id: true } } },
+      include: { values: { select: { id: true, name: true } } },
     });
 
     const assignedGroupIds = itemId
@@ -1540,7 +1506,8 @@ export class ItemsService {
         );
       }
 
-      if (maxSelect > group.values.length) {
+      // Un grupo recién creado puede no tener opciones todavía.
+      if (group.values.length > 0 && maxSelect > group.values.length) {
         throw new BadRequestException(
           `El grupo ${catalog.name} no tiene suficientes opciones para el máximo configurado`,
         );
@@ -1553,20 +1520,59 @@ export class ItemsService {
       }
 
       const catalogValues = new Set(catalog.values.map((value) => value.id));
-      const valueIds = group.values.map((value) => value.valueId);
-
-      if (new Set(valueIds).size !== valueIds.length) {
-        throw new BadRequestException(
-          `Un valor no puede repetirse en ${catalog.name}`,
-        );
-      }
+      const catalogValueNames = new Set(
+        catalog.values.map((value) => value.name.toLowerCase()),
+      );
+      const seenValues = new Set<string>();
+      const seenCustomNames = new Set<string>();
 
       const values = group.values.map((value, valueIndex) => {
-        if (!catalogValues.has(value.valueId)) {
+        const customName = value.customName?.trim();
+
+        if (value.valueId && customName) {
+          throw new BadRequestException(
+            `La opción de ${catalog.name} no puede ser de la biblioteca y propia del artículo a la vez`,
+          );
+        }
+
+        if (!value.valueId && !customName) {
+          throw new BadRequestException(
+            `Cada opción de ${catalog.name} necesita un valor de la biblioteca o un nombre propio`,
+          );
+        }
+
+        if (value.valueId && !catalogValues.has(value.valueId)) {
           throw new BadRequestException(
             `La opción no pertenece al grupo ${catalog.name}`,
           );
         }
+
+        if (customName) {
+          const normalized = customName.toLowerCase();
+
+          if (
+            catalogValueNames.has(normalized) ||
+            seenCustomNames.has(normalized)
+          ) {
+            throw new BadRequestException(
+              `La opción ${customName} ya existe en ${catalog.name}`,
+            );
+          }
+
+          seenCustomNames.add(normalized);
+        }
+
+        const valueKey = value.valueId
+          ? `library:${value.valueId}`
+          : `custom:${customName!.toLowerCase()}`;
+
+        if (seenValues.has(valueKey)) {
+          throw new BadRequestException(
+            `Un valor no puede repetirse en ${catalog.name}`,
+          );
+        }
+
+        seenValues.add(valueKey);
 
         // Los grupos "Sin ..." no pueden cargar un precio extra: la opción
         // solo quita un ingrediente.
@@ -1575,7 +1581,8 @@ export class ItemsService {
           : toMoney(value.priceDelta ?? 0);
 
         return {
-          valueId: value.valueId,
+          valueId: value.valueId ?? null,
+          customName: customName ?? null,
           priceDelta,
           isDefault: value.isDefault ?? false,
           sortOrder: value.sortOrder ?? valueIndex,
@@ -1748,6 +1755,7 @@ export class ItemsService {
               values: {
                 create: group.values.map((value) => ({
                   valueId: value.valueId,
+                  customName: value.customName,
                   priceDelta: value.priceDelta,
                   isDefault: value.isDefault,
                   sortOrder: value.sortOrder,
@@ -1786,10 +1794,10 @@ export class ItemsService {
         }
 
         const incomingValues = new Map(
-          group.values.map((value) => [value.valueId, value]),
+          group.values.map((value) => [this.optionValueKey(value), value]),
         );
         const removedValues = current.values.filter(
-          (value) => !incomingValues.has(value.valueId),
+          (value) => !incomingValues.has(this.optionValueKey(value)),
         );
 
         if (removedValues.length > 0) {
@@ -1800,7 +1808,8 @@ export class ItemsService {
 
         for (const value of group.values) {
           const match = current.values.find(
-            (candidate) => candidate.valueId === value.valueId,
+            (candidate) =>
+              this.optionValueKey(candidate) === this.optionValueKey(value),
           );
 
           if (!match) {
@@ -1808,6 +1817,7 @@ export class ItemsService {
               data: {
                 itemOptionGroupId: current.id,
                 valueId: value.valueId,
+                customName: value.customName,
                 priceDelta: value.priceDelta,
                 isDefault: value.isDefault,
                 sortOrder: value.sortOrder,
@@ -1857,6 +1867,15 @@ export class ItemsService {
         }
       }
     });
+  }
+
+  private optionValueKey(value: {
+    valueId: string | null;
+    customName: string | null;
+  }) {
+    return value.valueId
+      ? `library:${value.valueId}`
+      : `custom:${(value.customName ?? '').trim().toLowerCase()}`;
   }
 
   private effectsSignature(
