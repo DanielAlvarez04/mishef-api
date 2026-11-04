@@ -783,6 +783,47 @@ async function ensureRecipe(
     });
   }
 
+  // Una presentación ya no crea otra receta: sus insumos viven en la receta
+  // base con `variantId`, reemplazando la cantidad común del mismo insumo.
+  if (variantId) {
+    const base = await prisma.recipe.findFirst({
+      where: { itemId, variantId: null },
+    });
+
+    if (!base) {
+      throw new Error('La receta base debe existir antes de sus presentaciones');
+    }
+
+    for (const line of resolved) {
+      const existingLine = await prisma.recipeIngredient.findFirst({
+        where: {
+          recipeId: base.id,
+          variantId,
+          ingredientId: line.ingredientId,
+        },
+        select: { id: true },
+      });
+
+      if (existingLine) {
+        await prisma.recipeIngredient.update({
+          where: { id: existingLine.id },
+          data: { quantity: line.quantity },
+        });
+      } else {
+        await prisma.recipeIngredient.create({
+          data: {
+            recipeId: base.id,
+            variantId,
+            ingredientId: line.ingredientId,
+            quantity: line.quantity,
+          },
+        });
+      }
+    }
+
+    return base;
+  }
+
   const recipe = await prisma.recipe.create({
     data: {
       organizationId,

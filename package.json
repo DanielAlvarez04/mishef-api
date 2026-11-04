@@ -13,6 +13,7 @@
     "prisma:studio": "prisma studio",
     "prisma:seed": "ts-node prisma/seed.ts",
     "catalog:assets": "node scripts/migrate-catalog-assets.mjs",
+    "recipe:scopes": "node scripts/migrate-recipe-scopes.mjs",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",

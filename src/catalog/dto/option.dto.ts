@@ -15,7 +15,7 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
-import { OptionEffectAction, OptionSelection } from '@prisma/client';
+import { OptionEffectAction, OptionSelection, UnitCode } from '@prisma/client';
 
 /** Valor de la biblioteca de opciones (ej. "Salsa roja"). Sin precio. */
 export class OptionValueInputDto {
@@ -122,10 +122,21 @@ export class ItemOptionEffectInputDto {
   @MaxLength(40)
   ingredientId?: string;
 
+  /** Insumo de la receta que se reemplaza (REPLACE), identificado por insumo. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  replacesIngredientId?: string;
+
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 4 })
   @Min(0)
   quantity?: number;
+
+  /** Unidad visible de `quantity`; la API la convierte a la canónica. */
+  @IsOptional()
+  @IsEnum(UnitCode)
+  unit?: UnitCode;
 }
 
 /** Valor del grupo aplicado a un artículo: precio, default y efectos. */
@@ -151,6 +162,12 @@ export class ItemOptionValueInputDto {
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   priceDelta?: number;
+
+  /** Multiplicador de consumo de la receta para esta opción (tamaños). */
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 3 })
+  @Min(0.1)
+  scaleFactor?: number;
 
   @IsOptional()
   @IsBoolean()

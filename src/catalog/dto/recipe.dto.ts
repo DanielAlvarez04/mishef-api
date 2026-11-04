@@ -49,6 +49,11 @@ export class RecipeIngredientInputDto {
   @IsEnum(UnitCode)
   unit?: UnitCode;
 
+  /** Presentación a la que aplica el insumo; omitido/null = común. */
+  @IsOptional()
+  @IsString()
+  variantId?: string | null;
+
   /** Nombre del slot ("Leche"); si falta se usa el del insumo default. */
   @IsOptional()
   @IsString()

@@ -69,6 +69,7 @@ const recipeInclude = {
     orderBy: [{ sortOrder: 'asc' as const }, { id: 'asc' as const }],
     include: {
       ingredient: { select: ingredientSelect },
+      variant: { select: { id: true, name: true } },
       options: {
         orderBy: [{ sortOrder: 'asc' as const }, { id: 'asc' as const }],
         include: { ingredient: { select: ingredientSelect } },
@@ -82,6 +83,7 @@ type RecipeWithRelations = Prisma.RecipeGetPayload<{ include: typeof recipeInclu
 interface ResolvedLine {
   ingredientId: string;
   quantity: Prisma.Decimal;
+  variantId: string | null;
   label: string | null;
   isOptional: boolean;
   alternatives: Array<{ ingredientId: string; quantity: Prisma.Decimal }>;
@@ -112,6 +114,9 @@ export class RecipesService {
     const recipes = await this.prisma.recipe.findMany({
       where: {
         organizationId,
+        // Las recetas por presentación son legado: ahora una sola receta
+        // contiene los insumos comunes y los de cada presentación.
+        variantId: null,
         ...(filters.includeInactive ? {} : { isActive: true }),
         ...(filters.categoryId ? { categoryId: filters.categoryId } : {}),
         ...(filters.publication === 'published'
@@ -192,7 +197,11 @@ export class RecipesService {
       }
     }
 
-    const lines = await this.resolveLines(organizationId, dto.ingredients ?? []);
+    const lines = await this.resolveLines(
+      organizationId,
+      dto.itemId ?? null,
+      dto.ingredients ?? [],
+    );
 
     const recipeId = await this.prisma.$transaction(async (tx) => {
       const recipe = await tx.recipe.create({
@@ -207,6 +216,7 @@ export class RecipesService {
           ingredients: {
             create: lines.map((line, index) => ({
               ingredientId: line.ingredientId,
+              variantId: line.variantId,
               label: line.label,
               quantity: line.quantity,
               isOptional: line.isOptional,
@@ -281,7 +291,11 @@ export class RecipesService {
     const lines =
       dto.ingredients === undefined
         ? undefined
-        : await this.resolveLines(organizationId, dto.ingredients);
+        : await this.resolveLines(
+            organizationId,
+            recipe.itemId,
+            dto.ingredients,
+          );
 
     const name = dto.name === undefined ? undefined : dto.name.trim();
     const description =
@@ -356,6 +370,7 @@ export class RecipesService {
           data: lines.map((line, index) => ({
             recipeId: recipe.id,
             ingredientId: line.ingredientId,
+            variantId: line.variantId,
             label: line.label,
             quantity: line.quantity,
             isOptional: line.isOptional,
@@ -397,6 +412,7 @@ export class RecipesService {
           ).map((line) => ({
             ingredientId: line.ingredientId,
             quantity: line.quantity,
+            variantId: null,
             label: null,
             isOptional: false,
             alternatives: [],
@@ -633,11 +649,45 @@ export class RecipesService {
 
   private async resolveLines(
     organizationId: string | null,
+    itemId: string | null,
     input: RecipeIngredientInputDto[],
   ): Promise<ResolvedLine[]> {
     const lines: ResolvedLine[] = [];
+    const seen = new Set<string>();
 
     for (const line of input) {
+      const variantId = line.variantId ?? null;
+
+      if (variantId) {
+        if (!itemId) {
+          throw new BadRequestException(
+            'Solo una receta vinculada a un artículo puede tener insumos por presentación',
+          );
+        }
+
+        const variant = await this.prisma.itemVariant.findFirst({
+          where: { id: variantId, itemId },
+          select: { id: true },
+        });
+
+        if (!variant) {
+          throw new BadRequestException(
+            'La presentación no pertenece al artículo de la receta',
+          );
+        }
+      }
+
+      const key = `${variantId ?? 'common'}:${line.ingredientId}`;
+
+      if (seen.has(key)) {
+        throw new BadRequestException(
+          variantId
+            ? 'El insumo está repetido en la misma presentación'
+            : 'El insumo está repetido en la receta común',
+        );
+      }
+      seen.add(key);
+
       const resolved = await this.ingredientQuantities.resolve(organizationId, [
         {
           ingredientId: line.ingredientId,
@@ -656,6 +706,7 @@ export class RecipesService {
       lines.push({
         ingredientId: defaultOption.ingredientId,
         quantity: defaultOption.quantity,
+        variantId,
         label: line.label?.trim() || null,
         isOptional: line.isOptional ?? false,
         alternatives,
@@ -892,20 +943,64 @@ export class RecipesService {
   }
 
   private toResponse(recipe: RecipeWithRelations) {
-    let cost = new Prisma.Decimal(0);
-    let complete = true;
+    const { catalogEntry, item, ...rest } = recipe;
+
+    const commonLines = recipe.ingredients.filter(
+      (line) => line.variantId === null,
+    );
+    const scopedLines = recipe.ingredients.filter(
+      (line) => line.variantId !== null,
+    );
+
+    const costFor = (variantId: string | null) => {
+      const variantLines = variantId
+        ? scopedLines.filter((line) => line.variantId === variantId)
+        : [];
+      const overridden = new Set(
+        variantLines.map((line) => line.ingredientId),
+      );
+      const effective = [
+        ...commonLines.filter((line) => !overridden.has(line.ingredientId)),
+        ...variantLines,
+      ];
+
+      let cost = new Prisma.Decimal(0);
+      let complete = true;
+
+      for (const line of effective) {
+        if (line.ingredient.unitCost === null) {
+          complete = false;
+        } else {
+          cost = cost.plus(line.quantity.times(line.ingredient.unitCost));
+        }
+      }
+
+      const factor = variantId
+        ? (item?.variants.find((variant) => variant.id === variantId)
+            ?.recipeFactor ?? new Prisma.Decimal(1))
+        : new Prisma.Decimal(1);
+
+      return {
+        cost: cost.times(factor),
+        complete,
+        count: effective.length,
+      };
+    };
+
+    const activeVariants = item
+      ? item.variants.filter((variant) => variant.isActive)
+      : [];
+    const primaryVariant =
+      activeVariants.find((variant) => variant.isPrimary) ?? activeVariants[0];
+    const primaryCost = costFor(primaryVariant?.id ?? null);
 
     const ingredients = recipe.ingredients.map((line) => {
       const displayUnit = line.ingredient.displayUnit;
-
-      if (line.ingredient.unitCost === null) {
-        complete = false;
-      } else {
-        cost = cost.plus(line.quantity.times(line.ingredient.unitCost));
-      }
+      const { variant, ...restLine } = line;
 
       return {
-        ...line,
+        ...restLine,
+        variantName: variant?.name ?? null,
         quantity: fromCanonicalQuantity(line.quantity, displayUnit),
         ingredient: this.displayIngredient(line.ingredient),
         options: line.options.map((option) => ({
@@ -918,8 +1013,6 @@ export class RecipesService {
         })),
       };
     });
-
-    const { catalogEntry, item, ...rest } = recipe;
 
     // La imagen vive en la entrada compartida. Se aplana igual que en los
     // artículos para no cambiar el contrato de la web.
@@ -942,9 +1035,23 @@ export class RecipesService {
       imageName: catalogEntry?.imageName ?? null,
       item: flatItem,
       ingredients,
-      estimatedCost: complete && recipe.ingredients.length > 0 ? cost : null,
-      hasCompleteCost: complete && recipe.ingredients.length > 0,
-      canComputeConsumption: recipe.ingredients.length > 0,
+      estimatedCost:
+        primaryCost.complete && primaryCost.count > 0
+          ? primaryCost.cost
+          : null,
+      hasCompleteCost: primaryCost.complete && primaryCost.count > 0,
+      canComputeConsumption: primaryCost.count > 0,
+      variantCosts: activeVariants.map((variant) => {
+        const result = costFor(variant.id);
+
+        return {
+          variantId: variant.id,
+          variantName: variant.name,
+          estimatedCost:
+            result.complete && result.count > 0 ? result.cost.toString() : null,
+          hasCompleteCost: result.complete && result.count > 0,
+        };
+      }),
     };
   }
 
@@ -984,6 +1091,7 @@ function normalizeOptional(value: string | null | undefined): string | null {
 function sameRecipeLines(
   current: ReadonlyArray<{
     ingredientId: string;
+    variantId: string | null;
     quantity: Prisma.Decimal;
     label: string | null;
     isOptional: boolean;
@@ -1001,6 +1109,7 @@ function sameRecipeLines(
 
     if (
       line.ingredientId !== target.ingredientId ||
+      (line.variantId ?? null) !== (target.variantId ?? null) ||
       !sameDecimal(line.quantity, target.quantity) ||
       (line.label ?? null) !== (target.label ?? null) ||
       line.isOptional !== target.isOptional ||

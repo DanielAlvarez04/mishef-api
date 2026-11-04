@@ -1312,6 +1312,7 @@ interface ConsumptionLine {
 interface RecipeLineLike {
   id: string;
   ingredientId: string;
+  variantId: string | null;
   quantity: Prisma.Decimal;
   options: Array<{ ingredientId: string; quantity: Prisma.Decimal }>;
 }
@@ -1336,7 +1337,7 @@ interface VariantLike {
  * - Extras: consumo declarado en el catálogo del extra.
  * - Exclusiones: el ingrediente que el cliente quitó no se descuenta.
  */
-function consumptionForItem(item: {
+export function consumptionForItem(item: {
   itemVariantId: string | null;
   extras: Array<{ itemExtraId: string | null }>;
   exclusions: Array<{ ingredientId: string }>;
@@ -1346,9 +1347,11 @@ function consumptionForItem(item: {
   }>;
   options: Array<{
     itemOptionValue: {
+      scaleFactor: Prisma.Decimal;
       effects: Array<{
         action: OptionEffectAction;
         recipeIngredientId: string | null;
+        replacesIngredientId: string | null;
         ingredientId: string | null;
         quantity: Prisma.Decimal | null;
       }>;
@@ -1399,6 +1402,11 @@ function consumptionForItem(item: {
     quantity: Prisma.Decimal;
   }> = [];
 
+  const ingredientReplacements = new Map<
+    string,
+    { ingredientId: string; quantity: Prisma.Decimal | null }
+  >();
+
   for (const option of item.options) {
     for (const effect of option.itemOptionValue?.effects ?? []) {
       if (effect.action === OptionEffectAction.ADD && effect.ingredientId) {
@@ -1409,15 +1417,18 @@ function consumptionForItem(item: {
         continue;
       }
 
-      if (
-        effect.action === OptionEffectAction.REPLACE &&
-        effect.recipeIngredientId &&
-        effect.ingredientId
-      ) {
-        slotReplacements.set(effect.recipeIngredientId, {
-          ingredientId: effect.ingredientId,
-          quantity: effect.quantity,
-        });
+      if (effect.action === OptionEffectAction.REPLACE && effect.ingredientId) {
+        if (effect.recipeIngredientId) {
+          slotReplacements.set(effect.recipeIngredientId, {
+            ingredientId: effect.ingredientId,
+            quantity: effect.quantity,
+          });
+        } else if (effect.replacesIngredientId) {
+          ingredientReplacements.set(effect.replacesIngredientId, {
+            ingredientId: effect.ingredientId,
+            quantity: effect.quantity,
+          });
+        }
         continue;
       }
 
@@ -1432,36 +1443,68 @@ function consumptionForItem(item: {
     }
   }
 
+  // Las opciones de tamaño multiplican el consumo de toda la receta.
+  const optionFactor = item.options.reduce((factor, option) => {
+    const scale = option.itemOptionValue?.scaleFactor;
+    return scale ? factor.times(scale) : factor;
+  }, new Prisma.Decimal(1));
+
+  // Insumos efectivos de una presentación: comunes + propios, con el propio
+  // reemplazando al común si repiten insumo.
+  const effectiveRecipeLines = (
+    lines: RecipeLineLike[],
+    variantId: string | null,
+  ) => {
+    const variantLines = variantId
+      ? lines.filter((line) => line.variantId === variantId)
+      : [];
+    const overridden = new Set(variantLines.map((line) => line.ingredientId));
+
+    return [
+      ...lines.filter(
+        (line) =>
+          line.variantId === null && !overridden.has(line.ingredientId),
+      ),
+      ...variantLines,
+    ];
+  };
+
   const pushRecipe = (
     recipes: RecipeLike[],
     variantId: string | null,
     multiplier: Prisma.Decimal,
     variants: VariantLike[],
   ) => {
-    const variantRecipe = recipes.find(
+    const base = recipes.find((candidate) => candidate.variantId === null);
+    const legacy = recipes.find(
       (candidate) => candidate.variantId === variantId,
     );
-    const recipe =
-      variantRecipe ?? recipes.find((candidate) => candidate.variantId === null);
+    const recipe = base ?? legacy;
 
     if (!recipe) {
       return;
     }
 
-    // La receta propia de la presentación ya tiene sus cantidades; la receta
-    // base se escala con el factor de la presentación (Regular = 1).
-    const factor = variantRecipe
-      ? new Prisma.Decimal(1)
-      : (variants.find((variant) => variant.id === variantId)?.recipeFactor ??
-        new Prisma.Decimal(1));
-    const totalMultiplier = multiplier.times(factor);
+    const sourceLines = base
+      ? effectiveRecipeLines(base.ingredients, variantId)
+      : recipe.ingredients;
 
-    for (const line of recipe.ingredients) {
+    // La receta base se escala con el factor de la presentación (Regular = 1).
+    // Una receta antigua por variante ya trae sus cantidades.
+    const factor = base
+      ? (variants.find((variant) => variant.id === variantId)?.recipeFactor ??
+        new Prisma.Decimal(1))
+      : new Prisma.Decimal(1);
+    const totalMultiplier = multiplier.times(factor).times(optionFactor);
+
+    for (const line of sourceLines) {
       if (slotRemovals.has(line.id)) {
         continue;
       }
 
-      const replacement = slotReplacements.get(line.id);
+      const replacement =
+        slotReplacements.get(line.id) ??
+        ingredientReplacements.get(line.ingredientId);
       const chosenIngredientId = choices.get(line.id);
       const option = chosenIngredientId
         ? line.options.find(

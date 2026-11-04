@@ -12,7 +12,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { IngredientQuantitiesService } from './ingredient-quantities.service';
-import { fromCanonicalQuantity, toMoney } from '../common/units';
+import { fromCanonicalQuantity, toCanonicalQuantity, toMoney } from '../common/units';
 import { isEmptyPatch, sameDecimal } from '../common/patch';
 import { alphabetSuffix, categoryInitials } from '../common/sku';
 import { CatalogEntriesService } from './catalog-entries.service';
@@ -83,6 +83,7 @@ const itemListInclude = {
               id: true,
               action: true,
               recipeIngredientId: true,
+              replacesIngredientId: true,
               ingredientId: true,
               quantity: true,
             },
@@ -175,6 +176,7 @@ const itemDetailInclude = {
               id: true,
               action: true,
               recipeIngredientId: true,
+              replacesIngredientId: true,
               ingredientId: true,
               quantity: true,
             },
@@ -455,6 +457,7 @@ export class ItemsService {
                     : {}),
                   customName: value.customName,
                   priceDelta: value.priceDelta,
+                  scaleFactor: value.scaleFactor,
                   isDefault: value.isDefault,
                   sortOrder: value.sortOrder,
                   isActive: value.isActive,
@@ -1449,6 +1452,9 @@ export class ItemsService {
       for (const value of group.values) {
         for (const effect of value.effects ?? []) {
           if (effect.ingredientId) ingredientIds.add(effect.ingredientId);
+          if (effect.replacesIngredientId) {
+            ingredientIds.add(effect.replacesIngredientId);
+          }
           if (effect.recipeIngredientId) {
             slotIds.add(effect.recipeIngredientId);
           }
@@ -1584,6 +1590,7 @@ export class ItemsService {
           valueId: value.valueId ?? null,
           customName: customName ?? null,
           priceDelta,
+          scaleFactor: new Prisma.Decimal(value.scaleFactor ?? 1),
           isDefault: value.isDefault ?? false,
           sortOrder: value.sortOrder ?? valueIndex,
           isActive: value.isActive ?? true,
@@ -1647,6 +1654,7 @@ export class ItemsService {
     hasItem: boolean,
   ) {
     const recipeIngredientId = effect.recipeIngredientId ?? null;
+    const replacesIngredientId = effect.replacesIngredientId ?? null;
     const ingredientId = effect.ingredientId ?? null;
 
     if (effect.action === OptionEffectAction.ADD && !ingredientId) {
@@ -1657,7 +1665,7 @@ export class ItemsService {
 
     if (
       effect.action === OptionEffectAction.REPLACE &&
-      (!recipeIngredientId || !ingredientId)
+      ((!recipeIngredientId && !replacesIngredientId) || !ingredientId)
     ) {
       throw new BadRequestException(
         `El reemplazo de ${groupName} necesita el insumo original y el nuevo`,
@@ -1676,6 +1684,10 @@ export class ItemsService {
 
     if (ingredientId && !knownIngredients.has(ingredientId)) {
       throw new NotFoundException('Ingrediente no encontrado');
+    }
+
+    if (replacesIngredientId && !knownIngredients.has(replacesIngredientId)) {
+      throw new NotFoundException('Ingrediente a reemplazar no encontrado');
     }
 
     if (recipeIngredientId && !hasItem) {
@@ -1699,11 +1711,14 @@ export class ItemsService {
     return {
       action: effect.action,
       recipeIngredientId,
+      replacesIngredientId,
       ingredientId,
       quantity:
         effect.quantity === undefined
           ? null
-          : new Prisma.Decimal(effect.quantity),
+          : effect.unit
+            ? toCanonicalQuantity(effect.quantity, effect.unit)
+            : new Prisma.Decimal(effect.quantity),
     };
   }
 
@@ -1757,6 +1772,7 @@ export class ItemsService {
                   valueId: value.valueId,
                   customName: value.customName,
                   priceDelta: value.priceDelta,
+                  scaleFactor: value.scaleFactor,
                   isDefault: value.isDefault,
                   sortOrder: value.sortOrder,
                   isActive: value.isActive,
@@ -1819,6 +1835,7 @@ export class ItemsService {
                 valueId: value.valueId,
                 customName: value.customName,
                 priceDelta: value.priceDelta,
+                scaleFactor: value.scaleFactor,
                 isDefault: value.isDefault,
                 sortOrder: value.sortOrder,
                 isActive: value.isActive,
@@ -1832,6 +1849,9 @@ export class ItemsService {
 
           if (!value.priceDelta.equals(match.priceDelta)) {
             valueData.priceDelta = value.priceDelta;
+          }
+          if (value.scaleFactor !== undefined && !value.scaleFactor.equals(match.scaleFactor)) {
+            valueData.scaleFactor = value.scaleFactor;
           }
           if (value.isDefault !== match.isDefault) {
             valueData.isDefault = value.isDefault;
@@ -1882,6 +1902,7 @@ export class ItemsService {
     effects: ReadonlyArray<{
       action: OptionEffectAction;
       recipeIngredientId?: string | null;
+      replacesIngredientId?: string | null;
       ingredientId?: string | null;
       quantity?: Prisma.Decimal | null;
     }>,
@@ -1891,8 +1912,10 @@ export class ItemsService {
         .map(
           (effect) =>
             `${effect.action}|${effect.recipeIngredientId ?? ''}|${
-              effect.ingredientId ?? ''
-            }|${effect.quantity ? new Prisma.Decimal(effect.quantity).toFixed(4) : ''}`,
+              effect.replacesIngredientId ?? ''
+            }|${effect.ingredientId ?? ''}|${
+              effect.quantity ? new Prisma.Decimal(effect.quantity).toFixed(4) : ''
+            }`,
         )
         .sort(),
     );
