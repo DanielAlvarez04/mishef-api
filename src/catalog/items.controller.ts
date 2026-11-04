@@ -50,12 +50,14 @@ export class ItemsController {
     @Query('search') search?: string,
     @Query('categoryId') categoryId?: string,
     @Query('includeInactive') includeInactive?: string,
+    @Query('includeArchived') includeArchived?: string,
     @Query('onlyCombos') onlyCombos?: string,
   ) {
     return this.items.list(user.organizationId, {
       search,
       categoryId,
       includeInactive: includeInactive === 'true',
+      includeArchived: includeArchived === 'true',
       onlyCombos: onlyCombos === 'true',
     });
   }

@@ -24,6 +24,7 @@ import {
   CreateRecipeDto,
   ProduceRecipeDto,
   PublishRecipeDto,
+  SaveRecipeDraftItemDto,
   UpdateRecipeDto,
 } from './dto/recipe.dto';
 
@@ -92,6 +93,19 @@ export class RecipesController {
     return this.recipes.update(user.organizationId, id, {
       ingredients: dto.ingredients,
     });
+  }
+
+  @ApiOperation({
+    summary: 'Guardar el borrador de artículo (presentaciones y opciones) de una receta',
+  })
+  @RequirePermissions('catalog:manage')
+  @Put(':id/draft-item')
+  saveDraftItem(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Body() dto: SaveRecipeDraftItemDto,
+  ) {
+    return this.recipes.saveDraftItem(user.organizationId, id, dto);
   }
 
   @ApiOperation({ summary: 'Eliminar receta (debe estar despublicada)' })

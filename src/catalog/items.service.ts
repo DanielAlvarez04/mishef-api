@@ -198,6 +198,8 @@ export interface ItemFilters {
   search?: string;
   categoryId?: string;
   includeInactive?: boolean;
+  /** Incluye artículos archivados (borradores de recetas). */
+  includeArchived?: boolean;
   onlyCombos?: boolean;
 }
 
@@ -215,6 +217,10 @@ export class ItemsService {
     const items = await this.prisma.item.findMany({
       where: {
         organizationId,
+        // Los artículos despublicados se archivan: salen del catálogo de
+        // artículos aunque se pidan los inactivos. El catálogo los pide con
+        // `includeArchived` para conservar los borradores de las recetas.
+        ...(filters.includeArchived ? {} : { isArchived: false }),
         ...(filters.includeInactive ? {} : { isActive: true }),
         ...(filters.categoryId ? { categoryId: filters.categoryId } : {}),
         ...(filters.onlyCombos ? { isCombo: true } : {}),
@@ -261,6 +267,7 @@ export class ItemsService {
         menu: { id: string; name: string; isActive: boolean };
       }>;
       catalogEntry: {
+        id: string;
         imageKey: string | null;
         imageUrl: string | null;
         imageName: string | null;
@@ -273,6 +280,7 @@ export class ItemsService {
     // cambiar el contrato que ya consumen la tabla y las tarjetas.
     return {
       ...rest,
+      catalogEntryId: catalogEntry?.id ?? null,
       imageKey: catalogEntry?.imageKey ?? null,
       imageUrl: catalogEntry?.imageUrl ?? null,
       imageName: catalogEntry?.imageName ?? null,
@@ -1462,7 +1470,7 @@ export class ItemsService {
       }
     }
 
-    const [ingredients, slots] = await Promise.all([
+    const [ingredients, slotRows, itemEntry] = await Promise.all([
       ingredientIds.size > 0
         ? this.prisma.ingredient.findMany({
             where: { id: { in: [...ingredientIds] }, organizationId },
@@ -1475,7 +1483,33 @@ export class ItemsService {
             select: { id: true },
           })
         : [],
+      itemId
+        ? this.prisma.item.findUnique({
+            where: { id: itemId },
+            select: { catalogEntryId: true },
+          })
+        : null,
     ]);
+
+    const slots: Array<{ id: string }> = slotRows
+
+    // Un borrador de receta aún no tiene `itemId`, pero comparte la entrada de
+    // catálogo con su artículo. Sus efectos deben validarse contra la receta.
+    if (itemId && itemEntry?.catalogEntryId && slotIds.size > 0) {
+      const byEntry = await this.prisma.recipeIngredient.findMany({
+        where: {
+          id: { in: [...slotIds] },
+          recipe: { catalogEntryId: itemEntry.catalogEntryId },
+        },
+        select: { id: true },
+      });
+
+      for (const row of byEntry) {
+        if (!slots.some((slot) => slot.id === row.id)) {
+          slots.push(row);
+        }
+      }
+    }
 
     const knownIngredients = new Set(ingredients.map((row) => row.id));
     const knownSlots = new Set(slots.map((row) => row.id));

@@ -18,6 +18,8 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { UnitCode } from '@prisma/client';
+import { CreateVariantDto } from './item.dto';
+import { ItemOptionGroupInputDto } from './option.dto';
 
 /** Alternativa de un ingrediente (ej. leche deslactosada, de coco). */
 export class RecipeIngredientOptionInputDto {
@@ -96,6 +98,11 @@ export class RecipeVariantInputDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  /** Presentación que el menú muestra por defecto. */
+  @IsOptional()
+  @IsBoolean()
+  isPrimary?: boolean;
 }
 
 /** Publicar la receta como artículo vendible. */
@@ -142,6 +149,44 @@ export class RecipeProductionInputDto {
   @IsNumber({ maxDecimalPlaces: 6 })
   @IsPositive()
   yieldQuantity!: number;
+
+  /** Categoría de inventario del insumo producido. */
+  @IsOptional()
+  @IsString()
+  categoryId?: string;
+
+  /** Stock mínimo en `displayUnit`; si se omite se conserva el actual. */
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 4 })
+  @Min(0)
+  minStock?: number;
+}
+
+/**
+ * Borrador de artículo que acompaña a una receta.
+ *
+ * Permite conservar presentaciones y opciones de una receta que todavía no se
+ * publica. El artículo queda archivado y oculto hasta que se publique.
+ */
+export class SaveRecipeDraftItemDto {
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  price?: number;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @ValidateNested({ each: true })
+  @Type(() => CreateVariantDto)
+  variants?: CreateVariantDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @ValidateNested({ each: true })
+  @Type(() => ItemOptionGroupInputDto)
+  optionGroups?: ItemOptionGroupInputDto[];
 }
 
 export class CreateRecipeDto {
@@ -154,6 +199,11 @@ export class CreateRecipeDto {
   @IsString()
   @MaxLength(500)
   description?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  notes?: string;
 
   @IsOptional()
   @IsString()
@@ -206,6 +256,11 @@ export class UpdateRecipeDto {
   @IsString()
   @MaxLength(500)
   description?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  notes?: string | null;
 
   @IsOptional()
   @IsString()

@@ -370,6 +370,9 @@ model Item {
   price          Decimal  @db.Decimal(12, 2) // Precio final con IVA incluido
   taxRate        Decimal? @db.Decimal(5, 4) // Tasa aplicable; null = no configurada (no se asume ninguna)
   isActive       Boolean  @default(true)
+  /// La receta dejó de publicarse como artículo: se oculta del catálogo de
+  /// artículos (aunque esté inactivo) y se conserva para volver a publicarla.
+  isArchived     Boolean  @default(false)
   isCombo        Boolean  @default(false)
   sortOrder      Int      @default(0)
   createdAt      DateTime @default(now())
@@ -799,6 +802,8 @@ model Recipe {
   categoryId           String?
   name                 String
   description          String?
+  /// Notas de preparación, tiempos, conservación, etc.
+  notes                String?
   /// Identidad del catálogo: la misma que el artículo publicado.
   catalogEntryId       String?
   /// Insumo que produce esta receta (ej. salsa verde). Único por receta.

@@ -9,6 +9,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import {
   canonicalUnit,
   fromCanonicalQuantity,
+  sameDimension,
   toCanonicalQuantity,
   toDisplayCost,
   toMoney,
@@ -17,11 +18,14 @@ import { QuantityConverter } from '../common/quantity-converter.service';
 import { isEmptyPatch, sameDecimal } from '../common/patch';
 import { CatalogEntriesService } from './catalog-entries.service';
 import { IngredientQuantitiesService } from './ingredient-quantities.service';
+import { ItemsService } from './items.service';
+import { UpdateItemDto } from './dto/item.dto';
 import {
   CreateRecipeDto,
   ProduceRecipeDto,
   PublishRecipeDto,
   RecipeIngredientInputDto,
+  SaveRecipeDraftItemDto,
   UpdateRecipeDto,
 } from './dto/recipe.dto';
 
@@ -59,10 +63,13 @@ const recipeInclude = {
     select: {
       id: true,
       name: true,
+      sku: true,
       baseUnit: true,
       displayUnit: true,
       currentStock: true,
+      minStock: true,
       unitCost: true,
+      category: { select: { id: true, name: true, isCore: true } },
     },
   },
   ingredients: {
@@ -106,6 +113,7 @@ export class RecipesService {
     private readonly ingredientQuantities: IngredientQuantitiesService,
     private readonly quantities: QuantityConverter,
     private readonly catalogEntries: CatalogEntriesService,
+    private readonly items: ItemsService,
   ) {}
 
   async list(organizationId: string | null, filters: RecipeFilters = {}) {
@@ -211,6 +219,7 @@ export class RecipesService {
           variantId: dto.variantId ?? null,
           name,
           description: normalizeOptional(dto.description),
+          notes: normalizeOptional(dto.notes),
           categoryId: dto.categoryId ?? null,
           isActive: dto.isActive ?? true,
           ingredients: {
@@ -288,20 +297,24 @@ export class RecipesService {
       await this.assertCategory(organizationId, dto.categoryId);
     }
 
+    // Una receta despublicada conserva sus insumos por presentación: se validan
+    // contra el artículo archivado (comparte `catalogEntryId`).
+    const scopeItemId =
+      recipe.itemId ??
+      (await this.itemIdOfCatalogEntry(recipe.catalogEntryId, true));
+
     const lines =
       dto.ingredients === undefined
         ? undefined
-        : await this.resolveLines(
-            organizationId,
-            recipe.itemId,
-            dto.ingredients,
-          );
+        : await this.resolveLines(organizationId, scopeItemId, dto.ingredients);
 
     const name = dto.name === undefined ? undefined : dto.name.trim();
     const description =
       dto.description === undefined
         ? undefined
         : normalizeOptional(dto.description);
+    const notes =
+      dto.notes === undefined ? undefined : normalizeOptional(dto.notes);
 
     const data: Prisma.RecipeUncheckedUpdateInput = {};
 
@@ -320,6 +333,9 @@ export class RecipesService {
     if (name !== undefined && name !== recipe.name) data.name = name;
     if (description !== undefined && description !== recipe.description) {
       data.description = description;
+    }
+    if (notes !== undefined && notes !== recipe.notes) {
+      data.notes = notes;
     }
     if (
       dto.categoryId !== undefined &&
@@ -453,6 +469,98 @@ export class RecipesService {
     return this.findOne(organizationId, id);
   }
 
+  /**
+   * Guarda el borrador de artículo de una receta.
+   *
+   * Conserva presentaciones y opciones aunque la receta todavía no se publique.
+   * El artículo vive archivado (no aparece en Artículos ni en menús) y se
+   * reutiliza cuando la receta se publica.
+   */
+  async saveDraftItem(
+    organizationId: string | null,
+    id: string,
+    dto: SaveRecipeDraftItemDto,
+  ) {
+    const recipe = await this.getRecipe(organizationId, id);
+
+    if (recipe.itemId) {
+      throw new BadRequestException(
+        'La receta ya está publicada como artículo',
+      );
+    }
+
+    if (recipe.producesIngredientId) {
+      throw new BadRequestException(
+        'Un insumo no puede convertirse en artículo ni receta',
+      );
+    }
+
+    const catalogEntryId =
+      recipe.catalogEntryId ??
+      (await this.catalogEntries.ensureForRecipe(organizationId, recipe.id));
+
+    const existing = await this.prisma.item.findUnique({
+      where: { catalogEntryId },
+      select: {
+        id: true,
+        name: true,
+        description: true,
+        price: true,
+        isActive: true,
+        isArchived: true,
+      },
+    });
+
+    const draftPrice =
+      dto.price === undefined ? undefined : toMoney(dto.price);
+
+    let item: { id: string };
+
+    if (existing) {
+      const data: Prisma.ItemUncheckedUpdateInput = {
+        ...(existing.name !== recipe.name ? { name: recipe.name } : {}),
+        ...(existing.description !== recipe.description
+          ? { description: recipe.description }
+          : {}),
+        ...(draftPrice !== undefined && !existing.price.equals(draftPrice)
+          ? { price: draftPrice }
+          : {}),
+        ...(existing.isActive ? { isActive: false } : {}),
+        ...(existing.isArchived ? {} : { isArchived: true }),
+      };
+
+      item = isEmptyPatch(data)
+        ? existing
+        : await this.prisma.item.update({
+            where: { id: existing.id },
+            data,
+          });
+    } else {
+      item = await this.prisma.item.create({
+        data: {
+          organizationId,
+          catalogEntryId,
+          name: recipe.name,
+          description: recipe.description,
+          price: draftPrice ?? new Prisma.Decimal(0),
+          isActive: false,
+          isArchived: true,
+        },
+      });
+    }
+
+    const changes: UpdateItemDto = {};
+
+    if (dto.variants !== undefined) changes.variants = dto.variants;
+    if (dto.optionGroups !== undefined) changes.optionGroups = dto.optionGroups;
+
+    if (!isEmptyPatch(changes)) {
+      await this.items.update(organizationId, item.id, changes);
+    }
+
+    return this.items.findOne(organizationId, item.id);
+  }
+
   async remove(organizationId: string | null, id: string) {
     const recipe = await this.getRecipe(organizationId, id);
 
@@ -495,35 +603,35 @@ export class RecipesService {
       throw new BadRequestException('La receta no está publicada como artículo');
     }
 
-    const itemId = recipe.itemId;
-
-    const item = await this.prisma.item.findUnique({
-      where: { id: itemId },
-      select: { catalogEntryId: true },
+    // Solo una receta con insumos puede dejar de publicarse: el artículo se
+    // retira del catálogo, pero la receta debe seguir siendo útil por sí sola.
+    const ingredients = await this.prisma.recipeIngredient.count({
+      where: { recipeId: recipe.id },
     });
 
-    await this.prisma.$transaction(async (tx) => {
-      const orders = await tx.orderItem.count({ where: { itemId } });
+    if (ingredients === 0) {
+      throw new BadRequestException(
+        'Agrega insumos a la receta antes de dejar de publicarla como artículo',
+      );
+    }
 
+    const itemId = recipe.itemId;
+
+    await this.prisma.$transaction(async (tx) => {
       await tx.recipe.update({
         where: { id: recipe.id },
         data: { itemId: null },
       });
 
-      if (orders > 0) {
-        // Conserva el artículo para el historial de pedidos, pero ya no se vende.
-        await tx.item.update({
-          where: { id: itemId },
-          data: { isActive: false },
-        });
-      } else {
-        await tx.item.delete({ where: { id: itemId } });
-      }
+      // Se retira de los menús y se archiva: desaparece del catálogo de
+      // artículos, pero conserva sus presentaciones y opciones para cuando se
+      // vuelva a publicar.
+      await tx.menuItem.deleteMany({ where: { itemId } });
+      await tx.item.update({
+        where: { id: itemId },
+        data: { isActive: false, isArchived: true },
+      });
     });
-
-    // La entrada suele seguir viva porque la receta la comparte; si el artículo
-    // era el único dueño, se limpia ahora.
-    await this.catalogEntries.deleteIfOrphan(item?.catalogEntryId);
 
     return this.findOne(organizationId, id);
   }
@@ -728,6 +836,12 @@ export class RecipesService {
       throw new BadRequestException('La receta ya está publicada como artículo');
     }
 
+    if (recipe.producesIngredientId) {
+      throw new BadRequestException(
+        'Un insumo no puede publicarse como artículo',
+      );
+    }
+
     const categoryId = dto.categoryId ?? recipe.categoryId ?? null;
 
     if (categoryId) {
@@ -741,17 +855,6 @@ export class RecipesService {
     }
 
     const sku = dto.sku?.trim() || null;
-
-    if (sku) {
-      const existing = await tx.item.findFirst({
-        where: { organizationId, sku: { equals: sku, mode: 'insensitive' } },
-        select: { id: true },
-      });
-
-      if (existing) {
-        throw new ConflictException(`El SKU "${sku}" ya está en uso`);
-      }
-    }
 
     const variants =
       dto.variants && dto.variants.length > 0
@@ -777,31 +880,112 @@ export class RecipesService {
       });
     }
 
-    const item = await tx.item.create({
-      data: {
-        organizationId,
-        categoryId,
-        catalogEntryId,
-        name: recipe.name,
-        description: recipe.description,
-        sku,
-        price: toMoney(dto.price),
-        taxRate:
-          dto.taxRate === undefined || dto.taxRate === null
-            ? null
-            : new Prisma.Decimal(dto.taxRate),
-        isActive: true,
-        variants: {
-          create: variants.map((variant, index) => ({
-            name: variant.name.trim(),
-            priceAdjust: toMoney(variant.priceAdjust ?? 0),
-            recipeFactor: new Prisma.Decimal(variant.recipeFactor ?? 1),
-            sortOrder: variant.sortOrder ?? index,
-            isActive: variant.isActive ?? true,
-          })),
-        },
-      },
+    // Al despublicar, el artículo se archiva en vez de borrarse: se reutiliza
+    // esa misma fila (la entrada de catálogo es única) para no duplicarla.
+    const archivedItem = await tx.item.findUnique({
+      where: { catalogEntryId },
+      select: { id: true },
     });
+
+    if (sku) {
+      const existing = await tx.item.findFirst({
+        where: {
+          organizationId,
+          sku: { equals: sku, mode: 'insensitive' },
+          ...(archivedItem ? { id: { not: archivedItem.id } } : {}),
+        },
+        select: { id: true },
+      });
+
+      if (existing) {
+        throw new ConflictException(`El SKU "${sku}" ya está en uso`);
+      }
+    }
+
+    const itemData = {
+      organizationId,
+      categoryId,
+      catalogEntryId,
+      name: recipe.name,
+      description: recipe.description,
+      sku,
+      price: toMoney(dto.price),
+      taxRate:
+        dto.taxRate === undefined || dto.taxRate === null
+          ? null
+          : new Prisma.Decimal(dto.taxRate),
+      isActive: true,
+      isArchived: false,
+    };
+
+    const item = archivedItem
+      ? await tx.item.update({
+          where: { id: archivedItem.id },
+          data: itemData,
+        })
+      : await tx.item.create({
+          data: {
+            ...itemData,
+            variants: {
+              create: variants.map((variant, index) => ({
+                name: variant.name.trim(),
+                priceAdjust: toMoney(variant.priceAdjust ?? 0),
+                recipeFactor: new Prisma.Decimal(variant.recipeFactor ?? 1),
+                sortOrder: variant.sortOrder ?? index,
+                isActive: variant.isActive ?? true,
+                isPrimary: variant.isPrimary ?? false,
+              })),
+            },
+          },
+        });
+
+    // Al republicar solo se tocan las presentaciones si el formulario las
+    // envió; si no, se conservan las que tenía el artículo archivado.
+    if (archivedItem && dto.variants && dto.variants.length > 0) {
+      const current = await tx.itemVariant.findMany({
+        where: { itemId: item.id },
+        select: { id: true, name: true },
+      });
+      const kept = new Set<string>();
+
+      for (const [index, variant] of variants.entries()) {
+        const key = variant.name.trim().toLowerCase();
+        kept.add(key);
+
+        const data = {
+          name: variant.name.trim(),
+          priceAdjust: toMoney(variant.priceAdjust ?? 0),
+          recipeFactor: new Prisma.Decimal(variant.recipeFactor ?? 1),
+          sortOrder: variant.sortOrder ?? index,
+          isActive: variant.isActive ?? true,
+          ...(variant.isPrimary !== undefined
+            ? { isPrimary: variant.isPrimary }
+            : {}),
+        };
+        const match = current.find(
+          (candidate) => candidate.name.trim().toLowerCase() === key,
+        );
+
+        if (match) {
+          await tx.itemVariant.update({ where: { id: match.id }, data });
+        } else {
+          await tx.itemVariant.create({
+            data: { itemId: item.id, ...data },
+          });
+        }
+      }
+
+      const stale = current.filter(
+        (candidate) => !kept.has(candidate.name.trim().toLowerCase()),
+      );
+
+      if (stale.length > 0) {
+        await tx.itemVariant.updateMany({
+          where: { id: { in: stale.map((candidate) => candidate.id) } },
+          data: { isActive: false, isPrimary: false },
+        });
+      }
+    }
 
     await tx.recipe.update({
       where: { id: recipe.id },
@@ -814,7 +998,12 @@ export class RecipesService {
     organizationId: string | null,
     recipeId: string,
     recipeName: string,
-    production: { displayUnit: UnitCode; yieldQuantity: number },
+    production: {
+      displayUnit: UnitCode;
+      yieldQuantity: number;
+      categoryId?: string;
+      minStock?: number;
+    },
     lines: ResolvedLine[],
   ) {
     const displayUnit = production.displayUnit;
@@ -828,11 +1017,53 @@ export class RecipesService {
       throw new BadRequestException('El rendimiento debe ser mayor que cero');
     }
 
+    let categoryId: string | undefined;
+
+    if (production.categoryId) {
+      const category = await tx.ingredientCategory.findFirst({
+        where: {
+          id: production.categoryId,
+          isActive: true,
+          OR: [{ organizationId }, { organizationId: null }],
+        },
+        select: { id: true },
+      });
+
+      if (!category) {
+        throw new BadRequestException(
+          'Selecciona una categoría válida para el insumo',
+        );
+      }
+
+      categoryId = category.id;
+    }
+
+    const canonicalMinStock =
+      production.minStock === undefined
+        ? undefined
+        : toCanonicalQuantity(production.minStock, displayUnit);
+
     const name = recipeName.trim();
-    const existing = await tx.ingredient.findFirst({
-      where: { organizationId, name },
-      include: { producedByRecipe: { select: { id: true } } },
+    const currentRecipe = await tx.recipe.findUnique({
+      where: { id: recipeId },
+      select: { producesIngredientId: true },
     });
+
+    // Se busca primero por el vínculo de producción: así renombrar la receta
+    // actualiza el mismo insumo en lugar de crear otro.
+    let existing = currentRecipe?.producesIngredientId
+      ? await tx.ingredient.findFirst({
+          where: { id: currentRecipe.producesIngredientId, organizationId },
+          include: { producedByRecipe: { select: { id: true } } },
+        })
+      : null;
+
+    if (!existing) {
+      existing = await tx.ingredient.findFirst({
+        where: { organizationId, name },
+        include: { producedByRecipe: { select: { id: true } } },
+      });
+    }
 
     if (existing?.producedByRecipe && existing.producedByRecipe.id !== recipeId) {
       throw new ConflictException(
@@ -840,20 +1071,62 @@ export class RecipesService {
       );
     }
 
-    const cost = await this.computeCost(tx, lines);
+    // El costo de preparación se reparte entre el rendimiento del lote.
+    const { total: cost, complete: costComplete } = await this.computeCost(
+      tx,
+      lines,
+    );
     const unitCost =
-      cost.gt(0) && canonicalYield.gt(0)
-        ? cost.dividedBy(canonicalYield).toDecimalPlaces(6, Prisma.Decimal.ROUND_HALF_UP)
+      costComplete && cost.gt(0) && canonicalYield.gt(0)
+        ? cost
+            .dividedBy(canonicalYield)
+            .toDecimalPlaces(6, Prisma.Decimal.ROUND_HALF_UP)
         : null;
 
     let ingredientId: string;
 
     if (existing) {
+      if (existing.name !== name) {
+        const duplicated = await tx.ingredient.findFirst({
+          where: {
+            organizationId,
+            name,
+            id: { not: existing.id },
+          },
+          select: { id: true },
+        });
+
+        if (duplicated) {
+          throw new ConflictException(
+            `Ya existe un insumo llamado "${name}"`,
+          );
+        }
+      }
+
+      if (!sameDimension(displayUnit, existing.baseUnit)) {
+        throw new BadRequestException(
+          'La unidad del rendimiento debe medir lo mismo que el insumo',
+        );
+      }
+
       ingredientId = existing.id;
+
       await tx.ingredient.update({
         where: { id: existing.id },
         data: {
-          ...(existing.unitCost === null && unitCost !== null ? { unitCost } : {}),
+          ...(existing.name !== name ? { name } : {}),
+          ...(existing.displayUnit !== displayUnit ? { displayUnit } : {}),
+          ...(existing.baseUnit !== baseUnit ? { baseUnit } : {}),
+          ...(categoryId && existing.categoryId !== categoryId
+            ? { categoryId }
+            : {}),
+          ...(canonicalMinStock && !canonicalMinStock.equals(existing.minStock)
+            ? { minStock: canonicalMinStock }
+            : {}),
+          ...(unitCost !== null &&
+          !(existing.unitCost && existing.unitCost.equals(unitCost))
+            ? { unitCost }
+            : {}),
         },
       });
     } else {
@@ -864,7 +1137,8 @@ export class RecipesService {
           displayUnit,
           baseUnit,
           unitCost,
-          categoryId: null,
+          categoryId: categoryId ?? null,
+          minStock: canonicalMinStock ?? new Prisma.Decimal(0),
         },
       });
       ingredientId = created.id;
@@ -885,6 +1159,7 @@ export class RecipesService {
     lines: Array<{ ingredientId: string; quantity: Prisma.Decimal }>,
   ) {
     let total = new Prisma.Decimal(0);
+    let complete = true;
 
     for (const line of lines) {
       const ingredient = await tx.ingredient.findUnique({
@@ -892,12 +1167,15 @@ export class RecipesService {
         select: { unitCost: true },
       });
 
-      if (!ingredient?.unitCost) continue;
+      if (!ingredient?.unitCost) {
+        complete = false;
+        continue;
+      }
 
       total = total.plus(line.quantity.times(ingredient.unitCost));
     }
 
-    return total;
+    return { total, complete };
   }
 
   private async getRecipe(organizationId: string | null, id: string) {
@@ -910,6 +1188,26 @@ export class RecipesService {
     }
 
     return recipe;
+  }
+
+  /**
+   * Artículo que comparte la entrada de catálogo de la receta. Con
+   * `onlyArchived` solo devuelve el artículo archivado por despublicación.
+   */
+  private async itemIdOfCatalogEntry(
+    catalogEntryId: string | null,
+    onlyArchived = false,
+  ): Promise<string | null> {
+    if (!catalogEntryId) return null;
+
+    const item = await this.prisma.item.findUnique({
+      where: { catalogEntryId },
+      select: { id: true, isArchived: true },
+    });
+
+    if (!item || (onlyArchived && !item.isArchived)) return null;
+
+    return item.id;
   }
 
   private async assertCategory(
@@ -1034,6 +1332,9 @@ export class RecipesService {
       imageUrl: catalogEntry?.imageUrl ?? null,
       imageName: catalogEntry?.imageName ?? null,
       item: flatItem,
+      producesIngredient: recipe.producesIngredient
+        ? this.displayProducedIngredient(recipe.producesIngredient)
+        : null,
       ingredients,
       estimatedCost:
         primaryCost.complete && primaryCost.count > 0
@@ -1066,6 +1367,31 @@ export class RecipesService {
       ...ingredient,
       currentStock: fromCanonicalQuantity(
         ingredient.currentStock,
+        ingredient.displayUnit,
+      ),
+      unitCost:
+        ingredient.unitCost === null
+          ? null
+          : toDisplayCost(ingredient.unitCost, ingredient.displayUnit),
+    };
+  }
+
+  private displayProducedIngredient<
+    T extends {
+      displayUnit: UnitCode;
+      currentStock: Prisma.Decimal;
+      minStock: Prisma.Decimal;
+      unitCost: Prisma.Decimal | null;
+    },
+  >(ingredient: T) {
+    return {
+      ...ingredient,
+      currentStock: fromCanonicalQuantity(
+        ingredient.currentStock,
+        ingredient.displayUnit,
+      ),
+      minStock: fromCanonicalQuantity(
+        ingredient.minStock,
         ingredient.displayUnit,
       ),
       unitCost:
