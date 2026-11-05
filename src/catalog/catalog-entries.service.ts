@@ -6,12 +6,17 @@ import {
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import {
+  buildObjectKey,
+  buildVariantObjectKey,
   catalogFolder,
+  contentTypeFromKey,
+  copyR2Object,
   deleteR2Object,
   imageSnapshotName,
   maxUploadBytes,
   objectSize,
   publicUrlForKey,
+  variantFolder,
 } from '../uploads/r2';
 
 /** Prisma normal o dentro de una transacción. */
@@ -65,6 +70,32 @@ export class CatalogEntriesService {
     return item.id;
   }
 
+  /**
+   * Entrada de catálogo de una presentación.
+   *
+   * Valida que la presentación pertenezca al artículo y al negocio antes de
+   * devolver la entrada compartida (la misma del artículo).
+   */
+  async ensureForVariant(
+    organizationId: string | null,
+    itemId: string,
+    variantId: string,
+  ): Promise<string> {
+    const variant = await this.prisma.itemVariant.findFirst({
+      where: {
+        id: variantId,
+        item: { id: itemId, organizationId },
+      },
+      select: { id: true },
+    });
+
+    if (!variant) {
+      throw new NotFoundException('Presentación no encontrada');
+    }
+
+    return this.ensureForItem(organizationId, itemId);
+  }
+
   /** Igual que `ensureForItem`, pero para una receta. */
   async ensureForRecipe(
     organizationId: string | null,
@@ -97,10 +128,12 @@ export class CatalogEntriesService {
   }
 
   /**
-   * Guarda o quita la imagen de una entrada.
+   * Guarda o quita la imagen base de una entrada.
    *
    * Valida que la clave esté en la carpeta de la entrada, comprueba el tamaño
-   * real y borra el objeto anterior: solo queda una imagen por entrada.
+   * real y borra el objeto anterior. Antes de cambiar o quitar la base, si la
+   * presentación principal no tiene imagen propia, se copia la base anterior
+   * a la presentación: así la principal conserva la imagen que ya mostraba.
    */
   async applyImage(
     organizationId: string | null,
@@ -116,7 +149,22 @@ export class CatalogEntriesService {
 
     const entry = await this.prisma.catalogEntry.findUnique({
       where: { id: entryId },
-      select: { id: true, imageKey: true },
+      select: {
+        id: true,
+        imageKey: true,
+        items: {
+          select: {
+            id: true,
+            name: true,
+            variants: {
+              where: { isActive: true, isPrimary: true },
+              orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+              take: 1,
+              select: { id: true, name: true, imageKey: true },
+            },
+          },
+        },
+      },
     });
 
     if (!entry) {
@@ -128,6 +176,16 @@ export class CatalogEntriesService {
     if (imageKey === previousKey) return;
 
     if (imageKey === null) {
+      // La principal hereda la imagen base cuando esta se quita.
+      if (previousKey) {
+        await this.copyBaseToPrimary(
+          organizationId,
+          entry.id,
+          previousKey,
+          entry.items,
+        );
+      }
+
       await this.prisma.catalogEntry.update({
         where: { id: entry.id },
         data: { imageKey: null, imageUrl: null, imageName: null },
@@ -157,6 +215,16 @@ export class CatalogEntriesService {
       );
     }
 
+    // La principal conserva la imagen anterior antes de que cambie la base.
+    if (previousKey) {
+      await this.copyBaseToPrimary(
+        organizationId,
+        entry.id,
+        previousKey,
+        entry.items,
+      );
+    }
+
     await this.prisma.catalogEntry.update({
       where: { id: entry.id },
       data: {
@@ -166,6 +234,173 @@ export class CatalogEntriesService {
         imageName: imageSnapshotName(name),
       },
     });
+
+    if (previousKey) await deleteR2Object(previousKey);
+  }
+
+  /**
+   * Copia la imagen base a la carpeta de la presentación principal.
+   *
+   * La copia es un objeto nuevo: cambiar o borrar después la base no afecta a
+   * la presentación (ni al revés).
+   */
+  private async copyBaseToPrimary(
+    organizationId: string,
+    entryId: string,
+    sourceKey: string,
+    items: Array<{
+      id: string;
+      name: string;
+      variants: Array<{
+        id: string;
+        name: string;
+        imageKey: string | null;
+      }>;
+    }>,
+  ): Promise<void> {
+    const contentType = contentTypeFromKey(sourceKey);
+    if (!contentType) return;
+
+    for (const item of items) {
+      const primary = item.variants[0];
+      if (!primary || primary.imageKey) continue;
+
+      const targetKey = buildVariantObjectKey(
+        organizationId,
+        entryId,
+        primary.id,
+        contentType,
+      );
+
+      await copyR2Object(sourceKey, targetKey);
+
+      await this.prisma.itemVariant.update({
+        where: { id: primary.id },
+        data: {
+          imageKey: targetKey,
+          imageUrl: publicUrlForKey(targetKey),
+          imageName: imageSnapshotName(`${item.name} ${primary.name}`),
+        },
+      });
+    }
+  }
+
+  /**
+   * Guarda o quita la imagen propia de una presentación.
+   *
+   * Si es la principal y el artículo todavía no tiene imagen base, la imagen
+   * se copia también a la entrada para que el artículo la tome como base.
+   */
+  async applyVariantImage(
+    organizationId: string | null,
+    itemId: string,
+    variantId: string,
+    imageKey: string | null,
+  ): Promise<void> {
+    if (!organizationId) {
+      throw new BadRequestException(
+        'Selecciona una organización antes de guardar imágenes',
+      );
+    }
+
+    const item = await this.prisma.item.findFirst({
+      where: { id: itemId, organizationId },
+      select: { id: true, name: true, catalogEntryId: true },
+    });
+
+    if (!item) {
+      throw new NotFoundException('Artículo no encontrado');
+    }
+
+    const variant = await this.prisma.itemVariant.findFirst({
+      where: { id: variantId, itemId: item.id },
+      select: { id: true, name: true, imageKey: true, isPrimary: true },
+    });
+
+    if (!variant) {
+      throw new NotFoundException('Presentación no encontrada');
+    }
+
+    const previousKey = variant.imageKey;
+
+    if (imageKey === previousKey) return;
+
+    const entryId =
+      item.catalogEntryId ?? (await this.ensureForItem(organizationId, item.id));
+    const entry = await this.prisma.catalogEntry.findUnique({
+      where: { id: entryId },
+      select: { imageKey: true },
+    });
+
+    if (!entry) {
+      throw new NotFoundException('Elemento de catálogo no encontrado');
+    }
+
+    if (imageKey === null) {
+      await this.prisma.itemVariant.update({
+        where: { id: variant.id },
+        data: { imageKey: null, imageUrl: null, imageName: null },
+      });
+
+      if (previousKey) await deleteR2Object(previousKey);
+      return;
+    }
+
+    const folder = variantFolder(organizationId, entryId, variant.id);
+
+    if (!imageKey.startsWith(`${folder}/`)) {
+      throw new BadRequestException(
+        'La imagen no pertenece a esta presentación',
+      );
+    }
+
+    const size = await objectSize(imageKey);
+    const maxBytes = maxUploadBytes();
+
+    if (size !== null && size > maxBytes) {
+      await deleteR2Object(imageKey);
+      throw new BadRequestException(
+        `La imagen supera el máximo de ${Math.round(maxBytes / 1024 / 1024)} MB`,
+      );
+    }
+
+    // Si la principal estrena imagen y el artículo no tiene base, se copia a
+    // la entrada. Después cada lado es independiente.
+    let baseKey: string | null = null;
+
+    if (variant.isPrimary && !entry.imageKey) {
+      const contentType = contentTypeFromKey(imageKey);
+
+      if (contentType) {
+        baseKey = buildObjectKey(
+          organizationId,
+          'catalog',
+          entryId,
+          contentType,
+        );
+        await copyR2Object(imageKey, baseKey);
+      }
+    }
+
+    await this.prisma.itemVariant.update({
+      where: { id: variant.id },
+      data: {
+        imageKey,
+        imageUrl: publicUrlForKey(imageKey),
+        imageName: imageSnapshotName(`${item.name} ${variant.name}`),
+      },
+    });
+
+    if (baseKey) {
+      await this.prisma.catalogEntry.update({
+        where: { id: entryId },
+        data: {
+          imageKey: baseKey,
+          imageUrl: publicUrlForKey(baseKey),
+          imageName: imageSnapshotName(item.name),
+        },
+      });
+    }
 
     if (previousKey) await deleteR2Object(previousKey);
   }

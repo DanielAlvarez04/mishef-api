@@ -9,6 +9,7 @@ import {
   IMAGE_CONTENT_TYPES,
   UPLOAD_URL_EXPIRES_IN,
   buildObjectKey,
+  buildVariantObjectKey,
   maxUploadBytes,
   presignPutUrl,
   publicUrlForKey,
@@ -54,6 +55,61 @@ export class UploadsService {
     entityId: string,
     dto: PresignImageDto,
   ): Promise<PresignImageResult> {
+    const maxBytes = this.assertCanPresign(organizationId, dto);
+
+    const exists = await this.countEntity(module, entityId, organizationId!);
+
+    if (!exists) {
+      throw new NotFoundException('La entidad no existe en este negocio');
+    }
+
+    return this.sign(
+      buildObjectKey(organizationId!, module, entityId, dto.contentType),
+      dto,
+      maxBytes,
+    );
+  }
+
+  /**
+   * Firma la subida de la imagen propia de una presentación.
+   *
+   * La clave va en una subcarpeta de la entrada de catálogo
+   * (`.../variants/{variantId}/`), así no se mezcla con la imagen base y la
+   * validación al guardar puede exigir que la imagen sea de esa presentación.
+   */
+  async presignVariantImage(
+    organizationId: string | null,
+    catalogEntryId: string,
+    variantId: string,
+    dto: PresignImageDto,
+  ): Promise<PresignImageResult> {
+    const maxBytes = this.assertCanPresign(organizationId, dto);
+
+    const exists = await this.prisma.catalogEntry.count({
+      where: { id: catalogEntryId, organizationId },
+    });
+
+    if (!exists) {
+      throw new NotFoundException('El artículo no existe en este negocio');
+    }
+
+    return this.sign(
+      buildVariantObjectKey(
+        organizationId!,
+        catalogEntryId,
+        variantId,
+        dto.contentType,
+      ),
+      dto,
+      maxBytes,
+    );
+  }
+
+  /** Valida organización, formato y tamaño antes de firmar cualquier imagen. */
+  private assertCanPresign(
+    organizationId: string | null,
+    dto: PresignImageDto,
+  ): number {
     if (!organizationId) {
       throw new BadRequestException(
         'Selecciona una organización antes de subir imágenes',
@@ -72,19 +128,15 @@ export class UploadsService {
       );
     }
 
-    const exists = await this.countEntity(module, entityId, organizationId);
+    return maxBytes;
+  }
 
-    if (!exists) {
-      throw new NotFoundException('La entidad no existe en este negocio');
-    }
-
-    const key = buildObjectKey(
-      organizationId,
-      module,
-      entityId,
-      dto.contentType,
-    );
-
+  /** Construye la respuesta firmada para una clave ya validada. */
+  private async sign(
+    key: string,
+    dto: PresignImageDto,
+    maxBytes: number,
+  ): Promise<PresignImageResult> {
     return {
       key,
       url: publicUrlForKey(key),

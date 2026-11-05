@@ -999,11 +999,20 @@ export class RecipesService {
         where: { itemId: item.id },
         select: { id: true, name: true },
       });
-      const kept = new Set<string>();
+      const keptIds = new Set<string>();
 
       for (const [index, variant] of variants.entries()) {
         const key = variant.name.trim().toLowerCase();
-        kept.add(key);
+        const byId = variant.id
+          ? current.find((candidate) => candidate.id === variant.id)
+          : undefined;
+        const match =
+          byId ??
+          current.find(
+            (candidate) => candidate.name.trim().toLowerCase() === key,
+          );
+
+        if (match) keptIds.add(match.id);
 
         const data = {
           name: variant.name.trim(),
@@ -1015,9 +1024,6 @@ export class RecipesService {
             ? { isPrimary: variant.isPrimary }
             : {}),
         };
-        const match = current.find(
-          (candidate) => candidate.name.trim().toLowerCase() === key,
-        );
 
         if (match) {
           await tx.itemVariant.update({ where: { id: match.id }, data });
@@ -1028,9 +1034,7 @@ export class RecipesService {
         }
       }
 
-      const stale = current.filter(
-        (candidate) => !kept.has(candidate.name.trim().toLowerCase()),
-      );
+      const stale = current.filter((candidate) => !keptIds.has(candidate.id));
 
       if (stale.length > 0) {
         await tx.itemVariant.updateMany({

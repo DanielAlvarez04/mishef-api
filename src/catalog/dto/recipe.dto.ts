@@ -75,6 +75,11 @@ export class RecipeIngredientInputDto {
 }
 
 export class RecipeVariantInputDto {
+  /** Id de la presentación existente, para no perderla al renombrar. */
+  @IsOptional()
+  @IsString()
+  id?: string;
+
   @IsString()
   @MinLength(1)
   @MaxLength(80)

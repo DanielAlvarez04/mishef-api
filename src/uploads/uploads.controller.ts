@@ -42,6 +42,31 @@ export class UploadsController {
   }
 
   @ApiOperation({
+    summary: 'Firmar la subida de la imagen de una presentación',
+  })
+  @RequirePermissions('catalog:manage')
+  @Post('catalog/items/:itemId/variants/:variantId')
+  async presignVariantImage(
+    @CurrentUser() user: JwtUser,
+    @Param('itemId') itemId: string,
+    @Param('variantId') variantId: string,
+    @Body() dto: PresignImageDto,
+  ) {
+    const entryId = await this.catalogEntries.ensureForVariant(
+      user.organizationId,
+      itemId,
+      variantId,
+    );
+
+    return this.uploads.presignVariantImage(
+      user.organizationId,
+      entryId,
+      variantId,
+      dto,
+    );
+  }
+
+  @ApiOperation({
     summary: 'Firmar la subida de la imagen de una receta',
   })
   @RequirePermissions('catalog:manage')

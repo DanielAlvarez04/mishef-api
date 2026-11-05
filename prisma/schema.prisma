@@ -415,6 +415,11 @@ model ItemVariant {
   priceAdjust  Decimal  @default(0.0000) @db.Decimal(12, 2)
   /// Multiplicador del consumo de la receta base. Regular = 1.
   recipeFactor Decimal  @default(1) @db.Decimal(6, 3)
+  /// Imagen propia de la presentación. Si falta, se usa la del artículo.
+  imageKey     String?
+  imageUrl     String?
+  /// Nombre legible de la imagen (solo referencia, como en CatalogEntry).
+  imageName    String?
   isActive     Boolean  @default(true)
   sortOrder    Int      @default(0)
   createdAt    DateTime @default(now())

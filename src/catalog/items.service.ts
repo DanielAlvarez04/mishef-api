@@ -17,6 +17,7 @@ import { fromCanonicalQuantity, toCanonicalQuantity, toMoney } from '../common/u
 import { isEmptyPatch, sameDecimal } from '../common/patch';
 import { alphabetSuffix, categoryInitials } from '../common/sku';
 import { CatalogEntriesService } from './catalog-entries.service';
+import { deleteR2Object } from '../uploads/r2';
 import {
   ComboComponentInputDto,
   CreateExtraDto,
@@ -666,9 +667,9 @@ export class ItemsService {
   }
 
   /**
-   * Sincroniza presentaciones por nombre: actualiza las existentes, crea las
-   * nuevas y desactiva las que ya no vienen (nunca las borra, para conservar
-   * pedidos históricos).
+   * Sincroniza presentaciones por `id` (o por nombre si el cliente no lo
+   * envía): actualiza las existentes, crea las nuevas y desactiva las que ya no
+   * vienen (nunca las borra, para conservar pedidos históricos).
    */
   private async syncVariants(
     itemId: string,
@@ -678,16 +679,31 @@ export class ItemsService {
     const existing = await this.prisma.itemVariant.findMany({
       where: { itemId },
     });
-    const incoming = new Set(
-      variants.map((variant) => variant.name.trim().toLowerCase()),
+    const byId = new Map(existing.map((variant) => [variant.id, variant]));
+    const byName = new Map(
+      existing.map((variant) => [
+        variant.name.trim().toLowerCase(),
+        variant,
+      ]),
     );
+    const keptIds = new Set<string>();
     const primaryIndex = await this.resolvePrimaryIndex(itemId, variants);
 
     for (const [index, variant] of variants.entries()) {
       const name = variant.name.trim();
-      const match = existing.find(
-        (candidate) => candidate.name.trim().toLowerCase() === name.toLowerCase(),
-      );
+      const idMatch = variant.id ? byId.get(variant.id) : undefined;
+
+      if (variant.id && !idMatch) {
+        throw new BadRequestException(
+          'La presentación no pertenece a este artículo',
+        );
+      }
+
+      const match =
+        idMatch ?? byName.get(name.trim().toLowerCase()) ?? undefined;
+
+      if (match) keptIds.add(match.id);
+
       const sku = baseSku ? `${baseSku}${alphabetSuffix(index)}` : undefined;
 
       if (match) {
@@ -739,10 +755,7 @@ export class ItemsService {
     }
 
     for (const variant of existing) {
-      if (
-        variant.isActive &&
-        !incoming.has(variant.name.trim().toLowerCase())
-      ) {
+      if (variant.isActive && !keptIds.has(variant.id)) {
         await this.prisma.itemVariant.update({
           where: { id: variant.id },
           data: { isActive: false, isPrimary: false },
@@ -905,6 +918,13 @@ export class ItemsService {
 
     const itemIds = items.map((item) => item.id);
 
+    // Las imágenes de las presentaciones son objetos propios: se borran junto
+    // con el artículo aunque la entrada de catálogo sobreviva por una receta.
+    const variantImages = await this.prisma.itemVariant.findMany({
+      where: { itemId: { in: itemIds } },
+      select: { imageKey: true },
+    });
+
     const inOrders = await this.prisma.orderItem.findMany({
       where: { itemId: { in: itemIds } },
       select: { item: { select: { name: true } } },
@@ -953,6 +973,13 @@ export class ItemsService {
       items.map((item) =>
         this.catalogEntries.deleteIfOrphan(item.catalogEntryId),
       ),
+    );
+
+    await Promise.all(
+      variantImages
+        .map((variant) => variant.imageKey)
+        .filter((key): key is string => Boolean(key))
+        .map((key) => deleteR2Object(key)),
     );
 
     return { ok: true, deletedCount: items.length };
@@ -1035,9 +1062,20 @@ export class ItemsService {
           data,
         });
 
+    if (dto.imageKey !== undefined) {
+      await this.catalogEntries.applyVariantImage(
+        organizationId,
+        item.id,
+        variant.id,
+        dto.imageKey,
+      );
+    }
+
     return this.findOne(organizationId, item.id).then((detail) => ({
       item: detail,
-      variant: updated,
+      variant:
+        detail.variants.find((candidate) => candidate.id === variant.id) ??
+        updated,
     }));
   }
 

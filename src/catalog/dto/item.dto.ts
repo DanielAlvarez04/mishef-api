@@ -22,6 +22,14 @@ import { UnitCode, PromotionType } from '@prisma/client';
 import { ItemOptionGroupInputDto } from './option.dto';
 
 export class CreateVariantDto {
+  /**
+   * Id de la presentación existente. Solo se usa al sincronizar el artículo:
+   * permite conservar la identidad (y la imagen) al renombrar.
+   */
+  @IsOptional()
+  @IsString()
+  id?: string;
+
   @IsString()
   @MinLength(1)
   @MaxLength(80)
@@ -58,6 +66,12 @@ export class UpdateVariantDto {
   @MinLength(1)
   @MaxLength(80)
   name?: string;
+
+  /** Clave del objeto en R2; `null` quita la imagen de la presentación. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  imageKey?: string | null;
 
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })

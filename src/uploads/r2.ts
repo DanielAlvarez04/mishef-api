@@ -113,12 +113,34 @@ export function buildObjectKey(
   entityId: string,
   contentType: ImageContentType,
 ): string {
-  const hash = createHash('sha256')
+  return `${assetFolder(organizationId, module, entityId)}/${objectHash()}.${IMAGE_CONTENT_TYPES[contentType]}`;
+}
+
+/** Hash opaco para el nombre del objeto (no expone el nombre del artículo). */
+function objectHash(): string {
+  return createHash('sha256')
     .update(randomUUID())
     .digest('hex')
     .slice(0, 32);
+}
 
-  return `${assetFolder(organizationId, module, entityId)}/${hash}.${IMAGE_CONTENT_TYPES[contentType]}`;
+/** Carpeta de una presentación: `{org}/catalog/{entryId}/variants/{variantId}`. */
+export function variantFolder(
+  organizationId: string,
+  catalogEntryId: string,
+  variantId: string,
+): string {
+  return `${catalogFolder(organizationId, catalogEntryId)}/variants/${variantId}`;
+}
+
+/** Clave de la imagen propia de una presentación. */
+export function buildVariantObjectKey(
+  organizationId: string,
+  catalogEntryId: string,
+  variantId: string,
+  contentType: ImageContentType,
+): string {
+  return `${variantFolder(organizationId, catalogEntryId, variantId)}/${objectHash()}.${IMAGE_CONTENT_TYPES[contentType]}`;
 }
 
 /** Carpeta de un módulo/entidad: `{org}/{página}/{entityId}`. */
@@ -173,6 +195,17 @@ export function imageSnapshotName(name: string, date = new Date()): string {
 
 export function publicUrlForKey(key: string): string {
   return `${r2PublicBaseUrl()}/${key}`;
+}
+
+/** Tipo de contenido a partir de la extensión de una clave ya guardada. */
+export function contentTypeFromKey(key: string): ImageContentType | null {
+  const extension = key.split('.').pop()?.toLowerCase();
+
+  for (const [contentType, candidate] of Object.entries(IMAGE_CONTENT_TYPES)) {
+    if (candidate === extension) return contentType as ImageContentType;
+  }
+
+  return null;
 }
 
 /** Segundos de validez de la URL firmada de subida. */
