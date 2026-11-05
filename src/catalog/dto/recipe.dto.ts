@@ -175,6 +175,10 @@ export class SaveRecipeDraftItemDto {
   price?: number;
 
   @IsOptional()
+  @IsString()
+  categoryId?: string | null;
+
+  @IsOptional()
   @IsArray()
   @ArrayMaxSize(10)
   @ValidateNested({ each: true })
@@ -187,6 +191,14 @@ export class SaveRecipeDraftItemDto {
   @ValidateNested({ each: true })
   @Type(() => ItemOptionGroupInputDto)
   optionGroups?: ItemOptionGroupInputDto[];
+}
+
+export class DeleteRecipesDto {
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayMaxSize(500)
+  @IsString({ each: true })
+  ids!: string[];
 }
 
 export class CreateRecipeDto {

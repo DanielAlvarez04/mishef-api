@@ -59,7 +59,13 @@ const itemListInclude = {
     },
   },
   recipes: {
-    select: { id: true, name: true, variantId: true, isActive: true },
+    select: {
+      id: true,
+      name: true,
+      variantId: true,
+      isActive: true,
+      category: { select: { id: true, name: true } },
+    },
     orderBy: { variantId: 'asc' },
   },
   optionGroups: {
@@ -146,6 +152,7 @@ const itemDetailInclude = {
   recipes: {
     orderBy: { variantId: 'asc' },
     include: {
+      category: { select: { id: true, name: true } },
       variant: { select: { id: true, name: true } },
       ingredients: {
         include: {

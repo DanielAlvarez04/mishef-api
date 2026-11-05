@@ -52,6 +52,7 @@ const recipeInclude = {
       price: true,
       isActive: true,
       isCombo: true,
+      category: { select: { id: true, name: true } },
       catalogEntry: { select: { imageKey: true, imageUrl: true } },
       variants: {
         where: { isActive: true },
@@ -499,6 +500,14 @@ export class RecipesService {
       recipe.catalogEntryId ??
       (await this.catalogEntries.ensureForRecipe(organizationId, recipe.id));
 
+    if (dto.categoryId) {
+      await this.assertCategory(
+        organizationId,
+        dto.categoryId,
+        CategoryKind.ARTICLE,
+      );
+    }
+
     const existing = await this.prisma.item.findUnique({
       where: { catalogEntryId },
       select: {
@@ -506,6 +515,7 @@ export class RecipesService {
         name: true,
         description: true,
         price: true,
+        categoryId: true,
         isActive: true,
         isArchived: true,
       },
@@ -525,6 +535,10 @@ export class RecipesService {
         ...(draftPrice !== undefined && !existing.price.equals(draftPrice)
           ? { price: draftPrice }
           : {}),
+        ...(dto.categoryId !== undefined &&
+        (existing.categoryId ?? null) !== dto.categoryId
+          ? { categoryId: dto.categoryId }
+          : {}),
         ...(existing.isActive ? { isActive: false } : {}),
         ...(existing.isArchived ? {} : { isArchived: true }),
       };
@@ -542,6 +556,7 @@ export class RecipesService {
           catalogEntryId,
           name: recipe.name,
           description: recipe.description,
+          categoryId: dto.categoryId ?? null,
           price: draftPrice ?? new Prisma.Decimal(0),
           isActive: false,
           isArchived: true,
@@ -576,6 +591,44 @@ export class RecipesService {
     await this.catalogEntries.deleteIfOrphan(recipe.catalogEntryId);
 
     return { ok: true };
+  }
+
+  /** Elimina varias recetas no publicadas; las publicadas deben despublicarse antes. */
+  async removeMany(organizationId: string | null, ids: string[]) {
+    const uniqueIds = [...new Set(ids)];
+
+    const recipes = await this.prisma.recipe.findMany({
+      where: { id: { in: uniqueIds }, organizationId },
+      select: { id: true, itemId: true, catalogEntryId: true },
+    });
+
+    if (recipes.length !== uniqueIds.length) {
+      throw new NotFoundException('Receta no encontrada');
+    }
+
+    if (recipes.some((recipe) => recipe.itemId)) {
+      throw new BadRequestException(
+        'Despublica las recetas publicadas como artículo antes de eliminarlas',
+      );
+    }
+
+    await this.prisma.recipe.deleteMany({
+      where: { id: { in: uniqueIds } },
+    });
+
+    const entryIds = [
+      ...new Set(
+        recipes
+          .map((recipe) => recipe.catalogEntryId)
+          .filter((id): id is string => id !== null),
+      ),
+    ];
+
+    for (const entryId of entryIds) {
+      await this.catalogEntries.deleteIfOrphan(entryId);
+    }
+
+    return { deletedCount: recipes.length };
   }
 
   /** Publica la receta como artículo vendible (crea el artículo y sus presentaciones). */

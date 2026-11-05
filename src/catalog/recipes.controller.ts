@@ -22,6 +22,7 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { RecipesService, type RecipeFilters } from './recipes.service';
 import {
   CreateRecipeDto,
+  DeleteRecipesDto,
   ProduceRecipeDto,
   PublishRecipeDto,
   SaveRecipeDraftItemDto,
@@ -106,6 +107,14 @@ export class RecipesController {
     @Body() dto: SaveRecipeDraftItemDto,
   ) {
     return this.recipes.saveDraftItem(user.organizationId, id, dto);
+  }
+
+  @ApiOperation({ summary: 'Eliminar recetas permanentemente (hard delete)' })
+  @RequirePermissions('catalog:manage')
+  @HttpCode(HttpStatus.OK)
+  @Post('bulk-delete')
+  removeMany(@CurrentUser() user: JwtUser, @Body() dto: DeleteRecipesDto) {
+    return this.recipes.removeMany(user.organizationId, dto.ids);
   }
 
   @ApiOperation({ summary: 'Eliminar receta (debe estar despublicada)' })
