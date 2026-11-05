@@ -115,6 +115,10 @@ enum PromotionType {
   PERCENT
   FIXED
   BOGO
+  PAY_X_GET_Y
+  SPECIAL_PRICE
+  FREE_ITEM
+  SECOND_HALF_PRICE
 }
 
 // ============================================================================
@@ -378,19 +382,21 @@ model Item {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  organization         Organization?             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  category             Category?                 @relation(fields: [categoryId], references: [id])
-  catalogEntry         CatalogEntry?             @relation(fields: [catalogEntryId], references: [id], onDelete: SetNull)
-  variants             ItemVariant[]
-  extras               ItemExtra[]
-  recipes              Recipe[]
-  orderItems           OrderItem[]               @relation("OrderItemRef")
-  ingredientExclusions ItemIngredientExclusion[]
-  optionGroups         ItemOptionGroup[]
-  promotions           ComboPromotion[]
-  comboComponents      ComboComponent[]          @relation("ComboComponents")
-  componentOf          ComboComponent[]          @relation("ComboPartOf")
-  menuItems            MenuItem[]
+  organization           Organization?             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category               Category?                 @relation(fields: [categoryId], references: [id])
+  catalogEntry           CatalogEntry?             @relation(fields: [catalogEntryId], references: [id], onDelete: SetNull)
+  variants               ItemVariant[]
+  extras                 ItemExtra[]
+  recipes                Recipe[]
+  orderItems             OrderItem[]               @relation("OrderItemRef")
+  ingredientExclusions   ItemIngredientExclusion[]
+  optionGroups           ItemOptionGroup[]
+  promotions             ComboPromotion[]          @relation("ComboPromotionItem")
+  promotionsAsFree       ComboPromotion[]          @relation("ComboPromotionFreeItem")
+  promotionsAsDiscounted ComboPromotion[]          @relation("ComboPromotionDiscountedItem")
+  comboComponents        ComboComponent[]          @relation("ComboComponents")
+  componentOf            ComboComponent[]          @relation("ComboPartOf")
+  menuItems              MenuItem[]
 
   @@unique([organizationId, sku])
   @@index([organizationId, isActive])
@@ -414,11 +420,13 @@ model ItemVariant {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  item            Item             @relation(fields: [itemId], references: [id], onDelete: Cascade)
-  orderItems      OrderItem[]
-  recipes         Recipe[]
-  recipeIngredients RecipeIngredient[]
-  comboComponents ComboComponent[]
+  item                   Item               @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  orderItems             OrderItem[]
+  recipes                Recipe[]
+  recipeIngredients      RecipeIngredient[]
+  comboComponents        ComboComponent[]
+  promotionsAsFree       ComboPromotion[]   @relation("ComboPromotionFreeVariant")
+  promotionsAsDiscounted ComboPromotion[]   @relation("ComboPromotionDiscountedVariant")
 
   @@index([itemId])
   @@map("ProductVariant")
@@ -543,21 +551,21 @@ model ItemOptionValue {
 /// - ADD: añade consumo de inventario.
 /// - REMOVE: quita un slot o un insumo.
 model ItemOptionEffect {
-  id                 String             @id @default(cuid())
-  itemOptionValueId  String
-  action             OptionEffectAction
+  id                   String             @id @default(cuid())
+  itemOptionValueId    String
+  action               OptionEffectAction
   /// Slot de la receta a reemplazar o quitar (null en ADD).
-  recipeIngredientId String?
+  recipeIngredientId   String?
   /// Insumo de la receta que se reemplaza (REPLACE) por `ingredientId`.
   replacesIngredientId String?
   /// Insumo que entra (REPLACE/ADD) o que se quita (REMOVE por insumo).
-  ingredientId       String?
-  quantity           Decimal?           @db.Decimal(12, 4)
+  ingredientId         String?
+  quantity             Decimal?           @db.Decimal(12, 4)
 
-  itemOptionValue  ItemOptionValue   @relation(fields: [itemOptionValueId], references: [id], onDelete: Cascade)
-  recipeIngredient RecipeIngredient? @relation(fields: [recipeIngredientId], references: [id], onDelete: Cascade)
-  replacesIngredient Ingredient?     @relation("OptionEffectReplacesIngredient", fields: [replacesIngredientId], references: [id], onDelete: Cascade)
-  ingredient       Ingredient?       @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  itemOptionValue    ItemOptionValue   @relation(fields: [itemOptionValueId], references: [id], onDelete: Cascade)
+  recipeIngredient   RecipeIngredient? @relation(fields: [recipeIngredientId], references: [id], onDelete: Cascade)
+  replacesIngredient Ingredient?       @relation("OptionEffectReplacesIngredient", fields: [replacesIngredientId], references: [id], onDelete: Cascade)
+  ingredient         Ingredient?       @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
 
   @@index([itemOptionValueId])
   @@index([recipeIngredientId])
@@ -568,23 +576,39 @@ model ItemOptionEffect {
 /// Promoción de un combo (descuento por porcentaje, importe fijo o 2x1).
 /// `daysOfWeek` vacío = todos los días; las horas son "HH:MM" locales.
 model ComboPromotion {
-  id         String        @id @default(cuid())
-  itemId     String
-  name       String
-  type       PromotionType
-  /// Porcentaje (0-100) o importe fijo en MXN. BOGO lo ignora.
-  value      Decimal       @default(0) @db.Decimal(12, 2)
-  startsAt   DateTime?
-  endsAt     DateTime?
-  daysOfWeek Int[]         @default([])
-  startTime  String?
-  endTime    String?
-  isActive   Boolean       @default(true)
-  createdAt  DateTime      @default(now())
-  updatedAt  DateTime      @updatedAt
+  id                  String        @id @default(cuid())
+  itemId              String
+  name                String
+  type                PromotionType
+  /// Porcentaje (0-100) o importe fijo en MXN.
+  value               Decimal       @default(0) @db.Decimal(12, 2)
+  /// Para PAY_X_GET_Y: cantidad que paga y cantidad que recibe.
+  payQuantity         Int?
+  getQuantity         Int?
+  /// Para SPECIAL_PRICE: precio final del combo.
+  specialPrice        Decimal?      @db.Decimal(12, 2)
+  /// Para FREE_ITEM: presentación del combo que sale gratis.
+  freeItemId          String?
+  freeVariantId       String?
+  /// Para SECOND_HALF_PRICE: presentación a la que se aplica el 50 %.
+  discountedItemId    String?
+  discountedVariantId String?
+  startsAt            DateTime?
+  endsAt              DateTime?
+  daysOfWeek          Int[]         @default([])
+  startTime           String?
+  endTime             String?
+  isActive            Boolean       @default(true)
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
 
-  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  item              Item         @relation("ComboPromotionItem", fields: [itemId], references: [id], onDelete: Cascade)
+  freeItem          Item?        @relation("ComboPromotionFreeItem", fields: [freeItemId], references: [id], onDelete: SetNull)
+  freeVariant       ItemVariant? @relation("ComboPromotionFreeVariant", fields: [freeVariantId], references: [id], onDelete: SetNull)
+  discountedItem    Item?        @relation("ComboPromotionDiscountedItem", fields: [discountedItemId], references: [id], onDelete: SetNull)
+  discountedVariant ItemVariant? @relation("ComboPromotionDiscountedVariant", fields: [discountedVariantId], references: [id], onDelete: SetNull)
 
+  @@unique([itemId])
   @@index([itemId, isActive])
 }
 
@@ -664,21 +688,21 @@ model Ingredient {
   categoryId String?
   locationId String?
 
-  organization        Organization?               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  category            IngredientCategory?         @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  location            IngredientLocation?         @relation(fields: [locationId], references: [id], onDelete: SetNull)
-  recipeIngredients   RecipeIngredient[]
-  ingredientOptions   RecipeIngredientOption[]
-  orderChoices        OrderItemIngredientChoice[]
-  producedByRecipe    Recipe?                     @relation("RecipeProducedIngredient")
-  inventoryMovements  InventoryMovement[]
-  equivalences        IngredientEquivalence[]
-  exclusions          ItemIngredientExclusion[]
-  extraIngredients    ItemExtraIngredient[]
-  orderItemExclusions OrderItemExclusion[]
-  optionEffects       ItemOptionEffect[]
-  optionEffectsReplacing ItemOptionEffect[] @relation("OptionEffectReplacesIngredient")
-  branchStocks        BranchStock[]
+  organization           Organization?               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category               IngredientCategory?         @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  location               IngredientLocation?         @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  recipeIngredients      RecipeIngredient[]
+  ingredientOptions      RecipeIngredientOption[]
+  orderChoices           OrderItemIngredientChoice[]
+  producedByRecipe       Recipe?                     @relation("RecipeProducedIngredient")
+  inventoryMovements     InventoryMovement[]
+  equivalences           IngredientEquivalence[]
+  exclusions             ItemIngredientExclusion[]
+  extraIngredients       ItemExtraIngredient[]
+  orderItemExclusions    OrderItemExclusion[]
+  optionEffects          ItemOptionEffect[]
+  optionEffectsReplacing ItemOptionEffect[]          @relation("OptionEffectReplacesIngredient")
+  branchStocks           BranchStock[]
 
   @@unique([organizationId, name])
   @@unique([organizationId, sku])
@@ -972,21 +996,25 @@ model OrderRound {
 }
 
 model OrderItem {
-  id             String   @id @default(cuid())
+  id             String         @id @default(cuid())
   orderRoundId   String
-  itemId         String   @map("productId")
-  itemVariantId  String?  @map("productVariantId")
+  itemId         String         @map("productId")
+  itemVariantId  String?        @map("productVariantId")
   // Copia histórica del catálogo al momento del pedido
-  itemName       String   @map("productName")
+  itemName       String         @map("productName")
   variantName    String?
-  itemPrice      Decimal  @map("productPrice") @db.Decimal(12, 2)
-  taxRate        Decimal? @db.Decimal(5, 4)
-  taxAmount      Decimal  @default(0) @db.Decimal(12, 2)
-  quantity       Int      @default(1)
+  itemPrice      Decimal        @map("productPrice") @db.Decimal(12, 2)
+  taxRate        Decimal?       @db.Decimal(5, 4)
+  taxAmount      Decimal        @default(0) @db.Decimal(12, 2)
+  quantity       Int            @default(1)
   notes          String?
-  subtotal       Decimal  @db.Decimal(12, 2)
+  subtotal       Decimal        @db.Decimal(12, 2)
   /// Descuento aplicado por una promoción del combo (no altera `itemPrice`).
-  discountAmount Decimal  @default(0) @db.Decimal(12, 2)
+  discountAmount Decimal        @default(0) @db.Decimal(12, 2)
+  /// Snapshot de la promoción aplicada, para reportes y marketing.
+  promotionId    String?
+  promotionName  String?
+  promotionType  PromotionType?
 
   orderRound        OrderRound                  @relation(fields: [orderRoundId], references: [id], onDelete: Cascade)
   item              Item                        @relation("OrderItemRef", fields: [itemId], references: [id], onDelete: Restrict)

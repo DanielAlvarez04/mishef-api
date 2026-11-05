@@ -665,6 +665,12 @@ export class OrdersService {
           },
         },
         promotions: { where: { isActive: true } },
+        comboComponents: {
+          include: {
+            componentItem: { select: { id: true, name: true, price: true } },
+            variant: { select: { id: true, name: true, priceAdjust: true } },
+          },
+        },
       },
     });
 
@@ -772,7 +778,12 @@ export class OrdersService {
 
       const gross = unitPrice.times(quantity).toDecimalPlaces(2);
       const promotion = item.isCombo
-        ? this.bestComboPromotion(item.promotions, unitPrice, quantity)
+        ? this.resolveComboPromotion(
+            item.promotions,
+            item.comboComponents,
+            unitPrice,
+            quantity,
+          )
         : null;
       const discountAmount = promotion?.discount ?? new Prisma.Decimal(0);
       const subtotal = gross.minus(discountAmount).toDecimalPlaces(2);
@@ -793,6 +804,9 @@ export class OrdersService {
         notes: line.notes?.trim() || null,
         subtotal,
         discountAmount,
+        promotionId: promotion?.id ?? null,
+        promotionName: promotion?.name ?? null,
+        promotionType: promotion?.type ?? null,
         extras: {
           create: extras.map((extra) => ({
             itemExtraId: extra.id,
@@ -1000,73 +1014,119 @@ export class OrdersService {
     return result;
   }
 
-  /** Mejor promoción aplicable a una línea de combo (descuento máximo). */
-  private bestComboPromotion(
+  /** Resuelve la promoción activa de un combo y calcula su descuento. */
+  private resolveComboPromotion(
     promotions: Array<{
+      id: string;
       name: string;
       type: PromotionType;
       value: Prisma.Decimal;
-      startsAt: Date | null;
-      endsAt: Date | null;
-      daysOfWeek: number[];
-      startTime: string | null;
-      endTime: string | null;
+      payQuantity: number | null;
+      getQuantity: number | null;
+      specialPrice: Prisma.Decimal | null;
+      freeItemId: string | null;
+      freeVariantId: string | null;
+      discountedItemId: string | null;
+      discountedVariantId: string | null;
       isActive: boolean;
+    }>,
+    components: Array<{
+      componentItemId: string;
+      componentVariantId: string | null;
+      componentItem: { price: Prisma.Decimal };
+      variant: { priceAdjust: Prisma.Decimal } | null;
     }>,
     unitPrice: Prisma.Decimal,
     quantity: number,
   ) {
-    const now = new Date();
-    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(
-      now.getMinutes(),
-    ).padStart(2, '0')}`;
+    // Solo existe una promoción por combo; la consulta ya filtra las activas.
+    const promotion = promotions[0];
+    if (!promotion?.isActive) return null;
 
-    let best: { name: string; discount: Prisma.Decimal } | null = null;
+    const gross = unitPrice.times(quantity);
+    let discount = new Prisma.Decimal(0);
 
-    for (const promotion of promotions) {
-      if (!promotion.isActive) continue;
-      if (promotion.startsAt && promotion.startsAt > now) continue;
-      if (promotion.endsAt && promotion.endsAt < now) continue;
+    const componentPrice = (itemId: string | null, variantId: string | null) => {
+      if (!itemId) return null;
 
-      if (
-        promotion.daysOfWeek.length > 0 &&
-        !promotion.daysOfWeek.includes(now.getDay())
-      ) {
-        continue;
-      }
+      const component = components.find(
+        (candidate) =>
+          candidate.componentItemId === itemId &&
+          (candidate.componentVariantId ?? null) === (variantId ?? null),
+      );
 
-      if (promotion.startTime && promotion.endTime) {
-        const inWindow =
-          promotion.startTime <= promotion.endTime
-            ? hhmm >= promotion.startTime && hhmm <= promotion.endTime
-            : hhmm >= promotion.startTime || hhmm <= promotion.endTime;
+      if (!component) return null;
 
-        if (!inWindow) continue;
-      }
+      return component.componentItem.price.plus(
+        component.variant?.priceAdjust ?? 0,
+      );
+    };
 
-      const gross = unitPrice.times(quantity);
-      let discount: Prisma.Decimal;
-
-      if (promotion.type === PromotionType.PERCENT) {
+    switch (promotion.type) {
+      case PromotionType.PERCENT:
         discount = gross.times(promotion.value).dividedBy(100);
-      } else if (promotion.type === PromotionType.FIXED) {
+        break;
+
+      case PromotionType.FIXED:
         discount = promotion.value.times(quantity);
-      } else {
-        // 2x1: una unidad gratis por cada par.
-        discount = unitPrice.times(Math.floor(quantity / 2));
+        break;
+
+      case PromotionType.BOGO:
+      case PromotionType.PAY_X_GET_Y: {
+        const pay =
+          promotion.type === PromotionType.BOGO
+            ? 1
+            : (promotion.payQuantity ?? 1);
+        const receive =
+          promotion.type === PromotionType.BOGO
+            ? 2
+            : (promotion.getQuantity ?? 2);
+        const groups = Math.floor(quantity / receive);
+        const freeUnits = groups * (receive - pay);
+        discount = unitPrice.times(Math.max(0, freeUnits));
+        break;
       }
 
-      if (discount.gt(gross)) discount = gross;
-      discount = discount.toDecimalPlaces(2);
+      case PromotionType.SPECIAL_PRICE: {
+        if (promotion.specialPrice) {
+          const difference = unitPrice.minus(promotion.specialPrice);
+          if (difference.gt(0)) {
+            discount = difference.times(quantity);
+          }
+        }
+        break;
+      }
 
-      if (discount.lte(0)) continue;
+      case PromotionType.FREE_ITEM: {
+        const price = componentPrice(
+          promotion.freeItemId,
+          promotion.freeVariantId,
+        );
+        if (price) discount = price.times(quantity);
+        break;
+      }
 
-      if (!best || discount.gt(best.discount)) {
-        best = { name: promotion.name, discount };
+      case PromotionType.SECOND_HALF_PRICE: {
+        const price = componentPrice(
+          promotion.discountedItemId,
+          promotion.discountedVariantId,
+        );
+        if (price) discount = price.times(quantity).dividedBy(2);
+        break;
       }
     }
 
-    return best;
+    if (discount.gt(gross)) discount = gross;
+    discount = discount.toDecimalPlaces(2);
+
+    if (discount.lte(0)) return null;
+
+    return {
+      id: promotion.id,
+      name: promotion.name,
+      type: promotion.type,
+      discount,
+    };
   }
 
   /** Recalcula los totales de la cuenta ignorando las rondas canceladas. */

@@ -9,6 +9,7 @@ import {
   CategoryKind,
   OptionEffectAction,
   OptionSelection,
+  PromotionType,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { IngredientQuantitiesService } from './ingredient-quantities.service';
@@ -28,6 +29,16 @@ import {
   UpdateVariantDto,
   ComboPromotionInputDto,
 } from './dto/item.dto';
+
+const PROMOTION_NAMES: Record<PromotionType, string> = {
+  PERCENT: 'Descuento porcentual',
+  FIXED: 'Descuento fijo',
+  BOGO: '2x1',
+  PAY_X_GET_Y: '2x1 / 3x2',
+  SPECIAL_PRICE: 'Precio especial',
+  FREE_ITEM: 'Producto gratis',
+  SECOND_HALF_PRICE: 'Segundo producto al 50 %',
+};
 import {
   ItemOptionEffectInputDto,
   ItemOptionGroupInputDto,
@@ -55,7 +66,7 @@ const itemListInclude = {
       componentItem: {
         select: { id: true, name: true, price: true, isActive: true },
       },
-      variant: { select: { id: true, name: true } },
+      variant: { select: { id: true, name: true, priceAdjust: true } },
     },
   },
   componentOf: {
@@ -152,7 +163,7 @@ const itemDetailInclude = {
       componentItem: {
         select: { id: true, name: true, price: true, isActive: true },
       },
-      variant: { select: { id: true, name: true } },
+      variant: { select: { id: true, name: true, priceAdjust: true } },
     },
   },
   componentOf: {
@@ -411,7 +422,7 @@ export class ItemsService {
       dto.optionGroups ?? [],
     );
 
-    const promotions = this.promotionData(dto.promotions ?? []);
+    const promotions = this.promotionData(dto.promotions ?? [], components);
 
     const item = await this.prisma.$transaction(async (tx) => {
       const created = await tx.item.create({
@@ -1343,7 +1354,11 @@ export class ItemsService {
       );
     }
 
-    const normalized = this.promotionData(promotions);
+    const components = await this.prisma.comboComponent.findMany({
+      where: { comboId: item.id },
+      select: { componentItemId: true, componentVariantId: true },
+    });
+    const normalized = this.promotionData(promotions, components);
 
     const current = await this.prisma.comboPromotion.findMany({
       where: { itemId: item.id },
@@ -1356,11 +1371,15 @@ export class ItemsService {
           name: row.name,
           type: row.type,
           value: new Prisma.Decimal(row.value as Prisma.Decimal).toFixed(2),
-          startsAt: row.startsAt ? new Date(row.startsAt as Date).toISOString() : null,
-          endsAt: row.endsAt ? new Date(row.endsAt as Date).toISOString() : null,
-          daysOfWeek: [...((row.daysOfWeek as number[]) ?? [])].sort(),
-          startTime: row.startTime ?? null,
-          endTime: row.endTime ?? null,
+          payQuantity: row.payQuantity ?? null,
+          getQuantity: row.getQuantity ?? null,
+          specialPrice: row.specialPrice
+            ? new Prisma.Decimal(row.specialPrice as Prisma.Decimal).toFixed(2)
+            : null,
+          freeItemId: row.freeItemId ?? null,
+          freeVariantId: row.freeVariantId ?? null,
+          discountedItemId: row.discountedItemId ?? null,
+          discountedVariantId: row.discountedVariantId ?? null,
           isActive: row.isActive,
         })),
       );
@@ -1385,44 +1404,131 @@ export class ItemsService {
     return this.findOne(organizationId, item.id);
   }
 
-  private promotionData(input: ComboPromotionInputDto[]) {
+  private promotionData(
+    input: ComboPromotionInputDto[],
+    components: Array<{
+      componentItemId: string;
+      componentVariantId: string | null;
+    }> = [],
+  ) {
+    if (input.length > 1) {
+      throw new BadRequestException(
+        'Un combo solo puede tener una promoción',
+      );
+    }
+
     return input.map((promotion) => {
-      const value = toMoney(promotion.value ?? 0);
+      let value = toMoney(promotion.value ?? 0);
+      let payQuantity: number | null = null;
+      let getQuantity: number | null = null;
+      let specialPrice: Prisma.Decimal | null = null;
+      let freeItemId: string | null = null;
+      let freeVariantId: string | null = null;
+      let discountedItemId: string | null = null;
+      let discountedVariantId: string | null = null;
 
-      if (promotion.type === 'PERCENT' && value.gt(100)) {
-        throw new BadRequestException(
-          'El porcentaje de una promoción no puede superar 100',
+      const isComboComponent = (itemId?: string | null, variantId?: string | null) =>
+        Boolean(itemId) &&
+        components.some(
+          (component) =>
+            component.componentItemId === itemId &&
+            (component.componentVariantId ?? null) === (variantId ?? null),
         );
-      }
 
-      const startsAt = promotion.startsAt
-        ? new Date(promotion.startsAt)
-        : null;
-      const endsAt = promotion.endsAt ? new Date(promotion.endsAt) : null;
+      switch (promotion.type) {
+        case PromotionType.PERCENT:
+          if (value.lt(0) || value.gt(100)) {
+            throw new BadRequestException(
+              'El porcentaje de una promoción debe estar entre 0 y 100',
+            );
+          }
+          break;
 
-      if (startsAt && Number.isNaN(startsAt.getTime())) {
-        throw new BadRequestException('La fecha de inicio no es válida');
-      }
-      if (endsAt && Number.isNaN(endsAt.getTime())) {
-        throw new BadRequestException('La fecha de fin no es válida');
-      }
-      if (startsAt && endsAt && endsAt < startsAt) {
-        throw new BadRequestException(
-          'La fecha de fin debe ser posterior a la de inicio',
-        );
+        case PromotionType.FIXED:
+          if (value.lt(0)) {
+            throw new BadRequestException(
+              'El descuento fijo no puede ser negativo',
+            );
+          }
+          break;
+
+        case PromotionType.BOGO:
+          payQuantity = 1;
+          getQuantity = 2;
+          value = new Prisma.Decimal(0);
+          break;
+
+        case PromotionType.PAY_X_GET_Y:
+          payQuantity = promotion.payQuantity ?? 0;
+          getQuantity = promotion.getQuantity ?? 0;
+
+          if (payQuantity < 1 || getQuantity < 1) {
+            throw new BadRequestException(
+              'Indica cuántas unidades se pagan y cuántas se reciben',
+            );
+          }
+          if (getQuantity <= payQuantity) {
+            throw new BadRequestException(
+              'La cantidad que se recibe debe ser mayor que la que se paga',
+            );
+          }
+          value = new Prisma.Decimal(0);
+          break;
+
+        case PromotionType.SPECIAL_PRICE:
+          if (promotion.specialPrice === undefined) {
+            throw new BadRequestException(
+              'Indica el precio especial del combo',
+            );
+          }
+          specialPrice = toMoney(promotion.specialPrice);
+          value = new Prisma.Decimal(0);
+          break;
+
+        case PromotionType.FREE_ITEM:
+          if (!isComboComponent(promotion.freeItemId, promotion.freeVariantId)) {
+            throw new BadRequestException(
+              'El producto gratis debe ser uno de los artículos del combo',
+            );
+          }
+          freeItemId = promotion.freeItemId ?? null;
+          freeVariantId = promotion.freeVariantId ?? null;
+          value = new Prisma.Decimal(0);
+          break;
+
+        case PromotionType.SECOND_HALF_PRICE:
+          if (
+            !isComboComponent(
+              promotion.discountedItemId,
+              promotion.discountedVariantId,
+            )
+          ) {
+            throw new BadRequestException(
+              'El producto con 50 % debe ser uno de los artículos del combo',
+            );
+          }
+          discountedItemId = promotion.discountedItemId ?? null;
+          discountedVariantId = promotion.discountedVariantId ?? null;
+          value = new Prisma.Decimal(0);
+          break;
       }
 
       return {
-        name: promotion.name.trim(),
+        name: promotion.name?.trim() || PROMOTION_NAMES[promotion.type],
         type: promotion.type,
         value,
-        startsAt,
-        endsAt,
-        daysOfWeek: [...new Set(promotion.daysOfWeek ?? [])].sort(
-          (left, right) => left - right,
-        ),
-        startTime: promotion.startTime || null,
-        endTime: promotion.endTime || null,
+        payQuantity,
+        getQuantity,
+        specialPrice,
+        freeItemId,
+        freeVariantId,
+        discountedItemId,
+        discountedVariantId,
+        startsAt: null,
+        endsAt: null,
+        daysOfWeek: [],
+        startTime: null,
+        endTime: null,
         isActive: promotion.isActive ?? true,
       };
     });

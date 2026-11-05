@@ -175,51 +175,54 @@ export class ComboComponentInputDto {
 
 /** Promoción de un combo: descuento, 2x1 o vigencia por horario. */
 export class ComboPromotionInputDto {
+  @IsOptional()
   @IsString()
-  @MinLength(1)
   @MaxLength(80)
-  name!: string;
+  name?: string;
 
   @IsEnum(PromotionType)
   type!: PromotionType;
 
-  /** Porcentaje (0-100) o importe fijo en MXN. BOGO lo ignora. */
+  /** Porcentaje (0-100) o importe fijo en MXN. */
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   value?: number;
 
+  /** Para PAY_X_GET_Y: cantidad que paga y cantidad que recibe. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  payQuantity?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  getQuantity?: number;
+
+  /** Para SPECIAL_PRICE: precio final del combo. */
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  specialPrice?: number;
+
+  /** Para FREE_ITEM: presentación del combo que sale gratis. */
   @IsOptional()
   @IsString()
-  startsAt?: string | null;
+  freeItemId?: string | null;
 
   @IsOptional()
   @IsString()
-  endsAt?: string | null;
+  freeVariantId?: string | null;
 
-  /** 0 = domingo … 6 = sábado. Vacío = todos los días. */
-  @IsOptional()
-  @IsArray()
-  @ArrayMaxSize(7)
-  @IsInt({ each: true })
-  @Min(0, { each: true })
-  @Max(6, { each: true })
-  daysOfWeek?: number[];
-
-  /** Hora local "HH:MM"; ambas vacías = todo el día. */
+  /** Para SECOND_HALF_PRICE: presentación a la que se aplica el 50 %. */
   @IsOptional()
   @IsString()
-  @Matches(/^([01]\d|2[0-3]):[0-5]\d$/, {
-    message: 'La hora debe tener el formato HH:MM',
-  })
-  startTime?: string | null;
+  discountedItemId?: string | null;
 
   @IsOptional()
   @IsString()
-  @Matches(/^([01]\d|2[0-3]):[0-5]\d$/, {
-    message: 'La hora debe tener el formato HH:MM',
-  })
-  endTime?: string | null;
+  discountedVariantId?: string | null;
 
   @IsOptional()
   @IsBoolean()
