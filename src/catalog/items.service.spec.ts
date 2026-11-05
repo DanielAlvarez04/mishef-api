@@ -222,19 +222,20 @@ describe('ItemsService — combos', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
-  it('no desactiva un artículo que es componente de un combo activo', async () => {
+  it('desactiva un artículo aunque sea componente de un combo activo', async () => {
     const { service, prisma } = build();
     prisma.item.findFirst.mockResolvedValueOnce({
       id: 'p1',
       organizationId: 'o1',
     });
-    prisma.comboComponent.count.mockResolvedValue(1);
+    prisma.item.update.mockResolvedValue({ id: 'p1', isActive: false });
 
-    await expect(service.deactivate('o1', 'p1')).rejects.toBeInstanceOf(
-      ConflictException,
-    );
+    await service.deactivate('o1', 'p1');
 
-    expect(prisma.item.update).not.toHaveBeenCalled();
+    expect(prisma.item.update).toHaveBeenCalledWith({
+      where: { id: 'p1' },
+      data: { isActive: false },
+    });
   });
 });
 

@@ -58,6 +58,12 @@ const itemListInclude = {
       variant: { select: { id: true, name: true } },
     },
   },
+  componentOf: {
+    select: {
+      id: true,
+      combo: { select: { id: true, name: true, isActive: true } },
+    },
+  },
   recipes: {
     select: {
       id: true,
@@ -147,6 +153,12 @@ const itemDetailInclude = {
         select: { id: true, name: true, price: true, isActive: true },
       },
       variant: { select: { id: true, name: true } },
+    },
+  },
+  componentOf: {
+    select: {
+      id: true,
+      combo: { select: { id: true, name: true, isActive: true } },
     },
   },
   recipes: {
@@ -846,19 +858,8 @@ export class ItemsService {
   async deactivate(organizationId: string | null, id: string) {
     const item = await this.getItem(organizationId, id);
 
-    const usedInCombos = await this.prisma.comboComponent.count({
-      where: {
-        componentItemId: item.id,
-        combo: { isActive: true },
-      },
-    });
-
-    if (usedInCombos > 0) {
-      throw new ConflictException(
-        'El artículo es componente de un combo activo. Quítalo del combo antes de desactivarlo',
-      );
-    }
-
+    // Desactivar no borra las relaciones con menús ni combos: el artículo
+    // simplemente deja de aparecer en el catálogo y en el punto de venta.
     await this.prisma.item.update({
       where: { id: item.id },
       data: { isActive: false },
