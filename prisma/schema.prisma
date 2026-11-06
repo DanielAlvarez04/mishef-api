@@ -636,6 +636,10 @@ model Menu {
   startTime  String? // "HH:MM" local
   endTime    String? // "HH:MM" local; admite cruce de medianoche
 
+  /// Secciones del menú (p. ej. «Bebidas frías»), en el orden en que se
+  /// muestran en el POS. Un artículo sin grupo vive en «Sin grupo».
+  groups String[] @default([])
+
   /// Vigencia por fechas (opcional).
   startsAt DateTime?
   endsAt   DateTime?
@@ -656,6 +660,8 @@ model MenuItem {
   menuId    String
   itemId    String
   sortOrder Int    @default(0)
+  /// Nombre del grupo del menú al que pertenece; `null` = «Sin grupo».
+  group     String?
 
   menu Menu @relation(fields: [menuId], references: [id], onDelete: Cascade)
   item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)

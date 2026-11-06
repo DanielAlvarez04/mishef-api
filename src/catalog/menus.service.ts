@@ -115,10 +115,12 @@ export class MenusService {
       startsAt: null,
       endsAt: null,
     });
+    const groups = this.normalizeGroups(dto.groups);
     const items = await this.validateItems(
       organizationId,
       null,
       dto.items,
+      groups,
     );
 
     try {
@@ -130,10 +132,12 @@ export class MenusService {
           isActive: dto.isActive ?? true,
           sortOrder: dto.sortOrder ?? 0,
           ...schedule,
+          groups,
           items: {
             create: items.map((item) => ({
               itemId: item.itemId,
               sortOrder: item.sortOrder,
+              group: item.group,
             })),
           },
         },
@@ -192,10 +196,17 @@ export class MenusService {
       data.endsAt = schedule.endsAt;
     }
 
+    const groups =
+      dto.groups === undefined
+        ? menu.groups
+        : this.normalizeGroups(dto.groups);
+    const groupsChanged = !sameJson(groups, menu.groups);
+    if (groupsChanged) data.groups = groups;
+
     const items =
       dto.items === undefined
         ? null
-        : await this.validateItems(organizationId, menu.id, dto.items);
+        : await this.validateItems(organizationId, menu.id, dto.items, groups);
 
     if (isEmptyPatch(data) && items === null) {
       return this.findOne(organizationId, menu.id);
@@ -204,6 +215,19 @@ export class MenusService {
     await this.prisma.$transaction(async (tx) => {
       if (!isEmptyPatch(data)) {
         await tx.menu.update({ where: { id: menu.id }, data });
+      }
+
+      // Un grupo eliminado deja a sus artículos en «Sin grupo».
+      if (groupsChanged) {
+        await tx.menuItem.updateMany({
+          where: {
+            menuId: menu.id,
+            ...(groups.length > 0
+              ? { group: { notIn: groups } }
+              : { group: { not: null } }),
+          },
+          data: { group: null },
+        });
       }
 
       if (items !== null) {
@@ -236,7 +260,7 @@ export class MenusService {
       where: { id, organizationId },
       include: {
         items: {
-          select: { itemId: true, sortOrder: true },
+          select: { itemId: true, sortOrder: true, group: true },
           orderBy: [{ sortOrder: 'asc' }, { item: { name: 'asc' } }],
         },
       },
@@ -265,10 +289,12 @@ export class MenusService {
         endTime: menu.endTime,
         startsAt: menu.startsAt,
         endsAt: menu.endsAt,
+        groups: menu.groups,
         items: {
           create: menu.items.map((item) => ({
             itemId: item.itemId,
             sortOrder: item.sortOrder,
+            group: item.group,
           })),
         },
       },
@@ -291,12 +317,14 @@ export class MenusService {
     organizationId: string | null,
     menuId: string,
     items: MenuItemInputDto[],
+    groups?: string[],
   ) {
     const menu = await this.getMenu(organizationId, menuId);
     const normalized = await this.validateItems(
       organizationId,
       menu.id,
       items,
+      groups === undefined ? menu.groups : this.normalizeGroups(groups),
     );
 
     await this.prisma.$transaction(async (tx) => {
@@ -327,6 +355,7 @@ export class MenusService {
         endTime: true,
         startsAt: true,
         endsAt: true,
+        groups: true,
       },
     });
 
@@ -395,6 +424,7 @@ export class MenusService {
     organizationId: string | null,
     menuId: string | null,
     input: MenuItemInputDto[],
+    groups: string[],
   ) {
     if (input.length === 0) {
       throw new BadRequestException(
@@ -442,25 +472,56 @@ export class MenusService {
         );
       }
 
+      const group = row.group?.trim() || null;
+
+      if (group !== null && !groups.includes(group)) {
+        throw new BadRequestException(
+          'El grupo del artículo no existe en el menú',
+        );
+      }
+
       return {
         itemId: item.id,
         sortOrder: row.sortOrder ?? index,
+        group,
       };
     });
+  }
+
+  /** Nombres de sección sin vacíos ni duplicados, en el orden recibido. */
+  private normalizeGroups(input?: string[]): string[] {
+    if (!input) return [];
+
+    const seen = new Set<string>();
+    const groups: string[] = [];
+
+    for (const value of input) {
+      const name = value.trim();
+      if (!name || seen.has(name)) continue;
+
+      seen.add(name);
+      groups.push(name);
+    }
+
+    return groups;
   }
 
   private async syncItems(
     tx: Prisma.TransactionClient,
     menuId: string,
-    items: Array<{ itemId: string; sortOrder: number }>,
+    items: Array<{ itemId: string; sortOrder: number; group: string | null }>,
   ) {
     const current = await tx.menuItem.findMany({
       where: { menuId },
-      select: { itemId: true, sortOrder: true },
+      select: { itemId: true, sortOrder: true, group: true },
     });
 
     const byKey = (
-      list: ReadonlyArray<{ itemId: string; sortOrder: number }>,
+      list: ReadonlyArray<{
+        itemId: string;
+        sortOrder: number;
+        group: string | null;
+      }>,
     ) =>
       [...list].sort((left, right) =>
         left.itemId.localeCompare(right.itemId),
@@ -474,7 +535,8 @@ export class MenusService {
       currentRows.every(
         (row, index) =>
           row.itemId === nextRows[index].itemId &&
-          row.sortOrder === nextRows[index].sortOrder,
+          row.sortOrder === nextRows[index].sortOrder &&
+          row.group === nextRows[index].group,
       );
 
     if (unchanged) return;
@@ -486,6 +548,7 @@ export class MenusService {
         menuId,
         itemId: item.itemId,
         sortOrder: item.sortOrder,
+        group: item.group,
       })),
     });
   }

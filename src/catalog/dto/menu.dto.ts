@@ -27,7 +27,19 @@ export class MenuItemInputDto {
   @IsInt()
   @Min(0)
   sortOrder?: number;
+
+  /** Sección del menú; debe existir en `groups` (vacío = «Sin grupo»). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  group?: string | null;
 }
+
+/** Secciones del menú, en el orden en que se muestran en el POS. */
+const MENU_GROUPS = {
+  max: 30,
+  nameLength: 40,
+} as const;
 
 /** Menú: colección curada de artículos, opcionalmente programada. */
 export class CreateMenuDto {
@@ -81,6 +93,14 @@ export class CreateMenuDto {
   @IsOptional()
   @IsDateString()
   endsAt?: string | null;
+
+  /** Secciones del menú, en orden; los artículos se asignan por nombre. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MENU_GROUPS.max)
+  @IsString({ each: true })
+  @MaxLength(MENU_GROUPS.nameLength, { each: true })
+  groups?: string[];
 
   @IsArray()
   @ArrayNotEmpty()
@@ -149,6 +169,14 @@ export class UpdateMenuDto {
   @ValidateNested({ each: true })
   @Type(() => MenuItemInputDto)
   items?: MenuItemInputDto[];
+
+  /** Si se envía, reemplaza las secciones del menú. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MENU_GROUPS.max)
+  @IsString({ each: true })
+  @MaxLength(MENU_GROUPS.nameLength, { each: true })
+  groups?: string[];
 }
 
 export class ReplaceMenuItemsDto {
@@ -158,4 +186,12 @@ export class ReplaceMenuItemsDto {
   @ValidateNested({ each: true })
   @Type(() => MenuItemInputDto)
   items!: MenuItemInputDto[];
+
+  /** Secciones vigentes; solo se usan para validar `items[].group`. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MENU_GROUPS.max)
+  @IsString({ each: true })
+  @MaxLength(MENU_GROUPS.nameLength, { each: true })
+  groups?: string[];
 }

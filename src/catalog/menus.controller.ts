@@ -98,6 +98,11 @@ export class MenusController {
     @Param('id') id: string,
     @Body() dto: ReplaceMenuItemsDto,
   ) {
-    return this.menus.replaceItems(user.organizationId, id, dto.items);
+    return this.menus.replaceItems(
+      user.organizationId,
+      id,
+      dto.items,
+      dto.groups,
+    );
   }
 }
