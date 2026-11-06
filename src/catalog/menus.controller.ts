@@ -67,12 +67,27 @@ export class MenusController {
     return this.menus.update(user.organizationId, id, dto);
   }
 
+  @ApiOperation({ summary: 'Duplicar menú como borrador inactivo' })
+  @RequirePermissions('catalog:manage')
+  @Post(':id/duplicate')
+  duplicate(@CurrentUser() user: JwtUser, @Param('id') id: string) {
+    return this.menus.duplicate(user.organizationId, id);
+  }
+
   @ApiOperation({ summary: 'Desactivar menú' })
   @RequirePermissions('catalog:manage')
   @HttpCode(HttpStatus.OK)
   @Delete(':id')
   deactivate(@CurrentUser() user: JwtUser, @Param('id') id: string) {
     return this.menus.deactivate(user.organizationId, id);
+  }
+
+  @ApiOperation({ summary: 'Eliminar menú definitivamente' })
+  @RequirePermissions('catalog:manage')
+  @HttpCode(HttpStatus.OK)
+  @Delete(':id/permanent')
+  remove(@CurrentUser() user: JwtUser, @Param('id') id: string) {
+    return this.menus.remove(user.organizationId, id);
   }
 
   @ApiOperation({ summary: 'Reemplazar los artículos del menú' })

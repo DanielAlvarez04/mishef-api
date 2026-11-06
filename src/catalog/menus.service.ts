@@ -225,6 +225,68 @@ export class MenusService {
     return this.findOne(organizationId, menu.id);
   }
 
+  /**
+   * Copia un menú completo como borrador inactivo.
+   *
+   * Conserva descripción, programación y artículos (con su orden). El nombre
+   * recibe el sufijo «(copia)» y se garantiza que sea único en la organización.
+   */
+  async duplicate(organizationId: string | null, id: string) {
+    const menu = await this.prisma.menu.findFirst({
+      where: { id, organizationId },
+      include: {
+        items: {
+          select: { itemId: true, sortOrder: true },
+          orderBy: [{ sortOrder: 'asc' }, { item: { name: 'asc' } }],
+        },
+      },
+    });
+
+    if (!menu) {
+      throw new NotFoundException('Menú no encontrado');
+    }
+
+    const max = await this.prisma.menu.aggregate({
+      where: { organizationId },
+      _max: { sortOrder: true },
+    });
+
+    const name = await this.duplicateName(organizationId, menu.name);
+
+    const copy = await this.prisma.menu.create({
+      data: {
+        organizationId,
+        name,
+        description: menu.description,
+        isActive: false,
+        sortOrder: (max._max.sortOrder ?? -1) + 1,
+        daysOfWeek: menu.daysOfWeek,
+        startTime: menu.startTime,
+        endTime: menu.endTime,
+        startsAt: menu.startsAt,
+        endsAt: menu.endsAt,
+        items: {
+          create: menu.items.map((item) => ({
+            itemId: item.itemId,
+            sortOrder: item.sortOrder,
+          })),
+        },
+      },
+      include: menuInclude,
+    });
+
+    return this.withAvailability(copy);
+  }
+
+  /** Elimina el menú y sus asignaciones; los artículos no se tocan. */
+  async remove(organizationId: string | null, id: string) {
+    const menu = await this.getMenu(organizationId, id);
+
+    await this.prisma.menu.delete({ where: { id: menu.id } });
+
+    return { id: menu.id, deleted: true };
+  }
+
   async replaceItems(
     organizationId: string | null,
     menuId: string,
@@ -426,6 +488,30 @@ export class MenusService {
         sortOrder: item.sortOrder,
       })),
     });
+  }
+
+  /**
+   * Nombre único para una copia: «Nombre (copia)», «Nombre (copia 2)», etc.
+   *
+   * Se consulta la base en cada intento para respetar la restricción
+   * `@@unique([organizationId, name])` sin depender de un conteo previo.
+   */
+  private async duplicateName(organizationId: string | null, source: string) {
+    for (let attempt = 1; attempt < 1000; attempt += 1) {
+      const suffix = attempt === 1 ? ' (copia)' : ` (copia ${attempt})`;
+      const base = source.slice(0, Math.max(1, 80 - suffix.length)).trimEnd();
+      const candidate = `${base}${suffix}`;
+
+      const existing = await this.prisma.menu.findFirst({
+        where: { organizationId, name: candidate },
+        select: { id: true },
+      });
+
+      if (!existing) return candidate;
+    }
+
+    // Inalcanzable en la práctica; evita devolver un nombre vacío.
+    return `${source.slice(0, 68).trimEnd()} (copia ${Date.now()})`;
   }
 
   private rethrowUnique(error: unknown, message: string): never {
