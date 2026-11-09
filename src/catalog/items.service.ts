@@ -18,6 +18,7 @@ import { isEmptyPatch, sameDecimal } from '../common/patch';
 import { alphabetSuffix, categoryInitials } from '../common/sku';
 import { CatalogEntriesService } from './catalog-entries.service';
 import { deleteR2Object } from '../uploads/r2';
+import { imageObjectKeys } from '../uploads/image-assets';
 import {
   ComboComponentInputDto,
   CreateExtraDto,
@@ -48,7 +49,7 @@ import { isNoPriceOptionGroup } from './option-presets';
 
 const itemListInclude = {
   catalogEntry: {
-    select: { id: true, imageKey: true, imageUrl: true, imageName: true },
+    select: { id: true, imageKey: true, imageUrl: true, imageVariants: true, imageName: true },
   },
   category: { select: { id: true, name: true } },
   variants: { orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] },
@@ -127,7 +128,7 @@ const itemListInclude = {
 
 const itemDetailInclude = {
   catalogEntry: {
-    select: { id: true, imageKey: true, imageUrl: true, imageName: true },
+    select: { id: true, imageKey: true, imageUrl: true, imageVariants: true, imageName: true },
   },
   category: { select: { id: true, name: true } },
   variants: {
@@ -301,6 +302,7 @@ export class ItemsService {
         id: string;
         imageKey: string | null;
         imageUrl: string | null;
+        imageVariants: Prisma.JsonValue;
         imageName: string | null;
       } | null;
     },
@@ -314,6 +316,7 @@ export class ItemsService {
       catalogEntryId: catalogEntry?.id ?? null,
       imageKey: catalogEntry?.imageKey ?? null,
       imageUrl: catalogEntry?.imageUrl ?? null,
+      imageVariants: catalogEntry?.imageVariants ?? null,
       imageName: catalogEntry?.imageName ?? null,
       menus: menuItems.map((row) => row.menu),
     };
@@ -979,6 +982,7 @@ export class ItemsService {
       variantImages
         .map((variant) => variant.imageKey)
         .filter((key): key is string => Boolean(key))
+        .flatMap((key) => imageObjectKeys(key))
         .map((key) => deleteR2Object(key)),
     );
 

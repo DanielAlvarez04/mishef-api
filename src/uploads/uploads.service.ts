@@ -4,23 +4,30 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { FinalizeImageDto } from './dto/finalize-image.dto';
 import { PresignImageDto } from './dto/presign-image.dto';
+import {
+  imageFallbackUrl,
+  type ImageAssetVariant,
+} from './image-assets';
+import { storeOptimizedImage } from './image-storage';
 import {
   IMAGE_CONTENT_TYPES,
   UPLOAD_URL_EXPIRES_IN,
-  buildObjectKey,
-  buildVariantObjectKey,
+  assetFolder,
+  buildTempObjectKey,
+  deleteR2Object,
+  getR2Object,
+  isTempObjectKey,
   maxUploadBytes,
   presignPutUrl,
-  publicUrlForKey,
   type UploadModule,
+  variantFolder,
 } from './r2';
 
 export interface PresignImageResult {
-  /** Clave del objeto; es lo que se guarda en la base de datos. */
+  /** Clave temporal donde el navegador hará el PUT. */
   key: string;
-  /** URL pública final del archivo. */
-  url: string;
   /** URL firmada a la que el navegador hace el PUT. */
   uploadUrl: string;
   method: 'PUT';
@@ -30,24 +37,31 @@ export interface PresignImageResult {
   maxBytes: number;
 }
 
+export interface FinalizeImageResult {
+  /** Clave base optimizada; es lo que se guarda en la base de datos. */
+  key: string;
+  /** URL pública del JPEG de mayor tamaño. */
+  url: string;
+  /** Medidas de origen. */
+  width: number;
+  height: number;
+  /** AVIF + JPEG por ancho, con sus URLs públicas. */
+  variants: ImageAssetVariant[];
+}
+
 @Injectable()
 export class UploadsService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Firma una subida directa del navegador a R2.
+   * Firma una subida temporal del navegador a R2.
    *
-   * La imagen se sube a la carpeta de la entidad (`{org}/{página}/{id}/`), así
-   * que la entidad ya debe existir: el diálogo guarda primero el artículo o la
-   * receta y luego sube la imagen. No hay área temporal ni objetos huérfanos.
+   * El archivo original se sube a `{org}/tmp/` y nunca se guarda como imagen de
+   * la entidad: al terminar, el navegador llama a `finalize*`, la API lo
+   * descarga, genera AVIF/JPEG y borra el temporal.
    *
-   * En `catalog`, `entityId` es el `CatalogEntry.id` (la identidad compartida
-   * por la receta y su artículo), no el id de la fila.
-   *
-   * El `Content-Type` va firmado, así que el objeto se guarda con el tipo
-   * declarado. R2 no permite fijar el tamaño en la firma de un PUT: el límite
-   * de 5 MB se valida aquí, en el cliente y, al guardar, con el tamaño real
-   * del objeto.
+   * Se mantiene la subida directa a R2 (el archivo no pasa por la API) y se
+   * valida el tamaño aquí, en el cliente y al finalizar con el tamaño real.
    */
   async presignImage(
     organizationId: string | null,
@@ -64,23 +78,22 @@ export class UploadsService {
     }
 
     return this.sign(
-      buildObjectKey(organizationId!, module, entityId, dto.contentType),
+      buildTempObjectKey(organizationId!, dto.contentType),
       dto,
       maxBytes,
     );
   }
 
   /**
-   * Firma la subida de la imagen propia de una presentación.
+   * Firma la subida temporal de la imagen propia de una presentación.
    *
-   * La clave va en una subcarpeta de la entrada de catálogo
-   * (`.../variants/{variantId}/`), así no se mezcla con la imagen base y la
-   * validación al guardar puede exigir que la imagen sea de esa presentación.
+   * La carpeta final se decide al finalizar (`.../variants/{variantId}/`),
+   * cuando la API ya validó que la presentación pertenece al artículo.
    */
   async presignVariantImage(
     organizationId: string | null,
     catalogEntryId: string,
-    variantId: string,
+    _variantId: string,
     dto: PresignImageDto,
   ): Promise<PresignImageResult> {
     const maxBytes = this.assertCanPresign(organizationId, dto);
@@ -94,15 +107,108 @@ export class UploadsService {
     }
 
     return this.sign(
-      buildVariantObjectKey(
-        organizationId!,
-        catalogEntryId,
-        variantId,
-        dto.contentType,
-      ),
+      buildTempObjectKey(organizationId!, dto.contentType),
       dto,
       maxBytes,
     );
+  }
+
+  /**
+   * Procesa el temporal de un artículo o receta y deja solo las variantes
+   * optimizadas en la carpeta de la entrada de catálogo.
+   */
+  async finalizeImage(
+    organizationId: string | null,
+    module: UploadModule,
+    entityId: string,
+    dto: FinalizeImageDto,
+  ): Promise<FinalizeImageResult> {
+    this.assertOrganization(organizationId);
+
+    const exists = await this.countEntity(module, entityId, organizationId!);
+
+    if (!exists) {
+      throw new NotFoundException('La entidad no existe en este negocio');
+    }
+
+    return this.finalize(
+      organizationId!,
+      dto.key,
+      assetFolder(organizationId!, module, entityId),
+    );
+  }
+
+  /** Procesa el temporal de una presentación. */
+  async finalizeVariantImage(
+    organizationId: string | null,
+    catalogEntryId: string,
+    variantId: string,
+    dto: FinalizeImageDto,
+  ): Promise<FinalizeImageResult> {
+    this.assertOrganization(organizationId);
+
+    const exists = await this.prisma.catalogEntry.count({
+      where: { id: catalogEntryId, organizationId },
+    });
+
+    if (!exists) {
+      throw new NotFoundException('El artículo no existe en este negocio');
+    }
+
+    return this.finalize(
+      organizationId!,
+      dto.key,
+      variantFolder(organizationId!, catalogEntryId, variantId),
+    );
+  }
+
+  /**
+   * Descarga el temporal, genera las variantes y lo borra.
+   *
+   * El borrado va en `finally`: pase lo que pase, el original no se queda en
+   * R2. Si el procesado falla, el error de `processImage` explica el motivo.
+   */
+  private async finalize(
+    organizationId: string,
+    tempKey: string,
+    folder: string,
+  ): Promise<FinalizeImageResult> {
+    if (!isTempObjectKey(organizationId, tempKey)) {
+      throw new BadRequestException(
+        'La subida no pertenece a este negocio',
+      );
+    }
+
+    const buffer = await getR2Object(tempKey);
+
+    if (!buffer) {
+      throw new BadRequestException(
+        'La imagen temporal ya no está disponible. Vuelve a subirla.',
+      );
+    }
+
+    const maxBytes = maxUploadBytes();
+
+    if (buffer.length > maxBytes) {
+      await deleteR2Object(tempKey);
+      throw new BadRequestException(
+        `La imagen supera el máximo de ${Math.round(maxBytes / 1024 / 1024)} MB`,
+      );
+    }
+
+    try {
+      const stored = await storeOptimizedImage(folder, buffer);
+
+      return {
+        key: stored.key,
+        url: imageFallbackUrl(stored.assets),
+        width: stored.assets.width,
+        height: stored.assets.height,
+        variants: stored.assets.variants,
+      };
+    } finally {
+      await deleteR2Object(tempKey);
+    }
   }
 
   /** Valida organización, formato y tamaño antes de firmar cualquier imagen. */
@@ -110,11 +216,7 @@ export class UploadsService {
     organizationId: string | null,
     dto: PresignImageDto,
   ): number {
-    if (!organizationId) {
-      throw new BadRequestException(
-        'Selecciona una organización antes de subir imágenes',
-      );
-    }
+    this.assertOrganization(organizationId);
 
     if (!(dto.contentType in IMAGE_CONTENT_TYPES)) {
       throw new BadRequestException('Formato no admitido. Usa JPG, PNG o WebP');
@@ -131,6 +233,16 @@ export class UploadsService {
     return maxBytes;
   }
 
+  private assertOrganization(
+    organizationId: string | null,
+  ): asserts organizationId is string {
+    if (!organizationId) {
+      throw new BadRequestException(
+        'Selecciona una organización antes de subir imágenes',
+      );
+    }
+  }
+
   /** Construye la respuesta firmada para una clave ya validada. */
   private async sign(
     key: string,
@@ -139,7 +251,6 @@ export class UploadsService {
   ): Promise<PresignImageResult> {
     return {
       key,
-      url: publicUrlForKey(key),
       uploadUrl: await presignPutUrl(key, dto.contentType),
       method: 'PUT',
       headers: { 'Content-Type': dto.contentType },

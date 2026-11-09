@@ -6,6 +6,7 @@ import { JwtUser } from '../auth/auth.service';
 import { RequirePermissions } from '../common/decorators/require-permissions.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CatalogEntriesService } from '../catalog/catalog-entries.service';
+import { FinalizeImageDto } from './dto/finalize-image.dto';
 import { PresignImageDto } from './dto/presign-image.dto';
 import { UploadsService } from './uploads.service';
 
@@ -42,6 +43,29 @@ export class UploadsController {
   }
 
   @ApiOperation({
+    summary: 'Optimizar la imagen de un artículo',
+  })
+  @RequirePermissions('catalog:manage')
+  @Post('catalog/items/:itemId/finalize')
+  async finalizeItemImage(
+    @CurrentUser() user: JwtUser,
+    @Param('itemId') itemId: string,
+    @Body() dto: FinalizeImageDto,
+  ) {
+    const entryId = await this.catalogEntries.ensureForItem(
+      user.organizationId,
+      itemId,
+    );
+
+    return this.uploads.finalizeImage(
+      user.organizationId,
+      'catalog',
+      entryId,
+      dto,
+    );
+  }
+
+  @ApiOperation({
     summary: 'Firmar la subida de la imagen de una presentación',
   })
   @RequirePermissions('catalog:manage')
@@ -67,6 +91,31 @@ export class UploadsController {
   }
 
   @ApiOperation({
+    summary: 'Optimizar la imagen de una presentación',
+  })
+  @RequirePermissions('catalog:manage')
+  @Post('catalog/items/:itemId/variants/:variantId/finalize')
+  async finalizeVariantImage(
+    @CurrentUser() user: JwtUser,
+    @Param('itemId') itemId: string,
+    @Param('variantId') variantId: string,
+    @Body() dto: FinalizeImageDto,
+  ) {
+    const entryId = await this.catalogEntries.ensureForVariant(
+      user.organizationId,
+      itemId,
+      variantId,
+    );
+
+    return this.uploads.finalizeVariantImage(
+      user.organizationId,
+      entryId,
+      variantId,
+      dto,
+    );
+  }
+
+  @ApiOperation({
     summary: 'Firmar la subida de la imagen de una receta',
   })
   @RequirePermissions('catalog:manage')
@@ -82,6 +131,29 @@ export class UploadsController {
     );
 
     return this.uploads.presignImage(
+      user.organizationId,
+      'catalog',
+      entryId,
+      dto,
+    );
+  }
+
+  @ApiOperation({
+    summary: 'Optimizar la imagen de una receta',
+  })
+  @RequirePermissions('catalog:manage')
+  @Post('catalog/recipes/:recipeId/finalize')
+  async finalizeRecipeImage(
+    @CurrentUser() user: JwtUser,
+    @Param('recipeId') recipeId: string,
+    @Body() dto: FinalizeImageDto,
+  ) {
+    const entryId = await this.catalogEntries.ensureForRecipe(
+      user.organizationId,
+      recipeId,
+    );
+
+    return this.uploads.finalizeImage(
       user.organizationId,
       'catalog',
       entryId,

@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   CallHandler,
   ExecutionContext,
   ForbiddenException,
@@ -84,7 +83,11 @@ export class BranchContextInterceptor implements NestInterceptor {
     });
 
     if (!branch) {
-      throw new BadRequestException('La sucursal no existe o está inactiva');
+      // La sucursal pudo eliminarse o desactivarse (p. ej. al limpiar datos de
+      // prueba). Se ignora y se opera en el consolidado en lugar de romper la
+      // sesión: `/auth/me` y el resto de peticiones fallarían igual y
+      // provocarían un bucle /dashboard ↔ /login.
+      return next.handle();
     }
 
     request.branchId = branch.id;

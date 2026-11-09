@@ -41,7 +41,13 @@ const ingredientSelect = {
 
 const recipeInclude = {
   catalogEntry: {
-    select: { id: true, imageKey: true, imageUrl: true, imageName: true },
+    select: {
+      id: true,
+      imageKey: true,
+      imageUrl: true,
+      imageVariants: true,
+      imageName: true,
+    },
   },
   category: { select: { id: true, name: true } },
   item: {
@@ -53,7 +59,7 @@ const recipeInclude = {
       isActive: true,
       isCombo: true,
       category: { select: { id: true, name: true } },
-      catalogEntry: { select: { imageKey: true, imageUrl: true } },
+      catalogEntry: { select: { imageKey: true, imageUrl: true, imageVariants: true } },
       variants: {
         where: { isActive: true },
         orderBy: [{ sortOrder: 'asc' as const }, { name: 'asc' as const }],
@@ -1379,6 +1385,7 @@ export class RecipesService {
             ...itemRest,
             imageKey: itemEntry?.imageKey ?? null,
             imageUrl: itemEntry?.imageUrl ?? null,
+            imageVariants: itemEntry?.imageVariants ?? null,
           };
         })()
       : null;
@@ -1387,6 +1394,7 @@ export class RecipesService {
       ...rest,
       imageKey: catalogEntry?.imageKey ?? null,
       imageUrl: catalogEntry?.imageUrl ?? null,
+      imageVariants: catalogEntry?.imageVariants ?? null,
       imageName: catalogEntry?.imageName ?? null,
       item: flatItem,
       producesIngredient: recipe.producesIngredient

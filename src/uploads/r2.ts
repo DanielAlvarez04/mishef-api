@@ -3,6 +3,7 @@ import { ServiceUnavailableException } from '@nestjs/common';
 import {
   CopyObjectCommand,
   DeleteObjectCommand,
+  GetObjectCommand,
   HeadObjectCommand,
   PutObjectCommand,
   S3Client,
@@ -94,34 +95,48 @@ export function r2Client(): S3Client {
   return cachedClient;
 }
 
-/**
- * Clave del objeto con la que el navegador sube el archivo.
- *
- * - El negocio va primero y luego la página (`catalog`, `inventory`, `users`…):
- *   permite reglas de ciclo de vida, auditoría y una futura migración a bucket
- *   privado por cliente.
- * - Cada entidad tiene su carpeta: `{org}/{página}/{entityId}/`. Para el
- *   catálogo, `entityId` es el `CatalogEntry.id`, compartido por la receta y su
- *   artículo.
- * - El nombre es un hash: no expone el nombre del artículo en un bucket
- *   público ni permite enumerar objetos. El nombre legible vive en la base
- *   (`CatalogEntry.imageName`).
- */
-export function buildObjectKey(
-  organizationId: string,
-  module: UploadModule,
-  entityId: string,
-  contentType: ImageContentType,
-): string {
-  return `${assetFolder(organizationId, module, entityId)}/${objectHash()}.${IMAGE_CONTENT_TYPES[contentType]}`;
-}
-
 /** Hash opaco para el nombre del objeto (no expone el nombre del artículo). */
 function objectHash(): string {
   return createHash('sha256')
     .update(randomUUID())
     .digest('hex')
     .slice(0, 32);
+}
+
+/**
+ * Clave base de una imagen optimizada: `{carpeta}/{hash}-{ancho}x{alto}`.
+ *
+ * No lleva extensión porque no existe un "original": las variantes se guardan
+ * al lado (`-640.avif`, `-1280.jpg`…). Las medidas permiten reconstruir todas
+ * las URLs sin consultar nada más.
+ */
+export function buildImageKey(
+  folder: string,
+  width: number,
+  height: number,
+): string {
+  return `${folder}/${objectHash()}-${width}x${height}`;
+}
+
+/**
+ * Clave temporal donde el navegador sube el original.
+ *
+ * Vive fuera de la carpeta de la entidad y se borra en cuanto se procesa. Una
+ * regla de ciclo de vida sobre `{org}/tmp/` limpia las subidas abandonadas.
+ */
+export function buildTempObjectKey(
+  organizationId: string,
+  contentType: ImageContentType,
+): string {
+  return `${organizationId}/tmp/${objectHash()}.${IMAGE_CONTENT_TYPES[contentType]}`;
+}
+
+/** `true` si la clave es una subida temporal de esa organización. */
+export function isTempObjectKey(
+  organizationId: string,
+  key: string,
+): boolean {
+  return key.startsWith(`${organizationId}/tmp/`);
 }
 
 /** Carpeta de una presentación: `{org}/catalog/{entryId}/variants/{variantId}`. */
@@ -131,16 +146,6 @@ export function variantFolder(
   variantId: string,
 ): string {
   return `${catalogFolder(organizationId, catalogEntryId)}/variants/${variantId}`;
-}
-
-/** Clave de la imagen propia de una presentación. */
-export function buildVariantObjectKey(
-  organizationId: string,
-  catalogEntryId: string,
-  variantId: string,
-  contentType: ImageContentType,
-): string {
-  return `${variantFolder(organizationId, catalogEntryId, variantId)}/${objectHash()}.${IMAGE_CONTENT_TYPES[contentType]}`;
 }
 
 /** Carpeta de un módulo/entidad: `{org}/{página}/{entityId}`. */
@@ -197,17 +202,6 @@ export function publicUrlForKey(key: string): string {
   return `${r2PublicBaseUrl()}/${key}`;
 }
 
-/** Tipo de contenido a partir de la extensión de una clave ya guardada. */
-export function contentTypeFromKey(key: string): ImageContentType | null {
-  const extension = key.split('.').pop()?.toLowerCase();
-
-  for (const [contentType, candidate] of Object.entries(IMAGE_CONTENT_TYPES)) {
-    if (candidate === extension) return contentType as ImageContentType;
-  }
-
-  return null;
-}
-
 /** Segundos de validez de la URL firmada de subida. */
 export const UPLOAD_URL_EXPIRES_IN = 300;
 
@@ -220,16 +214,60 @@ export const UPLOAD_URL_EXPIRES_IN = 300;
  * bucket lo permite. El tamaño se valida en el cliente y, al guardar, con
  * `objectSize`.
  */
-export function presignPutUrl(key: string, contentType: ImageContentType) {
+export function presignPutUrl(
+  key: string,
+  contentType: ImageContentType,
+  cacheControl?: string,
+) {
   return getSignedUrl(
     r2Client(),
     new PutObjectCommand({
       Bucket: r2Bucket(),
       Key: key,
       ContentType: contentType,
+      ...(cacheControl ? { CacheControl: cacheControl } : {}),
     }),
     { expiresIn: UPLOAD_URL_EXPIRES_IN },
   );
+}
+
+/**
+ * Sube un objeto desde el servidor (imágenes ya optimizadas).
+ *
+ * `cacheControl` se fija con la subida: las claves optimizadas llevan hash y
+ * nunca se reescriben, así que el navegador y el borde de Cloudflare pueden
+ * conservarlas un año sin revalidar.
+ */
+export async function putR2Object(
+  key: string,
+  body: Buffer,
+  contentType: 'image/avif' | 'image/jpeg',
+  cacheControl: string,
+): Promise<void> {
+  await r2Client().send(
+    new PutObjectCommand({
+      Bucket: r2Bucket(),
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+      CacheControl: cacheControl,
+    }),
+  );
+}
+
+/** Descarga un objeto completo. Devuelve `null` si no existe o falla. */
+export async function getR2Object(key: string): Promise<Buffer | null> {
+  try {
+    const result = await r2Client().send(
+      new GetObjectCommand({ Bucket: r2Bucket(), Key: key }),
+    );
+
+    if (!result.Body) return null;
+
+    return Buffer.from(await result.Body.transformToByteArray());
+  } catch {
+    return null;
+  }
 }
 
 /**

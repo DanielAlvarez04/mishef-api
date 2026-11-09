@@ -31,6 +31,15 @@ const menuInclude = {
   },
 } satisfies Prisma.MenuInclude;
 
+/** Menú de referencia que se crea automáticamente para cada negocio. */
+const GLOBAL_MENU_NAME = 'Menú global';
+const GLOBAL_MENU_DESCRIPTION =
+  'Menú de referencia con todos los artículos y combos del catálogo.';
+/** Primer grupo del menú global: los combos. */
+const COMBO_GROUP = 'Combos';
+/** Grupo para artículos activos sin categoría. */
+const UNCATEGORIZED_GROUP = 'Sin categoría';
+
 type MenuRow = Prisma.MenuGetPayload<{ include: typeof menuInclude }>;
 
 /**
@@ -81,6 +90,8 @@ export class MenusService {
   constructor(private readonly prisma: PrismaService) {}
 
   async list(organizationId: string | null, includeInactive = false) {
+    await this.ensureGlobalMenu(organizationId);
+
     const menus = await this.prisma.menu.findMany({
       where: {
         organizationId,
@@ -91,6 +102,129 @@ export class MenusService {
     });
 
     return menus.map((menu) => this.withAvailability(menu));
+  }
+
+  /**
+   * Crea el «Menú global» de referencia si todavía no existe.
+   *
+   * Junta todo el catálogo activo: los combos en el primer grupo y cada
+   * artículo en un grupo con el nombre de su categoría. Queda siempre
+   * disponible, sin horario ni fechas, y con todos los artículos asignados.
+   *
+   * Es idempotente: si el menú ya existe no lo toca, aunque el usuario haya
+   * cambiado el nombre, la descripción o la disponibilidad. Si el negocio aún
+   * no tiene artículos no crea nada; se generará al abrir Menús más adelante.
+   */
+  async ensureGlobalMenu(organizationId: string | null): Promise<void> {
+    if (!organizationId) return;
+
+    const existing = await this.prisma.menu.findFirst({
+      where: {
+        organizationId,
+        // Si el nombre ya está ocupado no se intenta crear en cada carga.
+        OR: [{ isGlobal: true }, { name: GLOBAL_MENU_NAME }],
+      },
+      select: { id: true },
+    });
+
+    if (existing) return;
+
+    const items = await this.prisma.item.findMany({
+      where: { organizationId, isActive: true, isArchived: false },
+      select: {
+        id: true,
+        name: true,
+        isCombo: true,
+        sortOrder: true,
+        category: { select: { name: true, sortOrder: true } },
+      },
+      orderBy: [{ isCombo: 'desc' }, { sortOrder: 'asc' }, { name: 'asc' }],
+    });
+
+    if (items.length === 0) return;
+
+    // Las categorías core viven con `organizationId` nulo, así que el orden
+    // se toma de las categorías que realmente usan los artículos del negocio.
+    const categoryOrder = new Map<string, number>();
+
+    for (const item of items) {
+      if (item.isCombo || !item.category) continue;
+
+      if (!categoryOrder.has(item.category.name)) {
+        categoryOrder.set(item.category.name, item.category.sortOrder);
+      }
+    }
+
+    const categoryNames = [...categoryOrder.entries()]
+      .sort(
+        ([leftName, leftOrder], [rightName, rightOrder]) =>
+          leftOrder - rightOrder || leftName.localeCompare(rightName, 'es'),
+      )
+      .map(([name]) => name);
+
+    const groupFor = (item: (typeof items)[number]) =>
+      item.isCombo
+        ? COMBO_GROUP
+        : (item.category?.name ?? UNCATEGORIZED_GROUP);
+
+    const hasCombos = items.some((item) => item.isCombo);
+    const hasUncategorized = items.some(
+      (item) => !item.isCombo && !item.category?.name,
+    );
+
+    // Los combos van primero; después las categorías en su orden y, al final,
+    // los artículos sin categoría. `Set` evita duplicados si una categoría se
+    // llama igual que el grupo de combos.
+    const groups = [
+      ...new Set([
+        ...(hasCombos ? [COMBO_GROUP] : []),
+        ...categoryNames,
+        ...(hasUncategorized ? [UNCATEGORIZED_GROUP] : []),
+      ]),
+    ];
+
+    const groupOrder = new Map(groups.map((group, index) => [group, index]));
+    const ordered = [...items].sort((left, right) => {
+      const leftGroup = groupOrder.get(groupFor(left)) ?? groups.length;
+      const rightGroup = groupOrder.get(groupFor(right)) ?? groups.length;
+
+      return (
+        leftGroup - rightGroup ||
+        left.sortOrder - right.sortOrder ||
+        left.name.localeCompare(right.name, 'es')
+      );
+    });
+
+    try {
+      await this.prisma.menu.create({
+        data: {
+          organizationId,
+          name: GLOBAL_MENU_NAME,
+          description: GLOBAL_MENU_DESCRIPTION,
+          isGlobal: true,
+          isActive: true,
+          daysOfWeek: [],
+          groups,
+          items: {
+            create: ordered.map((item, index) => ({
+              itemId: item.id,
+              sortOrder: index,
+              group: groupFor(item),
+            })),
+          },
+        },
+      });
+    } catch (error) {
+      // Otra petición lo creó a la vez, o ya existe un menú con ese nombre.
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        return;
+      }
+
+      throw error;
+    }
   }
 
   async findOne(organizationId: string | null, id: string) {

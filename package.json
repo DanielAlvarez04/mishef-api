@@ -14,6 +14,8 @@
     "prisma:seed": "ts-node prisma/seed.ts",
     "catalog:assets": "node scripts/migrate-catalog-assets.mjs",
     "recipe:scopes": "node scripts/migrate-recipe-scopes.mjs",
+    "images:optimize": "ts-node --transpile-only scripts/optimize-existing-images.ts",
+    "images:seed": "ts-node --transpile-only scripts/upload-food-images.ts",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
@@ -47,6 +49,7 @@
     "prisma": "^7.0.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
+    "sharp": "^0.35.5",
     "zod": "^3.23.0"
   },
   "devDependencies": {

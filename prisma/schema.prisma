@@ -346,8 +346,10 @@ model Category {
 model CatalogEntry {
   id             String   @id @default(cuid())
   organizationId String?
-  imageKey       String? // Objeto en R2 (nombre hasheado); la URL se deriva
+  imageKey       String? // Prefijo del objeto en R2; las URLs se derivan
   imageUrl       String?
+  /// Variantes optimizadas (AVIF + JPEG por ancho) con sus URLs públicas.
+  imageVariants  Json?
   /// Nombre normalizado y legible de la imagen (sin guiones ni extensión).
   imageName      String?
   createdAt      DateTime @default(now())
@@ -418,6 +420,8 @@ model ItemVariant {
   /// Imagen propia de la presentación. Si falta, se usa la del artículo.
   imageKey     String?
   imageUrl     String?
+  /// Variantes optimizadas (AVIF + JPEG por ancho) con sus URLs públicas.
+  imageVariants Json?
   /// Nombre legible de la imagen (solo referencia, como en CatalogEntry).
   imageName    String?
   isActive     Boolean  @default(true)
@@ -629,6 +633,8 @@ model Menu {
   name           String
   description    String?
   isActive       Boolean @default(true)
+  /// Menú de referencia creado automáticamente con todo el catálogo.
+  isGlobal       Boolean @default(false)
   sortOrder      Int     @default(0)
 
   /// Vigencia recurrente. `daysOfWeek` vacío = todos los días.

@@ -6,18 +6,23 @@ import {
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import {
-  buildObjectKey,
-  buildVariantObjectKey,
+  buildImageKey,
   catalogFolder,
-  contentTypeFromKey,
   copyR2Object,
   deleteR2Object,
   imageSnapshotName,
   maxUploadBytes,
   objectSize,
-  publicUrlForKey,
   variantFolder,
 } from '../uploads/r2';
+import {
+  imageAssetsForKey,
+  imageFallbackUrl,
+  imageMainObjectKey,
+  imageObjectKeys,
+  variantWidths,
+  type ImageAssets,
+} from '../uploads/image-assets';
 
 /** Prisma normal o dentro de una transacción. */
 type Db = Prisma.TransactionClient | PrismaService;
@@ -130,10 +135,10 @@ export class CatalogEntriesService {
   /**
    * Guarda o quita la imagen base de una entrada.
    *
-   * Valida que la clave esté en la carpeta de la entrada, comprueba el tamaño
-   * real y borra el objeto anterior. Antes de cambiar o quitar la base, si la
-   * presentación principal no tiene imagen propia, se copia la base anterior
-   * a la presentación: así la principal conserva la imagen que ya mostraba.
+   * La imagen ya viene optimizada y vive en `{carpeta}/{hash}-{W}x{H}`; aquí
+   * solo se valida que esté en la carpeta de la entrada y se guardan las URLs
+   * derivadas. La presentación principal ya no recibe una copia: si no tiene
+   * imagen propia, la UI muestra la del artículo (estado "Base").
    */
   async applyImage(
     organizationId: string | null,
@@ -149,22 +154,7 @@ export class CatalogEntriesService {
 
     const entry = await this.prisma.catalogEntry.findUnique({
       where: { id: entryId },
-      select: {
-        id: true,
-        imageKey: true,
-        items: {
-          select: {
-            id: true,
-            name: true,
-            variants: {
-              where: { isActive: true, isPrimary: true },
-              orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
-              take: 1,
-              select: { id: true, name: true, imageKey: true },
-            },
-          },
-        },
-      },
+      select: { id: true, imageKey: true },
     });
 
     if (!entry) {
@@ -176,112 +166,115 @@ export class CatalogEntriesService {
     if (imageKey === previousKey) return;
 
     if (imageKey === null) {
-      // La principal hereda la imagen base cuando esta se quita.
-      if (previousKey) {
-        await this.copyBaseToPrimary(
-          organizationId,
-          entry.id,
-          previousKey,
-          entry.items,
-        );
-      }
-
       await this.prisma.catalogEntry.update({
         where: { id: entry.id },
-        data: { imageKey: null, imageUrl: null, imageName: null },
+        data: {
+          imageKey: null,
+          imageUrl: null,
+          imageVariants: Prisma.DbNull,
+          imageName: null,
+        },
       });
 
-      // La base ya no apunta a la imagen: el objeto puede borrarse.
-      if (previousKey) await deleteR2Object(previousKey);
+      await this.deleteImageAssets(previousKey);
       return;
     }
 
-    const folder = catalogFolder(organizationId, entry.id);
+    const assets = this.assertImageKey(
+      catalogFolder(organizationId, entry.id),
+      imageKey,
+    );
 
-    if (!imageKey.startsWith(`${folder}/`)) {
-      throw new BadRequestException(
-        'La imagen no pertenece a este elemento del catálogo',
-      );
-    }
-
-    // R2 no permite fijar el tamaño en la firma del PUT: se comprueba aquí.
-    const size = await objectSize(imageKey);
-    const maxBytes = maxUploadBytes();
-
-    if (size !== null && size > maxBytes) {
-      await deleteR2Object(imageKey);
-      throw new BadRequestException(
-        `La imagen supera el máximo de ${Math.round(maxBytes / 1024 / 1024)} MB`,
-      );
-    }
-
-    // La principal conserva la imagen anterior antes de que cambie la base.
-    if (previousKey) {
-      await this.copyBaseToPrimary(
-        organizationId,
-        entry.id,
-        previousKey,
-        entry.items,
-      );
-    }
+    await this.assertObjectsExist(imageKey);
 
     await this.prisma.catalogEntry.update({
       where: { id: entry.id },
       data: {
         imageKey,
-        imageUrl: publicUrlForKey(imageKey),
-        // Nombre legible en la base; en R2 el objeto va hasheado.
+        imageUrl: imageFallbackUrl(assets),
+        imageVariants: assets as unknown as Prisma.InputJsonValue,
+        // Nombre legible en la base; en R2 los objetos van hasheados.
         imageName: imageSnapshotName(name),
       },
     });
 
-    if (previousKey) await deleteR2Object(previousKey);
+    await this.deleteImageAssets(previousKey);
   }
 
   /**
-   * Copia la imagen base a la carpeta de la presentación principal.
+   * Copia una imagen optimizada a otra carpeta (misma imagen, clave nueva).
    *
-   * La copia es un objeto nuevo: cambiar o borrar después la base no afecta a
-   * la presentación (ni al revés).
+   * Se usa cuando la presentación principal estrena imagen y el artículo no
+   * tiene una: el artículo toma esa misma imagen como base.
    */
-  private async copyBaseToPrimary(
-    organizationId: string,
-    entryId: string,
+  private async copyImageToFolder(
     sourceKey: string,
-    items: Array<{
-      id: string;
-      name: string;
-      variants: Array<{
-        id: string;
-        name: string;
-        imageKey: string | null;
-      }>;
-    }>,
-  ): Promise<void> {
-    const contentType = contentTypeFromKey(sourceKey);
-    if (!contentType) return;
+    assets: ImageAssets,
+    folder: string,
+  ): Promise<string> {
+    const targetKey = buildImageKey(folder, assets.width, assets.height);
 
-    for (const item of items) {
-      const primary = item.variants[0];
-      if (!primary || primary.imageKey) continue;
-
-      const targetKey = buildVariantObjectKey(
-        organizationId,
-        entryId,
-        primary.id,
-        contentType,
+    for (const width of variantWidths(assets.width, assets.height)) {
+      await copyR2Object(
+        `${sourceKey}-${width}.avif`,
+        `${targetKey}-${width}.avif`,
       );
+      await copyR2Object(
+        `${sourceKey}-${width}.jpg`,
+        `${targetKey}-${width}.jpg`,
+      );
+    }
 
-      await copyR2Object(sourceKey, targetKey);
+    return targetKey;
+  }
 
-      await this.prisma.itemVariant.update({
-        where: { id: primary.id },
-        data: {
-          imageKey: targetKey,
-          imageUrl: publicUrlForKey(targetKey),
-          imageName: imageSnapshotName(`${item.name} ${primary.name}`),
-        },
-      });
+  /**
+   * Valida que la clave sea una imagen optimizada dentro de la carpeta dada.
+   *
+   * Las claves antiguas (con extensión) ya no se aceptan al guardar: el
+   * backfill las convierte antes de que la app vuelva a escribir imágenes.
+   */
+  private assertImageKey(folder: string, key: string): ImageAssets {
+    if (!key.startsWith(`${folder}/`)) {
+      throw new BadRequestException(
+        'La imagen no pertenece a este elemento del catálogo',
+      );
+    }
+
+    const assets = imageAssetsForKey(key);
+
+    if (!assets) {
+      throw new BadRequestException(
+        'La imagen no está optimizada. Vuelve a subirla.',
+      );
+    }
+
+    return assets;
+  }
+
+  /** Comprueba el tamaño real del archivo principal (best-effort). */
+  private async assertObjectsExist(key: string): Promise<void> {
+    const mainKey = imageMainObjectKey(key);
+
+    if (!mainKey) return;
+
+    const size = await objectSize(mainKey);
+    const maxBytes = maxUploadBytes();
+
+    if (size !== null && size > maxBytes) {
+      await this.deleteImageAssets(key);
+      throw new BadRequestException(
+        `La imagen supera el máximo de ${Math.round(maxBytes / 1024 / 1024)} MB`,
+      );
+    }
+  }
+
+  /** Borra todos los objetos de una imagen (o el objeto suelto si es antigua). */
+  private async deleteImageAssets(key: string | null): Promise<void> {
+    if (!key) return;
+
+    for (const objectKey of imageObjectKeys(key)) {
+      await deleteR2Object(objectKey);
     }
   }
 
@@ -339,70 +332,62 @@ export class CatalogEntriesService {
     if (imageKey === null) {
       await this.prisma.itemVariant.update({
         where: { id: variant.id },
-        data: { imageKey: null, imageUrl: null, imageName: null },
+        data: {
+          imageKey: null,
+          imageUrl: null,
+          imageVariants: Prisma.DbNull,
+          imageName: null,
+        },
       });
 
-      if (previousKey) await deleteR2Object(previousKey);
+      await this.deleteImageAssets(previousKey);
       return;
     }
 
-    const folder = variantFolder(organizationId, entryId, variant.id);
+    const assets = this.assertImageKey(
+      variantFolder(organizationId, entryId, variant.id),
+      imageKey,
+    );
 
-    if (!imageKey.startsWith(`${folder}/`)) {
-      throw new BadRequestException(
-        'La imagen no pertenece a esta presentación',
-      );
-    }
-
-    const size = await objectSize(imageKey);
-    const maxBytes = maxUploadBytes();
-
-    if (size !== null && size > maxBytes) {
-      await deleteR2Object(imageKey);
-      throw new BadRequestException(
-        `La imagen supera el máximo de ${Math.round(maxBytes / 1024 / 1024)} MB`,
-      );
-    }
+    await this.assertObjectsExist(imageKey);
 
     // Si la principal estrena imagen y el artículo no tiene base, se copia a
     // la entrada. Después cada lado es independiente.
     let baseKey: string | null = null;
+    let baseAssets: ImageAssets | null = null;
 
     if (variant.isPrimary && !entry.imageKey) {
-      const contentType = contentTypeFromKey(imageKey);
-
-      if (contentType) {
-        baseKey = buildObjectKey(
-          organizationId,
-          'catalog',
-          entryId,
-          contentType,
-        );
-        await copyR2Object(imageKey, baseKey);
-      }
+      baseKey = await this.copyImageToFolder(
+        imageKey,
+        assets,
+        catalogFolder(organizationId, entryId),
+      );
+      baseAssets = imageAssetsForKey(baseKey);
     }
 
     await this.prisma.itemVariant.update({
       where: { id: variant.id },
       data: {
         imageKey,
-        imageUrl: publicUrlForKey(imageKey),
+        imageUrl: imageFallbackUrl(assets),
+        imageVariants: assets as unknown as Prisma.InputJsonValue,
         imageName: imageSnapshotName(`${item.name} ${variant.name}`),
       },
     });
 
-    if (baseKey) {
+    if (baseKey && baseAssets) {
       await this.prisma.catalogEntry.update({
         where: { id: entryId },
         data: {
           imageKey: baseKey,
-          imageUrl: publicUrlForKey(baseKey),
+          imageUrl: imageFallbackUrl(baseAssets),
+          imageVariants: baseAssets as unknown as Prisma.InputJsonValue,
           imageName: imageSnapshotName(item.name),
         },
       });
     }
 
-    if (previousKey) await deleteR2Object(previousKey);
+    await this.deleteImageAssets(previousKey);
   }
 
   /**
@@ -430,6 +415,6 @@ export class CatalogEntriesService {
       return;
     }
 
-    if (entry.imageKey) await deleteR2Object(entry.imageKey);
+    if (entry.imageKey) await this.deleteImageAssets(entry.imageKey);
   }
 }
