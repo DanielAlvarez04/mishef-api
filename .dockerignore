@@ -1,0 +1,17 @@
+node_modules
+dist
+coverage
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.log
+npm-debug.log*
+.mail-outbox
+tmp-*.mjs
+check-data.ts
+typecheck_errors.txt
+scripts
+Dockerfile
+.dockerignore
