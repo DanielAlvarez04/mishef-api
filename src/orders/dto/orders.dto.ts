@@ -4,8 +4,10 @@ import {
   ArrayNotEmpty,
   IsArray,
   IsBoolean,
+  IsDateString,
   IsEnum,
   IsInt,
+  IsNumber,
   IsOptional,
   IsString,
   Max,
@@ -13,7 +15,7 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
-import { OrderRoundStatus } from '@prisma/client';
+import { OrderChannel, OrderRoundStatus, GuestTitle } from '@prisma/client';
 
 /** Extra elegido para una línea (ej. "extra queso"). */
 export class RoundItemExtraDto {
@@ -72,6 +74,12 @@ export class RoundItemDto {
   @Type(() => RoundItemOptionDto)
   options?: RoundItemOptionDto[];
 
+  /** Persona de la cuenta a la que pertenece esta línea (opcional). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  guestId?: string;
+
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(50)
@@ -101,6 +109,7 @@ export class SendRoundDto {
 
 /** Apertura de una cuenta (pedido). */
 export class CreateOrderDto {
+  /// Marca histórica; `channel` manda desde la caja nueva.
   @IsOptional()
   @IsString()
   @MaxLength(20)
@@ -111,9 +120,76 @@ export class CreateOrderDto {
   isTakeaway?: boolean;
 
   @IsOptional()
+  @IsEnum(OrderChannel)
+  channel?: OrderChannel;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  customerName?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  customerPhone?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(240)
+  deliveryAddress?: string;
+
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  deliveryFee?: number;
+
+  @IsOptional()
+  @IsDateString()
+  scheduledAt?: string;
+
+  /** Número de comensales de la mesa (1–20). */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  partySize?: number;
+
+  /** Personas de la cuenta (opcional, para pedir por comensal). */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => CreateOrderGuestDto)
+  guests?: CreateOrderGuestDto[];
+
+  @IsOptional()
   @IsString()
   @MaxLength(80)
   idempotencyKey?: string;
+}
+
+/** Persona de la cuenta al abrirla. */
+export class CreateOrderGuestDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  name?: string;
+
+  @IsOptional()
+  @IsEnum(GuestTitle)
+  title?: GuestTitle | null;
+}
+
+/** Alta o edición de una persona de la cuenta. */
+export class OrderGuestDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  name?: string;
+
+  @IsOptional()
+  @IsEnum(GuestTitle)
+  title?: GuestTitle | null;
 }
 
 /** Transición de estado de una ronda. */

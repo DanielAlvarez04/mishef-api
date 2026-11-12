@@ -22,6 +22,8 @@ export const PERMISSIONS = {
   'payments:register': ['ADMIN', 'CASHIER', 'WAITER'],
   'payments:confirm': ['ADMIN', 'CASHIER'],
   'payments:refund': ['ADMIN'],
+  'cash:read': ['ADMIN', 'CASHIER', 'WAITER'],
+  'cash:manage': ['ADMIN', 'CASHIER'],
   'inventory:manage': ['ADMIN', 'INVENTORY_MANAGER'],
   'inventory:adjust': ['ADMIN', 'INVENTORY_MANAGER'],
   'reports:read': ['ADMIN', 'CASHIER'],

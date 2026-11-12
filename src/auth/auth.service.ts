@@ -220,6 +220,48 @@ export class AuthService {
     return this.issueSessionForUser(user.id, meta);
   }
 
+  /**
+   * Abre una sesión normal para un usuario autenticado por otro medio
+   * (PIN de caja en un dispositivo vinculado).
+   */
+  async issuePosSession(
+    userId: string,
+    organizationId: string,
+    meta: SessionMeta = {},
+  ) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        memberships: {
+          where: { organizationId, isActive: true },
+        },
+      },
+    });
+
+    if (!user || !user.isActive || user.memberships.length === 0) {
+      throw new UnauthorizedException('Usuario sin acceso a este negocio');
+    }
+
+    const membership = user.memberships[0];
+    const tokens = await this.createSession(
+      user.id,
+      user.email,
+      membership.roles,
+      organizationId,
+      meta,
+    );
+
+    return {
+      ...tokens,
+      user: {
+        id: user.id,
+        name: user.name,
+        username: user.username,
+        roles: membership.roles,
+      },
+    };
+  }
+
   async verifyTwoFactor(
     challengeId: string,
     code: string,

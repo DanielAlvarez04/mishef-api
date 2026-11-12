@@ -20,6 +20,29 @@ export class CreatePaymentDto {
   @IsPositive()
   amount!: number;
 
+  /** Propina opcional, separada del importe de la venta. */
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  tipAmount?: number;
+
+  /** Quién recibe la propina; por defecto, quien cobra. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  tipRecipientId?: string;
+
+  /** Efectivo entregado por el cliente (solo efectivo). */
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  cashReceived?: number;
+
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  changeGiven?: number;
+
   /**
    * Clave de idempotencia del cliente. Reenviar la misma clave devuelve el
    * pago ya registrado en vez de duplicarlo.

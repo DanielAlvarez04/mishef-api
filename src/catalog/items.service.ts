@@ -92,7 +92,6 @@ const itemListInclude = {
     include: {
       group: { select: { id: true, name: true } },
       values: {
-        where: { isActive: true },
         orderBy: [{ sortOrder: 'asc' }, { value: { name: 'asc' } }],
         include: {
           value: {
@@ -1593,7 +1592,9 @@ export class ItemsService {
 
     const groups = await this.prisma.optionGroup.findMany({
       where: { id: { in: groupIds }, organizationId },
-      include: { values: { select: { id: true, name: true } } },
+      include: {
+        values: { select: { id: true, name: true, isActive: true } },
+      },
     });
 
     const assignedGroupIds = itemId
@@ -1687,8 +1688,24 @@ export class ItemsService {
       const isRequired = group.isRequired ?? false;
       const minSelect =
         group.minSelect ?? (isRequired ? 1 : 0);
+
+      // Solo cuentan las opciones asignadas como disponibles y con su valor de
+      // biblioteca activo: son las que realmente verá la comanda.
+      const catalogValueActive = new Map(
+        catalog.values.map((value) => [value.id, value.isActive]),
+      );
+      const availableValuesCount = group.values.filter((value) => {
+        const libraryActive = value.valueId
+          ? (catalogValueActive.get(value.valueId) ?? true)
+          : true;
+
+        return (value.isActive ?? true) && libraryActive;
+      }).length;
       const maxSelect =
-        group.maxSelect ?? (selection === OptionSelection.SINGLE ? 1 : group.values.length);
+        group.maxSelect ??
+        (selection === OptionSelection.SINGLE
+          ? 1
+          : Math.max(1, availableValuesCount));
 
       if (selection === OptionSelection.SINGLE && maxSelect > 1) {
         throw new BadRequestException(
@@ -1703,9 +1720,9 @@ export class ItemsService {
       }
 
       // Un grupo recién creado puede no tener opciones todavía.
-      if (group.values.length > 0 && maxSelect > group.values.length) {
+      if (availableValuesCount > 0 && maxSelect > availableValuesCount) {
         throw new BadRequestException(
-          `El grupo ${catalog.name} no tiene suficientes opciones para el máximo configurado`,
+          `El grupo ${catalog.name} no tiene suficientes opciones disponibles para el máximo configurado`,
         );
       }
 
@@ -1798,24 +1815,24 @@ export class ItemsService {
 
       const defaults = values.filter((value) => value.isDefault);
 
-      if (
-        isRequired &&
-        values.length > 0 &&
-        !values.some((value) => value.isActive)
-      ) {
+      if (isRequired && group.values.length > 0 && availableValuesCount === 0) {
         throw new BadRequestException(
           `El grupo obligatorio ${catalog.name} necesita al menos una opción disponible`,
         );
       }
 
-      if (
-        selection === OptionSelection.SINGLE &&
-        values.length > 0 &&
-        defaults.length !== 1
-      ) {
-        throw new BadRequestException(
-          `Elige una opción por defecto para ${catalog.name}`,
-        );
+      if (selection === OptionSelection.SINGLE && values.length > 0) {
+        if (isRequired && defaults.length !== 1) {
+          throw new BadRequestException(
+            `Elige una opción por defecto para ${catalog.name}`,
+          );
+        }
+
+        if (!isRequired && defaults.length > 1) {
+          throw new BadRequestException(
+            `Solo puede haber una opción por defecto en ${catalog.name}`,
+          );
+        }
       }
 
       if (defaults.length > maxSelect) {
@@ -2007,8 +2024,11 @@ export class ItemsService {
         );
 
         if (removedValues.length > 0) {
-          await tx.itemOptionValue.deleteMany({
+          // Las opciones que no vengan en el payload no se borran: solo se
+          // ocultan de la comanda para conservar la configuración del negocio.
+          await tx.itemOptionValue.updateMany({
             where: { id: { in: removedValues.map((value) => value.id) } },
+            data: { isActive: false, isDefault: false },
           });
         }
 

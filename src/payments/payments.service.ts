@@ -36,6 +36,8 @@ const paymentInclude = {
   },
   user: { select: { id: true, name: true, username: true } },
   confirmedBy: { select: { id: true, name: true, username: true } },
+  tipRecipient: { select: { id: true, name: true, username: true } },
+  session: { select: { id: true, status: true } },
 } satisfies Prisma.PaymentInclude;
 
 export interface PaymentFilters {
@@ -99,7 +101,7 @@ export class PaymentsService {
       this.prisma.payment.groupBy({
         by: ['method', 'status'],
         where,
-        _sum: { amount: true },
+        _sum: { amount: true, tipAmount: true },
         _count: { _all: true },
       }),
     ]);
@@ -107,6 +109,7 @@ export class PaymentsService {
     const byMethod = new Map<PaymentMethod, { total: number; count: number }>();
     const byStatus = new Map<PaymentStatus, { total: number; count: number }>();
     let confirmedTotal = 0;
+    let tipsTotal = 0;
     let count = 0;
 
     for (const row of grouped) {
@@ -127,6 +130,7 @@ export class PaymentsService {
 
       if (row.status === PaymentStatus.CONFIRMED) {
         confirmedTotal += total;
+        tipsTotal += Number(row._sum.tipAmount ?? 0);
       }
     }
 
@@ -135,6 +139,7 @@ export class PaymentsService {
       totals: {
         count,
         confirmed: round(confirmedTotal),
+        tips: round(tipsTotal),
         byMethod: [...byMethod].map(([method, value]) => ({
           method,
           total: round(value.total),
@@ -155,9 +160,64 @@ export class PaymentsService {
     userId: string,
     orderId: string,
     dto: CreatePaymentDto,
+    options: { paidAt?: Date | null; pointCharge?: boolean } = {},
   ) {
+    if (
+      dto.method === PaymentMethod.MERCADO_PAGO_POINT &&
+      !options.pointCharge
+    ) {
+      throw new BadRequestException(
+        'Los cobros con terminal se envían desde el punto de venta',
+      );
+    }
+
     const order = await this.getOpenOrder(organizationId, orderId);
     const amount = decimal(dto.amount, 'El importe');
+    const tipAmount = new Prisma.Decimal(dto.tipAmount ?? 0).toDecimalPlaces(2);
+    const session = await this.requireOpenSession(
+      organizationId,
+      order.branchId,
+    );
+
+    if (dto.tipRecipientId) {
+      const member = await this.prisma.membership.findFirst({
+        where: {
+          userId: dto.tipRecipientId,
+          organizationId,
+          isActive: true,
+        },
+        select: { id: true },
+      });
+
+      if (!member) {
+        throw new BadRequestException(
+          'Quien recibe la propina no pertenece al negocio',
+        );
+      }
+    }
+
+    let cashReceived: Prisma.Decimal | null = null;
+    let changeGiven: Prisma.Decimal | null = null;
+
+    if (dto.method === PaymentMethod.CASH) {
+      const charged = amount.plus(tipAmount);
+
+      if (dto.cashReceived === undefined) {
+        cashReceived = charged;
+      } else {
+        cashReceived = new Prisma.Decimal(dto.cashReceived).toDecimalPlaces(2);
+
+        if (cashReceived.lt(charged)) {
+          throw new BadRequestException(
+            'El efectivo recibido no cubre el importe más la propina',
+          );
+        }
+      }
+
+      changeGiven = cashReceived.minus(charged).toDecimalPlaces(2);
+    } else if (dto.changeGiven !== undefined) {
+      changeGiven = new Prisma.Decimal(dto.changeGiven).toDecimalPlaces(2);
+    }
 
     const idempotencyKey = dto.idempotencyKey?.trim() || null;
 
@@ -195,12 +255,48 @@ export class PaymentsService {
         userId,
         method: dto.method,
         amount,
+        tipAmount,
+        tipRecipientId:
+          dto.tipRecipientId ?? (tipAmount.gt(0) ? userId : null),
+        cashReceived,
+        changeGiven,
+        sessionId: session.id,
         status: PaymentStatus.PENDING,
-        paidAt: new Date(),
+        paidAt:
+          options.paidAt === undefined ? new Date() : options.paidAt,
         idempotencyKey,
       },
       include: paymentInclude,
     });
+  }
+
+  /** Exige una caja abierta para la sucursal de la cuenta. */
+  private async requireOpenSession(
+    organizationId: string | null,
+    branchId: string | null,
+  ) {
+    if (!organizationId) {
+      throw new BadRequestException(
+        'Abre la caja antes de cobrar: la sesión no tiene negocio activo',
+      );
+    }
+
+    const session = await this.prisma.cashSession.findFirst({
+      where: {
+        organizationId,
+        branchId,
+        status: 'OPEN',
+      },
+      select: { id: true },
+    });
+
+    if (!session) {
+      throw new BadRequestException(
+        'Abre la caja de la sucursal antes de registrar cobros',
+      );
+    }
+
+    return session;
   }
 
   /**
@@ -212,6 +308,42 @@ export class PaymentsService {
    * pago sin duplicar el ingreso.
    */
   async confirm(organizationId: string | null, userId: string, paymentId: string) {
+    return this.confirmInternal(organizationId, paymentId, {
+      userId,
+      source: 'manual',
+    });
+  }
+
+  /**
+   * Confirma un pago que el proveedor ya cobró (webhook o conciliación).
+   *
+   * No exige `payments:confirm`: el dinero ya entró y el rol solo podía
+   * impedir que un cajero “marque” un cobro que no ocurrió. Queda auditado con
+   * `source: mercado_pago` y sin usuario responsable.
+   */
+  async confirmByProvider(
+    organizationId: string | null,
+    paymentId: string,
+    options: { paidAt?: Date; providerStatus?: string } = {},
+  ) {
+    return this.confirmInternal(organizationId, paymentId, {
+      userId: null,
+      source: 'mercado_pago',
+      paidAt: options.paidAt,
+      providerStatus: options.providerStatus,
+    });
+  }
+
+  private async confirmInternal(
+    organizationId: string | null,
+    paymentId: string,
+    options: {
+      userId: string | null;
+      source: string;
+      paidAt?: Date;
+      providerStatus?: string;
+    },
+  ) {
     const payment = await this.prisma.payment.findFirst({
       where: { id: paymentId, organizationId },
       include: { order: { select: { id: true, status: true, total: true } } },
@@ -235,7 +367,7 @@ export class PaymentsService {
       throw new BadRequestException('La cuenta ya no está abierta');
     }
 
-    const now = new Date();
+    const now = options.paidAt ?? new Date();
 
     return this.prisma.$transaction(async (tx) => {
       const confirmed = await tx.payment.aggregate({
@@ -261,8 +393,8 @@ export class PaymentsService {
         data: {
           status: PaymentStatus.CONFIRMED,
           confirmedAt: now,
-          confirmedById: userId,
-          paidAt: payment.paidAt ?? now,
+          confirmedById: options.userId,
+          paidAt: options.paidAt ?? payment.paidAt ?? now,
         },
       });
 
@@ -281,13 +413,15 @@ export class PaymentsService {
       await tx.auditLog.create({
         data: {
           organizationId,
-          userId,
+          userId: options.userId,
           action: 'payment.confirmed',
           entity: 'Payment',
           entityId: paymentId,
           newValues: {
             method: payment.method,
             amount: payment.amount.toFixed(2),
+            source: options.source,
+            providerStatus: options.providerStatus ?? null,
           },
         },
       });
@@ -326,6 +460,13 @@ export class PaymentsService {
     }
 
     const isPending = payment.status === PaymentStatus.PENDING;
+    const reason = dto.reason?.trim();
+
+    if (!reason) {
+      throw new BadRequestException(
+        'Indica el motivo de la anulación o del reembolso',
+      );
+    }
 
     if (isPending) {
       if (!rolesHavePermission(actor.roles, 'payments:confirm')) {
@@ -346,6 +487,45 @@ export class PaymentsService {
         include: paymentInclude,
       });
 
+      // Si se devuelve efectivo de un pago confirmado, el dinero sale del
+      // cajón del turno abierto: se registra como gasto para que el arqueo
+      // siga cuadrando.
+      if (
+        !isPending &&
+        payment.method === PaymentMethod.CASH &&
+        payment.organizationId
+      ) {
+        const openSession = await tx.cashSession.findFirst({
+          where: {
+            organizationId: payment.organizationId,
+            branchId: payment.branchId,
+            status: 'OPEN',
+          },
+          select: { id: true },
+        });
+
+        if (openSession) {
+          const sameOpenSession = payment.sessionId === openSession.id
+
+          // Si el pago pertenece al turno abierto, el reembolso ya reduce el
+          // esperado al pasar a REFUNDED; solo se registra un gasto cuando el
+          // dinero sale de un turno distinto (o de un pago legado sin turno).
+          if (!sameOpenSession) {
+            await tx.cashMovement.create({
+              data: {
+                organizationId: payment.organizationId,
+                branchId: payment.branchId,
+                sessionId: openSession.id,
+                type: 'EXPENSE',
+                amount: payment.amount.plus(payment.tipAmount),
+                reason: `Reembolso: ${reason}`,
+                userId: actor.id,
+              },
+            });
+          }
+        }
+      }
+
       await tx.auditLog.create({
         data: {
           organizationId,
@@ -357,7 +537,9 @@ export class PaymentsService {
           newValues: {
             status,
             amount: payment.amount.toFixed(2),
-            reason: dto.reason?.trim() || null,
+            tipAmount: payment.tipAmount.toFixed(2),
+            reason,
+            sessionId: payment.sessionId,
           },
         },
       });

@@ -105,15 +105,15 @@ export class MenusService {
   }
 
   /**
-   * Crea el «Menú global» de referencia si todavía no existe.
+   * Crea o sincroniza el «Menú global» de referencia.
    *
    * Junta todo el catálogo activo: los combos en el primer grupo y cada
    * artículo en un grupo con el nombre de su categoría. Queda siempre
    * disponible, sin horario ni fechas, y con todos los artículos asignados.
    *
-   * Es idempotente: si el menú ya existe no lo toca, aunque el usuario haya
-   * cambiado el nombre, la descripción o la disponibilidad. Si el negocio aún
-   * no tiene artículos no crea nada; se generará al abrir Menús más adelante.
+   * El nombre, la descripción y la disponibilidad son editables por el
+   * negocio; el contenido (artículos y grupos) se recalcula desde el catálogo
+   * y no se puede editar a mano. Si aún no hay artículos no crea nada.
    */
   async ensureGlobalMenu(organizationId: string | null): Promise<void> {
     if (!organizationId) return;
@@ -124,10 +124,11 @@ export class MenusService {
         // Si el nombre ya está ocupado no se intenta crear en cada carga.
         OR: [{ isGlobal: true }, { name: GLOBAL_MENU_NAME }],
       },
-      select: { id: true },
+      select: { id: true, isGlobal: true, groups: true },
     });
 
-    if (existing) return;
+    // Un menú del usuario con el mismo nombre no se toca.
+    if (existing && !existing.isGlobal) return;
 
     const items = await this.prisma.item.findMany({
       where: { organizationId, isActive: true, isArchived: false },
@@ -194,6 +195,30 @@ export class MenusService {
         left.name.localeCompare(right.name, 'es')
       );
     });
+
+    if (existing) {
+      // El contenido del menú global siempre refleja el catálogo actual.
+      await this.prisma.$transaction(async (tx) => {
+        if (!sameJson(existing.groups, groups)) {
+          await tx.menu.update({
+            where: { id: existing.id },
+            data: { groups },
+          });
+        }
+
+        await this.syncItems(
+          tx,
+          existing.id,
+          ordered.map((item, index) => ({
+            itemId: item.id,
+            sortOrder: index,
+            group: groupFor(item),
+          })),
+        );
+      });
+
+      return;
+    }
 
     try {
       await this.prisma.menu.create({
@@ -290,6 +315,13 @@ export class MenusService {
     dto: UpdateMenuDto,
   ) {
     const menu = await this.getMenu(organizationId, id);
+
+    if (menu.isGlobal && (dto.items !== undefined || dto.groups !== undefined)) {
+      throw new BadRequestException(
+        'El menú global incluye todos los artículos automáticamente: no permite editar artículos ni grupos',
+      );
+    }
+
     const name = dto.name === undefined ? undefined : dto.name.trim();
 
     const data: Prisma.MenuUncheckedUpdateInput = {};
@@ -442,6 +474,12 @@ export class MenusService {
   async remove(organizationId: string | null, id: string) {
     const menu = await this.getMenu(organizationId, id);
 
+    if (menu.isGlobal) {
+      throw new BadRequestException(
+        'El menú global no se puede eliminar: representa todo el catálogo',
+      );
+    }
+
     await this.prisma.menu.delete({ where: { id: menu.id } });
 
     return { id: menu.id, deleted: true };
@@ -454,6 +492,13 @@ export class MenusService {
     groups?: string[],
   ) {
     const menu = await this.getMenu(organizationId, menuId);
+
+    if (menu.isGlobal) {
+      throw new BadRequestException(
+        'El menú global no permite editar artículos: se actualiza solo con el catálogo',
+      );
+    }
+
     const normalized = await this.validateItems(
       organizationId,
       menu.id,
@@ -483,6 +528,7 @@ export class MenusService {
         name: true,
         description: true,
         isActive: true,
+        isGlobal: true,
         sortOrder: true,
         daysOfWeek: true,
         startTime: true,

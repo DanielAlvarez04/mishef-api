@@ -36,6 +36,41 @@ export function validateEnv(
     );
   }
 
+  // Mercado Pago es opcional: si se configura cualquier variable del bloque,
+  // deben estar todas para que la integración funcione de punta a punta.
+  const mercadoPagoKeys = [
+    'MP_CLIENT_ID',
+    'MP_CLIENT_SECRET',
+    'MP_REDIRECT_URI',
+    'MP_WEBHOOK_SECRET',
+    'MP_TOKEN_ENCRYPTION_KEY',
+  ] as const;
+
+  const hasMercadoPago = mercadoPagoKeys.some((key) => Boolean(config[key]));
+
+  if (hasMercadoPago) {
+    for (const key of mercadoPagoKeys) {
+      const value = config[key];
+
+      if (typeof value !== 'string' || value.trim().length === 0) {
+        throw new Error(
+          `Falta la variable de entorno ${key} para la integración con Mercado Pago`,
+        );
+      }
+    }
+
+    const encryptionKey = Buffer.from(
+      String(config.MP_TOKEN_ENCRYPTION_KEY),
+      'base64',
+    );
+
+    if (encryptionKey.length !== 32) {
+      throw new Error(
+        'MP_TOKEN_ENCRYPTION_KEY debe ser una clave base64 de 32 bytes (AES-256)',
+      );
+    }
+  }
+
   if (isProduction) {
     for (const key of ['JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET'] as const) {
       const value = String(config[key]);

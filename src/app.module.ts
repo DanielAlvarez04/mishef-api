@@ -16,6 +16,9 @@ import { CatalogModule } from './catalog/catalog.module';
 import { InventoryModule } from './inventory/inventory.module';
 import { OrdersModule } from './orders/orders.module';
 import { PaymentsModule } from './payments/payments.module';
+import { CashModule } from './cash/cash.module';
+import { PosModule } from './pos/pos.module';
+import { MercadoPagoModule } from './mercadopago/mercadopago.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { UploadsModule } from './uploads/uploads.module';
 import { OriginGuard } from './common/guards/origin.guard';
@@ -42,6 +45,9 @@ import { AnalyticsModule } from './analytics/analytics.module';
     InventoryModule,
     OrdersModule,
     PaymentsModule,
+    CashModule,
+    PosModule,
+    MercadoPagoModule,
     DashboardModule,
     UploadsModule,
     AnalyticsModule,

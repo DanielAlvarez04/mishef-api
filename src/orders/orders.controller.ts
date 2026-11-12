@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -21,6 +22,7 @@ import { OrdersService } from './orders.service';
 import {
   CancelOrderDto,
   CreateOrderDto,
+  OrderGuestDto,
   SendRoundDto,
   TransitionRoundDto,
 } from './dto/orders.dto';
@@ -97,6 +99,40 @@ export class OrdersController {
       roundId,
       dto,
     );
+  }
+
+  @ApiOperation({ summary: 'Añadir una persona a la cuenta' })
+  @RequirePermissions('orders:draft')
+  @Post(':id/guests')
+  addGuest(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Body() dto: OrderGuestDto,
+  ) {
+    return this.orders.addGuest(user.organizationId, id, dto);
+  }
+
+  @ApiOperation({ summary: 'Editar una persona de la cuenta' })
+  @RequirePermissions('orders:draft')
+  @Patch(':id/guests/:guestId')
+  renameGuest(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Param('guestId') guestId: string,
+    @Body() dto: OrderGuestDto,
+  ) {
+    return this.orders.renameGuest(user.organizationId, id, guestId, dto);
+  }
+
+  @ApiOperation({ summary: 'Quitar una persona de la cuenta' })
+  @RequirePermissions('orders:draft')
+  @Delete(':id/guests/:guestId')
+  removeGuest(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Param('guestId') guestId: string,
+  ) {
+    return this.orders.removeGuest(user.organizationId, id, guestId);
   }
 
   @ApiOperation({ summary: 'Cancelar una cuenta abierta' })

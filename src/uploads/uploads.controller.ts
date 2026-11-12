@@ -1,4 +1,4 @@
-import { Body, Controller, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -8,6 +8,7 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { CatalogEntriesService } from '../catalog/catalog-entries.service';
 import { FinalizeImageDto } from './dto/finalize-image.dto';
 import { PresignImageDto } from './dto/presign-image.dto';
+import { ImageJobsService } from './image-jobs.service';
 import { UploadsService } from './uploads.service';
 
 @ApiTags('uploads')
@@ -17,6 +18,7 @@ export class UploadsController {
   constructor(
     private readonly uploads: UploadsService,
     private readonly catalogEntries: CatalogEntriesService,
+    private readonly jobs: ImageJobsService,
   ) {}
 
   @ApiOperation({
@@ -109,10 +111,34 @@ export class UploadsController {
 
     return this.uploads.finalizeVariantImage(
       user.organizationId,
+      itemId,
       entryId,
       variantId,
       dto,
     );
+  }
+
+  @ApiOperation({ summary: 'Estado de los trabajos de imagen' })
+  @RequirePermissions('catalog:manage')
+  @Get('jobs')
+  jobStatuses(
+    @CurrentUser() user: JwtUser,
+    @Query('ids') ids?: string,
+  ) {
+    return this.jobs.statuses(
+      user.organizationId,
+      (ids ?? '')
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean),
+    );
+  }
+
+  @ApiOperation({ summary: 'Estado de un trabajo de imagen' })
+  @RequirePermissions('catalog:manage')
+  @Get('jobs/:id')
+  jobStatus(@CurrentUser() user: JwtUser, @Param('id') id: string) {
+    return this.jobs.status(user.organizationId, id);
   }
 
   @ApiOperation({

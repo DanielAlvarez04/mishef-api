@@ -47,6 +47,7 @@ export class BranchesService {
       address: branch.address,
       phone: branch.phone,
       isActive: branch.isActive,
+      defaultTipPercent: branch.defaultTipPercent,
       userCount: branch._count.memberships,
       createdAt: branch.createdAt,
     }));
@@ -73,6 +74,7 @@ export class BranchesService {
           name,
           address: dto.address?.trim() || null,
           phone: dto.phone?.trim() || null,
+          defaultTipPercent: dto.defaultTipPercent ?? 0,
         },
       });
 
@@ -101,6 +103,7 @@ export class BranchesService {
       address?: string | null;
       phone?: string | null;
       isActive?: boolean;
+      defaultTipPercent?: number;
     } = {};
 
     if (dto.name !== undefined) {
@@ -134,6 +137,13 @@ export class BranchesService {
         await this.assertWithinLimit(orgId, branch.id);
       }
       data.isActive = dto.isActive;
+    }
+
+    if (
+      dto.defaultTipPercent !== undefined &&
+      dto.defaultTipPercent !== branch.defaultTipPercent
+    ) {
+      data.defaultTipPercent = dto.defaultTipPercent;
     }
 
     if (isEmptyPatch(data)) {
@@ -202,6 +212,7 @@ export class BranchesService {
     address: string | null;
     phone: string | null;
     isActive: boolean;
+    defaultTipPercent: number;
     createdAt: Date;
   }) {
     return {
@@ -210,6 +221,7 @@ export class BranchesService {
       address: branch.address,
       phone: branch.phone,
       isActive: branch.isActive,
+      defaultTipPercent: branch.defaultTipPercent,
       createdAt: branch.createdAt,
     };
   }

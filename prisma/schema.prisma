@@ -47,6 +47,8 @@ enum PaymentMethod {
   CASH
   CARD
   TRANSFER
+  /// Cobro enviado a una terminal Mercado Pago Point.
+  MERCADO_PAGO_POINT
 }
 
 enum PaymentStatus {
@@ -54,6 +56,38 @@ enum PaymentStatus {
   CONFIRMED
   CANCELLED
   REFUNDED
+}
+
+/// Canal de venta de la cuenta.
+enum OrderChannel {
+  DINE_IN
+  COUNTER
+  PHONE
+  DELIVERY
+}
+
+/// Tratamiento demográfico del comensal (dato para estadísticas).
+enum GuestTitle {
+  NINO
+  NINA
+  JOVEN
+  SENORITA
+  SENOR
+  SENORA
+  SENOR_MAYOR
+  SENORA_MAYOR
+}
+
+enum CashSessionStatus {
+  OPEN
+  CLOSED
+}
+
+enum CashMovementType {
+  WITHDRAWAL
+  DEPOSIT
+  EXPENSE
+  ADJUSTMENT
 }
 
 enum InventoryMovementType {
@@ -160,6 +194,16 @@ model Organization {
   ingredientLocations  IngredientLocation[]
   optionGroups         OptionGroup[]
   menus                Menu[]
+
+  mercadoPagoConnection MercadoPagoConnection?
+  mercadoPagoTerminals  MercadoPagoTerminal[]
+
+  cashSessions  CashSession[]
+  cashMovements CashMovement[]
+  posDevices    PosDevice[]
+  posPairings   PosPairing[]
+  posDisplays   PosDisplay[]
+  imageJobs     ImageJob[]
 }
 
 model User {
@@ -187,6 +231,13 @@ model User {
   emailVerificationToken EmailVerificationToken?
   passwordResetToken     PasswordResetToken?
   orderStatusHistories   OrderStatusHistory[]
+  tipPayments            Payment[]               @relation("PaymentTipRecipient")
+  cashSessionsOpened     CashSession[]           @relation("CashSessionOpenedBy")
+  cashSessionsClosed     CashSession[]           @relation("CashSessionClosedBy")
+  cashMovements          CashMovement[]
+  posDevicesPaired       PosDevice[]             @relation("PosDevicePairedBy")
+  posPairingsCreated     PosPairing[]            @relation("PosPairingCreatedBy")
+  posDisplaysCreated     PosDisplay[]            @relation("PosDisplayCreatedBy")
 
   @@index([isActive])
 }
@@ -198,6 +249,11 @@ model Membership {
   branchId       String? // null = acceso a todas las sucursales
   roles          Role[]   @default([WAITER])
   isActive       Boolean  @default(true)
+  /// PIN de 4-8 dígitos para entrar a la caja en un dispositivo vinculado.
+  pinHash        String?
+  pinUpdatedAt   DateTime?
+  pinAttempts    Int      @default(0)
+  pinLockedUntil DateTime?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -219,6 +275,8 @@ model Branch {
   address        String?
   phone          String?
   isActive       Boolean  @default(true)
+  /// Porcentaje de propina sugerido en el POS (0 = sin sugerencia).
+  defaultTipPercent Int   @default(0)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -228,6 +286,14 @@ model Branch {
   movements    InventoryMovement[]
   orders       Order[]
   payments     Payment[]
+
+  mercadoPagoTerminals MercadoPagoTerminal[]
+  cashSessions         CashSession[]
+  cashMovements        CashMovement[]
+  dailySequences       BranchDailySequence[]
+  posDevices           PosDevice[]
+  posPairings          PosPairing[]
+  posDisplays          PosDisplay[]
 
   @@unique([organizationId, name])
   @@index([organizationId, isActive])
@@ -970,7 +1036,18 @@ model Order {
   organizationId String?
   branchId       String?
   tableNumber    String?
+  /// Número de comensales de la mesa (1–20).
+  partySize      Int         @default(1)
   isTakeaway     Boolean     @default(false)
+  /// Canal de venta; `isTakeaway` se conserva por compatibilidad histórica.
+  channel         OrderChannel @default(DINE_IN)
+  customerName    String?
+  customerPhone   String?
+  deliveryAddress String?
+  deliveryFee     Decimal     @default(0) @db.Decimal(12, 2)
+  scheduledAt     DateTime?
+  /// Consecutivo diario por sucursal (control antifraude).
+  ticketNumber    Int?
   status         OrderStatus @default(OPEN)
   subtotal       Decimal     @default(0.0000) @db.Decimal(12, 2)
   taxTotal       Decimal     @default(0.0000) @db.Decimal(12, 2)
@@ -986,9 +1063,28 @@ model Order {
   userId       String?
   rounds       OrderRound[]
   payments     Payment[]
+  guests       OrderGuest[]
 
   @@index([organizationId, status, createdAt])
   @@index([branchId, status, createdAt])
+  @@index([branchId, createdAt])
+}
+
+/// Persona dentro de una cuenta (opcional). Permite pedir por comensal.
+model OrderGuest {
+  id        String      @id @default(cuid())
+  orderId   String
+  /// Vacío cuando la persona todavía no tiene nombre.
+  name      String      @default("")
+  /// Tratamiento demográfico; dato para estadísticas.
+  title     GuestTitle?
+  sortOrder Int         @default(0)
+  createdAt DateTime    @default(now())
+
+  order Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  items OrderItem[]
+
+  @@index([orderId])
 }
 
 model OrderRound {
@@ -1032,10 +1128,15 @@ model OrderItem {
   promotionId    String?
   promotionName  String?
   promotionType  PromotionType?
+  /// Persona de la cuenta a la que pertenece la línea (opcional).
+  guestId        String?
+  /// Nombre de la persona al momento del pedido (se conserva si se elimina).
+  guestName      String?
 
   orderRound        OrderRound                  @relation(fields: [orderRoundId], references: [id], onDelete: Cascade)
   item              Item                        @relation("OrderItemRef", fields: [itemId], references: [id], onDelete: Restrict)
   variant           ItemVariant?                @relation(fields: [itemVariantId], references: [id])
+  guest             OrderGuest?                  @relation(fields: [guestId], references: [id], onDelete: SetNull)
   extras            OrderItemExtra[]
   exclusions        OrderItemExclusion[]
   options           OrderItemOption[]
@@ -1043,6 +1144,7 @@ model OrderItem {
 
   @@index([orderRoundId])
   @@index([itemId])
+  @@index([guestId])
 }
 
 model OrderItemExtra {
@@ -1123,6 +1225,24 @@ model Payment {
   confirmedAt    DateTime?
   confirmedById  String?
   idempotencyKey String?       @unique
+
+  // Propinas y control de caja.
+  tipAmount      Decimal  @default(0) @db.Decimal(12, 2)
+  tipRecipientId String?
+  cashReceived   Decimal? @db.Decimal(12, 2)
+  changeGiven    Decimal? @db.Decimal(12, 2)
+  sessionId      String?
+
+  // Integración con proveedores de pago (Mercado Pago Point).
+  provider             String?
+  providerOrderId      String?   @unique
+  providerPaymentId    String?
+  providerStatus       String?
+  providerStatusDetail String?
+  terminalId           String?
+  expiresAt            DateTime?
+  providerData         Json?
+
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
 
@@ -1132,10 +1252,214 @@ model Payment {
   // `SetNull`: el pago sobrevive al borrado de la cuenta que lo registró.
   user         User?         @relation("PaymentUser", fields: [userId], references: [id], onDelete: SetNull)
   confirmedBy  User?         @relation("PaymentConfirmedBy", fields: [confirmedById], references: [id], onDelete: SetNull)
+  tipRecipient User?         @relation("PaymentTipRecipient", fields: [tipRecipientId], references: [id], onDelete: SetNull)
+  session      CashSession?  @relation(fields: [sessionId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, status, createdAt])
   @@index([branchId, createdAt])
   @@index([orderId])
+  @@index([provider, providerStatus])
+  @@index([sessionId])
+  @@index([tipRecipientId])
+}
+
+// ============================================================================
+// Caja (turnos, movimientos y consecutivo de tickets)
+// ============================================================================
+
+/// Turno de caja de una sucursal. Solo puede haber uno `OPEN` por sucursal
+/// (y uno por organización cuando no hay sucursal); la regla se refuerza con
+/// un índice parcial en la migración.
+model CashSession {
+  id             String            @id @default(cuid())
+  organizationId String
+  branchId       String?
+  status         CashSessionStatus @default(OPEN)
+  openedById     String?
+  openedAt       DateTime          @default(now())
+  openingFloat   Decimal           @default(0) @db.Decimal(12, 2)
+  closedById     String?
+  closedAt       DateTime?
+  countedCash    Decimal?          @db.Decimal(12, 2)
+  expectedCash   Decimal?          @db.Decimal(12, 2)
+  difference     Decimal?          @db.Decimal(12, 2)
+  notes          String?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?       @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  openedBy     User?         @relation("CashSessionOpenedBy", fields: [openedById], references: [id], onDelete: SetNull)
+  closedBy     User?         @relation("CashSessionClosedBy", fields: [closedById], references: [id], onDelete: SetNull)
+  payments     Payment[]
+  movements    CashMovement[]
+
+  @@index([organizationId, branchId, status])
+  @@index([openedAt])
+}
+
+/// Movimiento manual de efectivo del turno (retiro, ingreso o gasto).
+model CashMovement {
+  id             String           @id @default(cuid())
+  organizationId String
+  branchId       String?
+  sessionId      String
+  type           CashMovementType
+  amount         Decimal          @db.Decimal(12, 2)
+  reason         String
+  userId         String?
+  createdAt      DateTime         @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  session      CashSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([sessionId])
+  @@index([organizationId, createdAt])
+}
+
+/// Consecutivo diario por sucursal para numerar los tickets de venta.
+model BranchDailySequence {
+  id        String   @id @default(cuid())
+  branchId  String
+  date      DateTime @db.Date
+  lastNumber Int     @default(0)
+
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@unique([branchId, date])
+}
+
+// ============================================================================
+// Caja vinculada por QR y PIN
+// ============================================================================
+
+/// Tablet/caja vinculada a una sucursal mediante un QR de un solo uso.
+model PosDevice {
+  id             String    @id @default(cuid())
+  organizationId String
+  branchId       String?
+  name           String
+  /// SHA-256 del token del dispositivo; el token real solo vive en la cookie.
+  tokenHash      String    @unique
+  isActive       Boolean   @default(true)
+  lastSeenAt     DateTime?
+  pairedById     String?
+  createdAt      DateTime  @default(now())
+  revokedAt      DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  pairedBy     User?        @relation("PosDevicePairedBy", fields: [pairedById], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, branchId])
+}
+
+/// Código temporal que se muestra como QR para vincular una caja.
+model PosPairing {
+  id             String    @id @default(cuid())
+  organizationId String
+  branchId       String?
+  codeHash       String    @unique
+  createdById    String?
+  expiresAt      DateTime
+  usedAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  createdBy    User?        @relation("PosPairingCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([expiresAt])
+}
+
+/// Pantalla de cliente (monitor/tablet frente al cliente).
+model PosDisplay {
+  id             String    @id @default(cuid())
+  organizationId String
+  branchId       String?
+  name           String
+  tokenHash      String    @unique
+  isActive       Boolean   @default(true)
+  /// Último estado publicado por el POS (líneas, total, propina, confirmación).
+  state          Json?
+  stateUpdatedAt DateTime?
+  lastSeenAt     DateTime?
+  createdById    String?
+  createdAt      DateTime  @default(now())
+  revokedAt      DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  createdBy    User?        @relation("PosDisplayCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, branchId])
+}
+
+// ============================================================================
+// Mercado Pago Point
+// ============================================================================
+
+/// Cuenta de Mercado Pago vinculada por una organización (OAuth marketplace).
+///
+/// Los tokens se guardan cifrados con AES-256-GCM (`TokenCipher`); nunca se
+/// exponen al frontend ni se registran en logs.
+model MercadoPagoConnection {
+  id              String   @id @default(cuid())
+  organizationId  String   @unique
+  mpUserId        String
+  accessTokenEnc  String
+  refreshTokenEnc String
+  expiresAt       DateTime
+  scopes          String[] @default([])
+  /// ACTIVE | ERROR | REVOKED
+  status          String   @default("ACTIVE")
+  connectedById   String?
+  connectedAt     DateTime @default(now())
+  lastRefreshedAt DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+}
+
+/// Terminal Point sincronizada desde Mercado Pago.
+model MercadoPagoTerminal {
+  id             String    @id @default(cuid())
+  organizationId String
+  branchId       String?
+  terminalId     String
+  name           String?
+  /// PDV | STANDALONE | SELF_SERVICE
+  operatingMode  String?
+  isDefault      Boolean   @default(false)
+  isActive       Boolean   @default(true)
+  lastSyncedAt   DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, terminalId])
+  @@index([organizationId, branchId])
+}
+
+/// Notificación recibida de Mercado Pago. Se guarda antes de procesarla para
+/// deduplicar reintentos (`requestId`) y poder auditar eventos fallidos.
+model MercadoPagoWebhookEvent {
+  id              String    @id @default(cuid())
+  requestId       String?   @unique
+  topic           String
+  providerOrderId String?
+  payload         Json
+  processedAt     DateTime?
+  error           String?
+  receivedAt      DateTime  @default(now())
+
+  @@index([providerOrderId])
+  @@index([receivedAt])
 }
 
 model AuditLog {
@@ -1194,4 +1518,51 @@ model AnalyticsEvent {
   @@index([menuId, occurredAt])
   @@index([orderId])
   @@index([occurredAt])
+}
+
+// ============================================================================
+// Procesamiento de imagenes en segundo plano
+// ============================================================================
+
+enum ImageJobStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+}
+
+enum ImageJobTarget {
+  CATALOG_ENTRY
+  VARIANT
+}
+
+/// Trabajo de optimizacion de una imagen subida a R2.
+///
+/// El navegador sube el original a \`tmp/\` y crea un job. Un worker en la API
+/// genera las variantes AVIF/JPEG, las guarda y actualiza la entidad destino.
+model ImageJob {
+  id             String          @id @default(cuid())
+  organizationId String
+  target         ImageJobTarget
+  /// CatalogEntry.id o ItemVariant.id segun \`target\`.
+  targetId       String
+  /// Item.id, solo para variantes (lo exige \`applyVariantImage\`).
+  itemId         String?
+  /// Nombre legible para el snapshot de la imagen.
+  imageName      String?
+  /// Carpeta final en R2 donde se guardan las variantes.
+  folder         String
+  /// Objeto temporal subido por el navegador.
+  tempKey        String
+  status         ImageJobStatus  @default(PENDING)
+  result         Json?
+  error          String?
+  createdAt      DateTime        @default(now())
+  startedAt      DateTime?
+  finishedAt     DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status])
+  @@index([status, createdAt])
 }

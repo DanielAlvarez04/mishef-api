@@ -3,21 +3,16 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { ImageJobStatus, ImageJobTarget } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { FinalizeImageDto } from './dto/finalize-image.dto';
 import { PresignImageDto } from './dto/presign-image.dto';
-import {
-  imageFallbackUrl,
-  type ImageAssetVariant,
-} from './image-assets';
-import { storeOptimizedImage } from './image-storage';
+import { ImageJobsService } from './image-jobs.service';
 import {
   IMAGE_CONTENT_TYPES,
   UPLOAD_URL_EXPIRES_IN,
   assetFolder,
   buildTempObjectKey,
-  deleteR2Object,
-  getR2Object,
   isTempObjectKey,
   maxUploadBytes,
   presignPutUrl,
@@ -37,28 +32,25 @@ export interface PresignImageResult {
   maxBytes: number;
 }
 
-export interface FinalizeImageResult {
-  /** Clave base optimizada; es lo que se guarda en la base de datos. */
-  key: string;
-  /** URL pública del JPEG de mayor tamaño. */
-  url: string;
-  /** Medidas de origen. */
-  width: number;
-  height: number;
-  /** AVIF + JPEG por ancho, con sus URLs públicas. */
-  variants: ImageAssetVariant[];
+export interface ImageJobStarted {
+  /** Identificador del trabajo que optimizará la imagen en segundo plano. */
+  jobId: string;
+  status: string;
 }
 
 @Injectable()
 export class UploadsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly jobs: ImageJobsService,
+  ) {}
 
   /**
    * Firma una subida temporal del navegador a R2.
    *
    * El archivo original se sube a `{org}/tmp/` y nunca se guarda como imagen de
-   * la entidad: al terminar, el navegador llama a `finalize*`, la API lo
-   * descarga, genera AVIF/JPEG y borra el temporal.
+   * la entidad: al terminar, el navegador llama a `finalize*`, que encola la
+   * optimización en segundo plano (AVIF/JPEG + actualización de la entidad).
    *
    * Se mantiene la subida directa a R2 (el archivo no pasa por la API) y se
    * valida el tamaño aquí, en el cliente y al finalizar con el tamaño real.
@@ -114,37 +106,43 @@ export class UploadsService {
   }
 
   /**
-   * Procesa el temporal de un artículo o receta y deja solo las variantes
-   * optimizadas en la carpeta de la entrada de catálogo.
+   * Encola la optimización del temporal de un artículo o receta.
+   *
+   * El trabajo pesado (sharp + R2) corre en `ImageJobsService`; aquí solo se
+   * valida la entidad y se devuelve el job para que el cliente lo consulte.
    */
   async finalizeImage(
     organizationId: string | null,
     module: UploadModule,
     entityId: string,
     dto: FinalizeImageDto,
-  ): Promise<FinalizeImageResult> {
+  ): Promise<ImageJobStarted> {
     this.assertOrganization(organizationId);
 
-    const exists = await this.countEntity(module, entityId, organizationId!);
+    const exists = await this.countEntity(module, entityId, organizationId);
 
     if (!exists) {
       throw new NotFoundException('La entidad no existe en este negocio');
     }
 
-    return this.finalize(
-      organizationId!,
-      dto.key,
-      assetFolder(organizationId!, module, entityId),
-    );
+    return this.enqueueJob({
+      organizationId,
+      target: ImageJobTarget.CATALOG_ENTRY,
+      targetId: entityId,
+      folder: assetFolder(organizationId, module, entityId),
+      tempKey: dto.key,
+      imageName: await this.resolveEntryName(organizationId, entityId),
+    });
   }
 
-  /** Procesa el temporal de una presentación. */
+  /** Encola la optimización del temporal de una presentación. */
   async finalizeVariantImage(
     organizationId: string | null,
+    itemId: string,
     catalogEntryId: string,
     variantId: string,
     dto: FinalizeImageDto,
-  ): Promise<FinalizeImageResult> {
+  ): Promise<ImageJobStarted> {
     this.assertOrganization(organizationId);
 
     const exists = await this.prisma.catalogEntry.count({
@@ -155,60 +153,77 @@ export class UploadsService {
       throw new NotFoundException('El artículo no existe en este negocio');
     }
 
-    return this.finalize(
-      organizationId!,
-      dto.key,
-      variantFolder(organizationId!, catalogEntryId, variantId),
-    );
+    return this.enqueueJob({
+      organizationId,
+      target: ImageJobTarget.VARIANT,
+      targetId: variantId,
+      itemId,
+      folder: variantFolder(organizationId, catalogEntryId, variantId),
+      tempKey: dto.key,
+    });
   }
 
-  /**
-   * Descarga el temporal, genera las variantes y lo borra.
-   *
-   * El borrado va en `finally`: pase lo que pase, el original no se queda en
-   * R2. Si el procesado falla, el error de `processImage` explica el motivo.
-   */
-  private async finalize(
+  /** Crea el job y lo entrega a la cola serial. */
+  private async enqueueJob(input: {
+    organizationId: string;
+    target: ImageJobTarget;
+    targetId: string;
+    itemId?: string | null;
+    imageName?: string | null;
+    folder: string;
+    tempKey: string;
+  }): Promise<ImageJobStarted> {
+    if (!isTempObjectKey(input.organizationId, input.tempKey)) {
+      throw new BadRequestException('La subida no pertenece a este negocio');
+    }
+
+    // Reintentos de la misma subida reutilizan el job en curso.
+    const existing = await this.prisma.imageJob.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        tempKey: input.tempKey,
+        status: { not: ImageJobStatus.FAILED },
+      },
+      select: { id: true, status: true },
+    });
+
+    if (existing) {
+      this.jobs.enqueue(existing.id);
+      return { jobId: existing.id, status: existing.status };
+    }
+
+    const job = await this.prisma.imageJob.create({
+      data: {
+        organizationId: input.organizationId,
+        target: input.target,
+        targetId: input.targetId,
+        itemId: input.itemId ?? null,
+        imageName: input.imageName ?? null,
+        folder: input.folder,
+        tempKey: input.tempKey,
+      },
+      select: { id: true, status: true },
+    });
+
+    this.jobs.enqueue(job.id);
+
+    return { jobId: job.id, status: job.status };
+  }
+
+  /** Nombre legible para el snapshot de la imagen de una entrada compartida. */
+  private async resolveEntryName(
     organizationId: string,
-    tempKey: string,
-    folder: string,
-  ): Promise<FinalizeImageResult> {
-    if (!isTempObjectKey(organizationId, tempKey)) {
-      throw new BadRequestException(
-        'La subida no pertenece a este negocio',
-      );
-    }
+    entryId: string,
+  ): Promise<string> {
+    const entry = await this.prisma.catalogEntry.findFirst({
+      where: { id: entryId, organizationId },
+      select: {
+        items: { select: { name: true }, take: 1 },
+        recipes: { select: { name: true }, take: 1 },
+      },
+    });
 
-    const buffer = await getR2Object(tempKey);
-
-    if (!buffer) {
-      throw new BadRequestException(
-        'La imagen temporal ya no está disponible. Vuelve a subirla.',
-      );
-    }
-
-    const maxBytes = maxUploadBytes();
-
-    if (buffer.length > maxBytes) {
-      await deleteR2Object(tempKey);
-      throw new BadRequestException(
-        `La imagen supera el máximo de ${Math.round(maxBytes / 1024 / 1024)} MB`,
-      );
-    }
-
-    try {
-      const stored = await storeOptimizedImage(folder, buffer);
-
-      return {
-        key: stored.key,
-        url: imageFallbackUrl(stored.assets),
-        width: stored.assets.width,
-        height: stored.assets.height,
-        variants: stored.assets.variants,
-      };
-    } finally {
-      await deleteR2Object(tempKey);
-    }
+    return entry?.items[0]?.name ?? entry?.recipes[0]?.name ?? 'Imagen';
   }
 
   /** Valida organización, formato y tamaño antes de firmar cualquier imagen. */

@@ -1,4 +1,4 @@
-﻿import {
+import {
   BadRequestException,
   ConflictException,
   Injectable,
@@ -8,6 +8,7 @@ import {
   InventoryMovementType,
   OptionEffectAction,
   OptionSelection,
+  OrderChannel,
   OrderRoundStatus,
   OrderStatus,
   PaymentStatus,
@@ -22,6 +23,7 @@ import { isNoPriceOptionGroup } from '../catalog/option-presets';
 import {
   CancelOrderDto,
   CreateOrderDto,
+  OrderGuestDto,
   RoundItemDto,
   RoundItemOptionDto,
   SendRoundDto,
@@ -83,6 +85,7 @@ const roundInclude: Prisma.OrderRoundInclude = {
 
 const orderInclude: Prisma.OrderInclude = {
   rounds: { orderBy: { createdAt: 'asc' }, include: roundInclude },
+  guests: { orderBy: { sortOrder: 'asc' } },
   user: { select: { id: true, name: true, username: true } },
   payments: {
     orderBy: { createdAt: 'asc' },
@@ -90,12 +93,15 @@ const orderInclude: Prisma.OrderInclude = {
       id: true,
       method: true,
       amount: true,
+      tipAmount: true,
+      tipRecipientId: true,
       status: true,
       paidAt: true,
       confirmedAt: true,
       createdAt: true,
       user: { select: { id: true, name: true, username: true } },
       confirmedBy: { select: { id: true, name: true, username: true } },
+      tipRecipient: { select: { id: true, name: true, username: true } },
     },
   },
 };
@@ -107,6 +113,10 @@ const kitchenInclude: Prisma.OrderRoundInclude = {
       id: true,
       tableNumber: true,
       isTakeaway: true,
+      channel: true,
+      customerName: true,
+      customerPhone: true,
+      deliveryAddress: true,
       status: true,
       total: true,
       createdAt: true,
@@ -162,16 +172,99 @@ export class OrdersService {
       }
     }
 
-    const created = await this.prisma.order.create({
-      data: {
-        organizationId: organizationId ?? undefined,
-        branchId: branchId ?? undefined,
-        userId,
-        tableNumber: dto.tableNumber?.trim() || null,
-        isTakeaway: dto.isTakeaway ?? false,
-        idempotencyKey,
-      },
-      include: orderInclude,
+    const created = await this.prisma.$transaction(async (tx) => {
+      const channel =
+        dto.channel ??
+        (dto.isTakeaway ? OrderChannel.COUNTER : OrderChannel.DINE_IN);
+
+      if (channel === OrderChannel.DELIVERY && !dto.deliveryAddress?.trim()) {
+        throw new BadRequestException(
+          'La dirección es obligatoria para un pedido a domicilio',
+        );
+      }
+
+      if (
+        (channel === OrderChannel.DELIVERY ||
+          channel === OrderChannel.PHONE) &&
+        !dto.customerPhone?.trim()
+      ) {
+        throw new BadRequestException(
+          'El teléfono del cliente es obligatorio para teléfono o domicilio',
+        );
+      }
+
+      const ticketNumber = await this.nextTicketNumber(tx, branchId);
+      const deliveryFee = new Prisma.Decimal(dto.deliveryFee ?? 0).toDecimalPlaces(
+        2,
+      );
+      const guestInputs = (dto.guests ?? []).map((raw) => ({
+        name: raw.name?.trim() ?? '',
+        title: raw.title ?? null,
+      }));
+      const guestNames: string[] = [];
+
+      for (const guest of guestInputs) {
+        if (!guest.name) continue;
+
+        if (
+          guestNames.some(
+            (entry) => entry.toLowerCase() === guest.name.toLowerCase(),
+          )
+        ) {
+          throw new BadRequestException(
+            `El cliente "${guest.name}" está repetido en la cuenta`,
+          );
+        }
+
+        guestNames.push(guest.name);
+      }
+
+      const partySize = Math.min(
+        20,
+        Math.max(1, dto.partySize ?? guestInputs.length, guestInputs.length),
+      );
+
+      const order = await tx.order.create({
+        data: {
+          organizationId: organizationId ?? undefined,
+          branchId: branchId ?? undefined,
+          userId,
+          channel,
+          partySize,
+          tableNumber:
+            channel === OrderChannel.DINE_IN
+              ? dto.tableNumber?.trim() || null
+              : null,
+          isTakeaway:
+            dto.isTakeaway ??
+            (channel === OrderChannel.COUNTER ||
+              channel === OrderChannel.PHONE ||
+              channel === OrderChannel.DELIVERY),
+          customerName: dto.customerName?.trim() || null,
+          customerPhone: dto.customerPhone?.trim() || null,
+          deliveryAddress: dto.deliveryAddress?.trim() || null,
+          deliveryFee,
+          scheduledAt: dto.scheduledAt ? new Date(dto.scheduledAt) : null,
+          ticketNumber,
+          total: deliveryFee,
+          subtotal: deliveryFee,
+          idempotencyKey,
+          ...(guestInputs.length > 0
+            ? {
+                guests: {
+                  create: guestInputs.map((guest, index) => ({
+                    name: guest.name,
+                    title: guest.title,
+                    sortOrder: index,
+                  })),
+                },
+              }
+            : {}),
+        },
+        include: orderInclude,
+      });
+
+      return order;
     });
 
     this.events.publish({ type: 'ORDER_CREATED', orderId: created.id });
@@ -197,18 +290,22 @@ export class OrdersService {
         include: {
           branch: { select: { id: true, name: true } },
           user: { select: { id: true, name: true, username: true } },
+          guests: { orderBy: { sortOrder: 'asc' } },
           payments: {
             orderBy: { createdAt: 'asc' },
             select: {
               id: true,
               method: true,
               amount: true,
+              tipAmount: true,
+              tipRecipientId: true,
               status: true,
               paidAt: true,
               confirmedAt: true,
               createdAt: true,
               user: { select: { id: true, name: true, username: true } },
               confirmedBy: { select: { id: true, name: true, username: true } },
+              tipRecipient: { select: { id: true, name: true, username: true } },
             },
           },
           rounds: {
@@ -288,6 +385,27 @@ export class OrdersService {
       organization.taxRate,
     );
 
+    const guestRows = dto.items.some((line) => line.guestId)
+      ? await this.prisma.orderGuest.findMany({
+          where: { orderId },
+          select: { id: true, name: true },
+        })
+      : [];
+    const guestById = new Map(guestRows.map((guest) => [guest.id, guest.name]));
+
+    for (const line of dto.items) {
+      if (line.guestId && !guestById.has(line.guestId)) {
+        throw new BadRequestException(
+          'El cliente indicado no pertenece a esta cuenta',
+        );
+      }
+    }
+
+    const itemsWithGuest = items.map((row) => ({
+      ...row,
+      guestName: row.guestId ? guestById.get(row.guestId) ?? null : null,
+    }));
+
     const round = await this.prisma.$transaction(async (tx) => {
       const created = await tx.orderRound.create({
         data: {
@@ -295,7 +413,7 @@ export class OrdersService {
           status: OrderRoundStatus.PENDING,
           sentAt: new Date(),
           idempotencyKey,
-          items: { create: items },
+          items: { create: itemsWithGuest },
         },
         include: roundInclude,
       });
@@ -322,11 +440,16 @@ export class OrdersService {
       status: round.status,
     });
 
-    const orderLabel = order.tableNumber
-      ? `Mesa ${order.tableNumber}`
-      : order.isTakeaway
-        ? 'Para llevar'
-        : 'Pedido';
+    const orderLabel =
+      order.channel === OrderChannel.DELIVERY
+        ? 'Domicilio'
+        : order.channel === OrderChannel.PHONE
+          ? 'Teléfono'
+          : order.channel === OrderChannel.COUNTER
+            ? 'Mostrador'
+            : order.tableNumber
+              ? `Mesa ${order.tableNumber}`
+              : 'Pedido';
 
     await this.analytics.recordMany([
       {
@@ -530,6 +653,12 @@ export class OrdersService {
         select: { id: true, status: true },
       });
 
+      if (rounds.length > 0 && !dto.reason?.trim()) {
+        throw new BadRequestException(
+          'Explica el motivo de la cancelación: la cuenta ya tiene comandas enviadas',
+        );
+      }
+
       for (const round of rounds) {
         await tx.orderRound.update({
           where: { id: round.id },
@@ -551,11 +680,186 @@ export class OrdersService {
         where: { id: orderId },
         data: { status: OrderStatus.CANCELLED },
       });
+
+      // Los pagos pendientes de una cuenta cancelada no pueden confirmarse
+      // después: se anulan en la misma transacción para que la caja no quede
+      // con cobros "fantasma".
+      await tx.payment.updateMany({
+        where: { orderId, status: PaymentStatus.PENDING },
+        data: { status: PaymentStatus.CANCELLED },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          organizationId,
+          userId,
+          action: 'order.cancelled',
+          entity: 'Order',
+          entityId: orderId,
+          newValues: {
+            reason: dto.reason?.trim() || null,
+            rounds: rounds.length,
+            total: order.total.toFixed(2),
+          },
+        },
+      });
     });
 
     this.events.publish({ type: 'ORDER_CANCELLED', orderId });
 
     return this.get(organizationId, orderId);
+  }
+
+  /** Añade una persona a la cuenta para pedir por comensal. */
+  async addGuest(
+    organizationId: string | null,
+    orderId: string,
+    dto: OrderGuestDto,
+  ) {
+    const order = await this.getOrderRow(organizationId, orderId);
+
+    if (order.status !== OrderStatus.OPEN) {
+      throw new BadRequestException('La cuenta ya no está abierta');
+    }
+
+    const name = dto.name?.trim() ?? '';
+    const guests = await this.prisma.orderGuest.findMany({
+      where: { orderId },
+      select: { name: true, sortOrder: true },
+    });
+
+    if (
+      name &&
+      guests.some((guest) => guest.name.toLowerCase() === name.toLowerCase())
+    ) {
+      throw new BadRequestException(`Ya existe un cliente llamado "${name}"`);
+    }
+
+    const sortOrder =
+      guests.reduce((max, guest) => Math.max(max, guest.sortOrder), -1) + 1;
+
+    return this.prisma.$transaction(async (tx) => {
+      const guest = await tx.orderGuest.create({
+        data: {
+          orderId,
+          name,
+          title: dto.title ?? null,
+          sortOrder,
+        },
+      });
+
+      await tx.order.update({
+        where: { id: orderId },
+        data: {
+          partySize: Math.min(
+            20,
+            Math.max(order.partySize, guests.length) + 1,
+          ),
+        },
+      });
+
+      return guest;
+    });
+  }
+
+  /** Edita el nombre y/o el tratamiento de una persona. */
+  async renameGuest(
+    organizationId: string | null,
+    orderId: string,
+    guestId: string,
+    dto: OrderGuestDto,
+  ) {
+    const order = await this.getOrderRow(organizationId, orderId);
+
+    if (order.status !== OrderStatus.OPEN) {
+      throw new BadRequestException('La cuenta ya no está abierta');
+    }
+
+    const guest = await this.prisma.orderGuest.findFirst({
+      where: { id: guestId, orderId },
+    });
+
+    if (!guest) {
+      throw new NotFoundException('Cliente no encontrado');
+    }
+
+    const name = dto.name === undefined ? guest.name : dto.name.trim();
+    const title = dto.title === undefined ? guest.title : dto.title;
+
+    if (name) {
+      const others = await this.prisma.orderGuest.findMany({
+        where: { orderId, NOT: { id: guestId } },
+        select: { name: true },
+      });
+
+      if (
+        others.some((entry) => entry.name.toLowerCase() === name.toLowerCase())
+      ) {
+        throw new BadRequestException(
+          `Ya existe un cliente llamado "${name}"`,
+        );
+      }
+    }
+
+    if (name === guest.name && title === guest.title) {
+      return guest;
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.orderGuest.update({
+        where: { id: guestId },
+        data: {
+          ...(name === guest.name ? {} : { name }),
+          ...(title === guest.title ? {} : { title }),
+        },
+      });
+
+      if (name !== guest.name) {
+        await tx.orderItem.updateMany({
+          where: { guestId },
+          data: { guestName: name },
+        });
+      }
+
+      return updated;
+    });
+  }
+
+  /** Quita una persona; sus líneas conservan el nombre como snapshot. */
+  async removeGuest(
+    organizationId: string | null,
+    orderId: string,
+    guestId: string,
+  ) {
+    const order = await this.getOrderRow(organizationId, orderId);
+
+    if (order.status !== OrderStatus.OPEN) {
+      throw new BadRequestException('La cuenta ya no está abierta');
+    }
+
+    if (order.partySize <= 1) {
+      throw new BadRequestException(
+        'La mesa debe tener al menos un cliente',
+      );
+    }
+
+    const guest = await this.prisma.orderGuest.findFirst({
+      where: { id: guestId, orderId },
+    });
+
+    if (!guest) {
+      throw new NotFoundException('Cliente no encontrado');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.orderGuest.delete({ where: { id: guestId } });
+      await tx.order.update({
+        where: { id: orderId },
+        data: { partySize: Math.max(1, order.partySize - 1) },
+      });
+    });
+
+    return { ok: true };
   }
 
   // --------------------------------------------------------------------------
@@ -614,8 +918,11 @@ export class OrdersService {
         id: true,
         status: true,
         tableNumber: true,
+        partySize: true,
         isTakeaway: true,
+        channel: true,
         branchId: true,
+        total: true,
       },
     });
 
@@ -807,6 +1114,7 @@ export class OrdersService {
         promotionId: promotion?.id ?? null,
         promotionName: promotion?.name ?? null,
         promotionType: promotion?.type ?? null,
+        guestId: line.guestId?.trim() || null,
         extras: {
           create: extras.map((extra) => ({
             itemExtraId: extra.id,
@@ -1129,20 +1437,54 @@ export class OrdersService {
     };
   }
 
+  /**
+   * Consecutivo diario de tickets por sucursal.
+   *
+   * El `INSERT ... ON CONFLICT` es atómico en PostgreSQL, así que dos cajas
+   * abriendo cuentas a la vez no repiten número.
+   */
+  private async nextTicketNumber(
+    tx: Prisma.TransactionClient,
+    branchId: string | null,
+  ) {
+    if (!branchId) return null;
+
+    const date = new Date();
+    date.setHours(0, 0, 0, 0);
+
+    const rows = await tx.$queryRaw<Array<{ lastNumber: number }>>`
+      INSERT INTO "BranchDailySequence" ("id", "branchId", "date", "lastNumber")
+      VALUES (gen_random_uuid()::text, ${branchId}, ${date}::date, 1)
+      ON CONFLICT ("branchId", "date")
+      DO UPDATE SET "lastNumber" = "BranchDailySequence"."lastNumber" + 1
+      RETURNING "lastNumber"
+    `;
+
+    return rows[0]?.lastNumber ?? null;
+  }
+
   /** Recalcula los totales de la cuenta ignorando las rondas canceladas. */
   private async recalculateTotals(
     tx: Prisma.TransactionClient,
     orderId: string,
   ) {
-    const items = await tx.orderItem.findMany({
-      where: {
-        orderRound: {
-          orderId,
-          status: { not: OrderRoundStatus.CANCELLED },
+    const [items, order] = await (async () => {
+      const rows = await tx.orderItem.findMany({
+        where: {
+          orderRound: {
+            orderId,
+            status: { not: OrderRoundStatus.CANCELLED },
+          },
         },
-      },
-      select: { subtotal: true, taxAmount: true },
-    });
+        select: { subtotal: true, taxAmount: true },
+      });
+      const row = await tx.order.findUnique({
+        where: { id: orderId },
+        select: { deliveryFee: true },
+      });
+
+      return [rows, row] as const;
+    })();
 
     const gross = items.reduce(
       (sum, item) => sum.plus(item.subtotal),
@@ -1152,13 +1494,15 @@ export class OrdersService {
       (sum, item) => sum.plus(item.taxAmount),
       new Prisma.Decimal(0),
     );
+    const fee = order?.deliveryFee ?? new Prisma.Decimal(0);
+    const total = gross.plus(fee).toDecimalPlaces(2);
 
     await tx.order.update({
       where: { id: orderId },
       data: {
-        subtotal: gross.minus(tax).toDecimalPlaces(2),
+        subtotal: total.minus(tax).toDecimalPlaces(2),
         taxTotal: tax.toDecimalPlaces(2),
-        total: gross.toDecimalPlaces(2),
+        total,
       },
     });
   }
@@ -1635,4 +1979,3 @@ export function consumptionForItem(item: {
 
   return lines;
 }
-
