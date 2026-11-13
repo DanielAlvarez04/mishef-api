@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Patch,
+  Post,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -39,5 +40,11 @@ export class OrganizationsController {
   @Patch('current')
   update(@CurrentUser() user: JwtUser, @Body() dto: UpdateOrganizationDto) {
     return this.organizations.update(user.organizationId, dto);
+  }
+
+  @ApiOperation({ summary: 'Cerrar el modo práctica de la organización' })
+  @Post('current/practice/end')
+  endPractice(@CurrentUser() user: JwtUser) {
+    return this.organizations.endPractice(user.organizationId);
   }
 }

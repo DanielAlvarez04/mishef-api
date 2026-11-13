@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { PRACTICE_WINDOW_MS } from '../common/practice';
 import { isEmptyPatch, sameDecimal, sameStringSet } from '../common/patch';
 import {
   isValidDomain,
@@ -37,6 +38,11 @@ export class OrganizationsService {
       taxRate: organization.taxRate?.toString() ?? '0.16',
       isActive: organization.isActive,
       useCoreSuggestions: organization.useCoreSuggestions ?? true,
+      practiceMode: organization.practiceMode,
+      practiceUntil: organization.practiceUntil?.toISOString() ?? null,
+      practiceActive:
+        organization.practiceMode &&
+        (!organization.practiceUntil || organization.practiceUntil > new Date()),
     };
   }
 
@@ -81,6 +87,8 @@ export class OrganizationsService {
       goals?: string[];
       hasBranches?: boolean;
       useCoreSuggestions?: boolean;
+      practiceMode?: boolean;
+      practiceUntil?: Date | null;
     } = {};
 
     if (dto.name !== undefined) {
@@ -148,6 +156,23 @@ export class OrganizationsService {
       data.useCoreSuggestions = dto.useCoreSuggestions;
     }
 
+    if (dto.practiceMode !== undefined) {
+      const currentPracticeActive =
+        current.practiceMode &&
+        (!current.practiceUntil || current.practiceUntil > new Date())
+
+      if (!dto.practiceMode) {
+        if (current.practiceMode || current.practiceUntil) {
+          data.practiceMode = false
+          data.practiceUntil = null
+        }
+      } else if (!currentPracticeActive) {
+        // Activar desde Configuración también abre una ventana de 48 horas.
+        data.practiceMode = true
+        data.practiceUntil = new Date(Date.now() + PRACTICE_WINDOW_MS)
+      }
+    }
+
     const organization = isEmptyPatch(data)
       ? current
       : await this.prisma.organization.update({
@@ -167,6 +192,30 @@ export class OrganizationsService {
       goals: organization.goals,
       hasBranches: organization.hasBranches,
       useCoreSuggestions: organization.useCoreSuggestions ?? true,
+      practiceMode: organization.practiceMode,
+      practiceUntil: organization.practiceUntil?.toISOString() ?? null,
+      practiceActive:
+        organization.practiceMode &&
+        (!organization.practiceUntil || organization.practiceUntil > new Date()),
     };
+  }
+
+  /**
+   * Cierra el modo práctica (idempotente).
+   *
+   * Lo puede llamar cualquier miembro autenticado: solo apaga la medición de
+   * operación de la organización, no toca ventas ni inventario.
+   */
+  async endPractice(organizationId: string | null) {
+    if (!organizationId) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    await this.prisma.organization.updateMany({
+      where: { id: organizationId },
+      data: { practiceMode: false, practiceUntil: null },
+    });
+
+    return { practiceMode: false, practiceUntil: null };
   }
 }

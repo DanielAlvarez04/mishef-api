@@ -15,6 +15,7 @@ import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { buildOrganizationSlug } from '../common/slug';
+import { PRACTICE_WINDOW_MS } from '../common/practice';
 import { isValidUsername, normalizeUsername } from '../common/usernames';
 import { MailService } from '../mail/mail.service';
 import type { GoogleProfile } from './google-oauth.service';
@@ -399,6 +400,8 @@ export class AuthService {
           data: {
             name: organizationName,
             slug: buildOrganizationSlug(organizationName),
+            practiceMode: true,
+            practiceUntil: new Date(Date.now() + PRACTICE_WINDOW_MS),
           },
         });
 
@@ -672,6 +675,16 @@ export class AuthService {
     }
 
     const membership = user.memberships[0];
+    const organization = membership?.organization
+      ? {
+          ...membership.organization,
+          practiceActive:
+            membership.organization.practiceMode &&
+            (!membership.organization.practiceUntil ||
+              membership.organization.practiceUntil > new Date()),
+        }
+      : null;
+
     return {
       id: user.id,
       email: user.email,
@@ -683,7 +696,7 @@ export class AuthService {
       googleLinked: Boolean(user.googleId),
       roles: membership?.roles ?? [],
       organizationId: membership?.organizationId,
-      organization: membership?.organization ?? null,
+      organization,
       // Sucursal fija del miembro: si existe, no puede operar en el consolidado.
       branchId: membership?.branchId ?? null,
     };
@@ -780,6 +793,8 @@ export class AuthService {
         data: {
           name: organizationName,
           slug: buildOrganizationSlug(organizationName),
+          practiceMode: true,
+          practiceUntil: new Date(Date.now() + PRACTICE_WINDOW_MS),
         },
       });
 

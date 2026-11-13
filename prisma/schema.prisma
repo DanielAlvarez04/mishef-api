@@ -166,6 +166,10 @@ model Organization {
   domain    String?  @unique // dominio de los usuarios del equipo (ej. naranjapimienta.cafe)
   taxRate   Decimal  @default(0.16) @db.Decimal(5, 4) // IVA por defecto del negocio (0.16 = 16 %)
   isActive  Boolean  @default(true)
+  /// Modo práctica: no se registra analítica de operación mientras esté activo.
+  practiceMode  Boolean   @default(false)
+  /// Fin automático del modo práctica (48 h desde el alta). `null` = manual.
+  practiceUntil DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

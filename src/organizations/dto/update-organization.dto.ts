@@ -52,4 +52,9 @@ export class UpdateOrganizationDto {
   @IsOptional()
   @IsBoolean()
   useCoreSuggestions?: boolean;
+
+  /** Activa/desactiva el modo práctica (no registra analítica de operación). */
+  @IsOptional()
+  @IsBoolean()
+  practiceMode?: boolean;
 }

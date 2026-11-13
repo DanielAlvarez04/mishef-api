@@ -15,6 +15,9 @@ import {
 /** Días de datos necesarios para activar el reporte automáticamente. */
 const OPERATIONS_AUTO_DAYS = 14
 
+/** Rondas enviadas que también cierran la calibración. */
+const OPERATIONS_AUTO_ROUNDS = 20
+
 /** Retención de eventos crudos de analítica (12 meses). */
 const ANALYTICS_RETENTION_DAYS = 365
 
@@ -59,8 +62,42 @@ export class AnalyticsService {
     if (inputs.length === 0) return
 
     try {
+      const organizationIds = [
+        ...new Set(
+          inputs
+            .map((input) => input.organizationId)
+            .filter((id): id is string => Boolean(id)),
+        ),
+      ]
+
+      // Modo práctica: se descarta la analítica de operación mientras la
+      // organización esté dentro de su ventana de práctica.
+      let rows = inputs
+
+      if (organizationIds.length > 0) {
+        const now = new Date()
+        const practicing = await this.prisma.organization.findMany({
+          where: {
+            id: { in: organizationIds },
+            practiceMode: true,
+            OR: [{ practiceUntil: null }, { practiceUntil: { gt: now } }],
+          },
+          select: { id: true },
+        })
+
+        if (practicing.length > 0) {
+          const practiceIds = new Set(practicing.map((org) => org.id))
+          rows = inputs.filter(
+            (input) =>
+              !input.organizationId || !practiceIds.has(input.organizationId),
+          )
+        }
+      }
+
+      if (rows.length === 0) return
+
       await this.prisma.analyticsEvent.createMany({
-        data: inputs.map((input) => ({
+        data: rows.map((input) => ({
           organizationId: input.organizationId,
           branchId: input.branchId ?? null,
           userId: input.userId ?? null,
@@ -161,7 +198,7 @@ export class AnalyticsService {
       occurredAt: { gte: params.from, lte: params.to },
     }
 
-    const [captures, frictionCounts, topEmptyGroups, firstCapture, guestRows] =
+    const [captures, frictionEvents, sentMilestones, guestRows] =
       await Promise.all([
         this.prisma.analyticsEvent.findMany({
           where: {
@@ -177,8 +214,7 @@ export class AnalyticsService {
           orderBy: { occurredAt: 'asc' },
           take: 20_000,
         }),
-        this.prisma.analyticsEvent.groupBy({
-          by: ['name'],
+        this.prisma.analyticsEvent.findMany({
           where: {
             ...baseWhere,
             name: {
@@ -191,136 +227,66 @@ export class AnalyticsService {
               ],
             },
           },
-          _count: { _all: true },
-        }),
-        this.prisma.analyticsEvent.groupBy({
-          by: ['subjectName'],
-          where: {
-            ...baseWhere,
-            name: ANALYTICS_EVENTS.posSearchNoResults,
-          },
-          _count: { _all: true },
-        }),
-        this.prisma.analyticsEvent.findFirst({
-          where: {
-            organizationId: params.organizationId,
-            ...scope,
-            name: ANALYTICS_EVENTS.posOrderCaptureFinished,
-          },
+          select: { name: true, subjectName: true, occurredAt: true },
           orderBy: { occurredAt: 'asc' },
-          select: { occurredAt: true },
+          take: 20_000,
         }),
+        this.firstSentCaptures(params),
         this.guestConsumption(params),
       ])
 
-    const sent = captures.filter(
-      (event) => readMetaString(event.metadata, 'outcome') === 'sent',
-    )
-    const countOutcome = (outcome: string) =>
-      captures.filter(
-        (event) => readMetaString(event.metadata, 'outcome') === outcome,
-      ).length
-
-    const activeValues = numbersOf(sent, 'activeMs')
-    const wallValues = numbersOf(sent, 'wallMs')
-    const browseValues = numbersOf(sent, 'browseMs')
-    const assemblyValues = numbersOf(sent, 'assemblyMs')
-    const interactionValues = numbersOf(sent, 'interactions')
-    const guestValues = numbersOf(sent, 'guests')
-    const lineValues = numbersOf(sent, 'lines')
-    const itemValues = sent.map((event) => Number(event.quantity) || 0)
-
-    const totalItems = sum(itemValues)
-    const totalActiveMs = sum(activeValues)
-    const totalSearches = sum(numbersOf(captures, 'searches'))
-    const totalEmptySearches = sum(numbersOf(captures, 'emptySearches'))
-    const totalDialogs = sum(numbersOf(captures, 'itemDialogs'))
-    const totalValidationErrors = sum(numbersOf(captures, 'validationErrors'))
-
-    const friction = (name: string) =>
-      frictionCounts.find((row) => row.name === name)?._count._all ?? 0
-    const opened = friction(ANALYTICS_EVENTS.posItemOpened)
-    const cancelled = friction(ANALYTICS_EVENTS.posItemDialogCancelled)
-
-    const topEmptySearches = topEmptyGroups
-      .filter((row) => Boolean(row.subjectName))
-      .map((row) => ({
-        query: row.subjectName ?? '',
-        count: row._count._all,
-      }))
-      .sort((left, right) => right.count - left.count)
-      .slice(0, 10)
-
-    const dayGroups = new Map<string, number[]>()
-
-    for (const event of sent) {
-      const activeMs = readMetaNumber(event.metadata, 'activeMs')
-
-      if (activeMs === null) continue
-
-      const key = localDayKey(event.occurredAt)
-      const values = dayGroups.get(key) ?? []
-      values.push(activeMs)
-      dayGroups.set(key, values)
-    }
-
-    const byDay = [...dayGroups.entries()]
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([date, values]) => ({
-        date,
-        samples: values.length,
-        activeMedianMs: median(values),
-      }))
-
-    const dataDays = firstCapture
+    const now = new Date()
+    // La calibración cuenta desde la primera ronda enviada, no desde la
+    // primera exploración: así las pruebas sin enviar no mueven el reloj.
+    const firstCaptureAt = sentMilestones[0] ?? null
+    const daysEnd = firstCaptureAt
+      ? new Date(
+          firstCaptureAt.getTime() + OPERATIONS_AUTO_DAYS * 86_400_000,
+        )
+      : null
+    const roundsEnd =
+      sentMilestones.length >= OPERATIONS_AUTO_ROUNDS
+        ? sentMilestones[OPERATIONS_AUTO_ROUNDS - 1]
+        : null
+    const endsAt =
+      daysEnd && roundsEnd
+        ? new Date(Math.min(daysEnd.getTime(), roundsEnd.getTime()))
+        : (daysEnd ?? roundsEnd)
+    const active = Boolean(firstCaptureAt && endsAt && now < endsAt)
+    const endedBy =
+      !firstCaptureAt || !endsAt || active
+        ? null
+        : roundsEnd && endsAt.getTime() === roundsEnd.getTime()
+          ? 'rounds'
+          : 'days'
+    const calibrationDays = firstCaptureAt
       ? Math.floor(
-          (Date.now() - firstCapture.occurredAt.getTime()) / 86_400_000,
+          (now.getTime() - firstCaptureAt.getTime()) / 86_400_000,
         ) + 1
       : 0
+    const calibrationRounds = Math.min(
+      sentMilestones.length,
+      OPERATIONS_AUTO_ROUNDS,
+    )
+
+    // `>` deja fuera la ronda que completa las 20 y el instante exacto del
+    // día 14: esa última captura todavía pertenece a la calibración.
+    const capturesPost = endsAt
+      ? captures.filter((event) => event.occurredAt > endsAt)
+      : []
+    const frictionPost = endsAt
+      ? frictionEvents.filter((event) => event.occurredAt > endsAt)
+      : []
 
     const guestReport = guestRows[0] ?? emptyGuestAggregate()
 
     return {
       from: params.from.toISOString(),
       to: params.to.toISOString(),
-      capture: {
-        samples: captures.length,
-        sent: sent.length,
-        abandoned: countOutcome('abandoned'),
-        switched: countOutcome('switched'),
-        activeMedianMs: median(activeValues),
-        activeP90Ms: percentile(activeValues, 90),
-        wallMedianMs: median(wallValues),
-        wallP90Ms: percentile(wallValues, 90),
-        browseMedianMs: median(browseValues),
-        assemblyMedianMs: median(assemblyValues),
-        averageItems: average(itemValues),
-        averageLines: average(lineValues),
-        averageInteractions: average(interactionValues),
-        averageGuests: average(guestValues),
-        itemsPerMinute:
-          totalActiveMs > 0
-            ? round(totalItems / (totalActiveMs / 60_000), 1)
-            : null,
-        searches: totalSearches,
-        emptySearches: totalEmptySearches,
-        emptySearchRate:
-          totalSearches > 0
-            ? round(totalEmptySearches / totalSearches, 3)
-            : null,
-        itemDialogs: totalDialogs,
-        validationErrors: totalValidationErrors,
-        byDay,
-      },
-      friction: {
-        opened,
-        added: friction(ANALYTICS_EVENTS.itemAddedToCart),
-        cancelled,
-        cancelRate: opened > 0 ? round(cancelled / opened, 3) : null,
-        validationErrors: friction(ANALYTICS_EVENTS.posValidationError),
-        emptySearches: friction(ANALYTICS_EVENTS.posSearchNoResults),
-        topEmptySearches,
-      },
+      /** Métricas sin el periodo de calibración (las que se muestran por defecto). */
+      capture: buildCaptureBundle(capturesPost, frictionPost),
+      /** Todo el periodo, incluida la calibración. */
+      captureAll: buildCaptureBundle(captures, frictionEvents),
       guests: {
         orders: guestReport.orders,
         ordersWithGuests: guestReport.ordersWithGuests,
@@ -363,10 +329,18 @@ export class AnalyticsService {
         generalNet: guestReport.generalNet,
       },
       data: {
-        firstCaptureAt: firstCapture?.occurredAt.toISOString() ?? null,
-        days: dataDays,
+        firstCaptureAt: firstCaptureAt?.toISOString() ?? null,
+        days: calibrationDays,
         autoAfterDays: OPERATIONS_AUTO_DAYS,
-        autoEnabled: dataDays >= OPERATIONS_AUTO_DAYS,
+        autoAfterRounds: OPERATIONS_AUTO_ROUNDS,
+        calibration: {
+          active,
+          endsAt: endsAt?.toISOString() ?? null,
+          endedBy,
+          days: calibrationDays,
+          rounds: calibrationRounds,
+        },
+        autoEnabled: Boolean(firstCaptureAt && !active),
         samples: captures.length,
       },
     }
@@ -394,6 +368,38 @@ export class AnalyticsService {
       cutoff: cutoff.toISOString(),
       days,
     }
+  }
+
+  /**
+   * Primeras 20 capturas enviadas de la organización (sin límite de periodo).
+   *
+   * Sirve para cerrar la calibración cuando se llega a 20 rondas, lo que
+   * ocurra primero con los 14 días.
+   */
+  private async firstSentCaptures(params: {
+    organizationId: string | null
+    branchId?: string | null
+  }): Promise<Date[]> {
+    if (!params.organizationId) return []
+
+    const branchFilter = params.branchId
+      ? Prisma.sql`AND "branchId" = ${params.branchId}`
+      : Prisma.empty
+
+    const rows = await this.prisma.$queryRaw<Array<{ occurredAt: Date }>>(
+      Prisma.sql`
+        SELECT "occurredAt"
+        FROM "AnalyticsEvent"
+        WHERE "organizationId" = ${params.organizationId}
+          AND name = ${ANALYTICS_EVENTS.posOrderCaptureFinished}
+          AND metadata->>'outcome' = 'sent'
+          ${branchFilter}
+        ORDER BY "occurredAt" ASC
+        LIMIT ${OPERATIONS_AUTO_ROUNDS}
+      `,
+    )
+
+    return rows.map((row) => row.occurredAt)
   }
 
   /**
@@ -708,6 +714,146 @@ function emptyGuestAggregate(): GuestAggregate {
     generalNet: 0,
     generalGross: 0,
   }
+}
+
+interface CaptureEventRow {
+  occurredAt: Date
+  quantity: Prisma.Decimal
+  amount: Prisma.Decimal
+  metadata: Prisma.JsonValue | null
+}
+
+interface FrictionEventRow {
+  name: string
+  subjectName: string | null
+  occurredAt: Date
+}
+
+function buildCaptureBundle(
+  captures: CaptureEventRow[],
+  frictionEvents: FrictionEventRow[],
+) {
+  const sent = captures.filter(
+    (event) => readMetaString(event.metadata, 'outcome') === 'sent',
+  )
+  const countOutcome = (outcome: string) =>
+    captures.filter(
+      (event) => readMetaString(event.metadata, 'outcome') === outcome,
+    ).length
+
+  const activeValues = numbersOf(sent, 'activeMs')
+  const wallValues = numbersOf(sent, 'wallMs')
+  const browseValues = numbersOf(sent, 'browseMs')
+  const setupValues = numbersOf(sent, 'setupMs')
+  const assemblyValues = numbersOf(sent, 'assemblyMs')
+  const totalValues = sent
+    .map((event) => {
+      const browseMs = readMetaNumber(event.metadata, 'browseMs')
+      const wallMs = readMetaNumber(event.metadata, 'wallMs')
+
+      return browseMs === null || wallMs === null ? null : browseMs + wallMs
+    })
+    .filter((value): value is number => value !== null)
+  const interactionValues = numbersOf(sent, 'interactions')
+  const guestValues = numbersOf(sent, 'guests')
+  const lineValues = numbersOf(sent, 'lines')
+  const itemValues = sent.map((event) => Number(event.quantity) || 0)
+
+  const totalItems = sum(itemValues)
+  const totalActiveMs = sum(activeValues)
+  const totalSearches = sum(numbersOf(captures, 'searches'))
+  const totalEmptySearches = sum(numbersOf(captures, 'emptySearches'))
+  const totalDialogs = sum(numbersOf(captures, 'itemDialogs'))
+  const totalValidationErrors = sum(numbersOf(captures, 'validationErrors'))
+
+  return {
+    samples: captures.length,
+    sent: sent.length,
+    abandoned: countOutcome('abandoned'),
+    switched: countOutcome('switched'),
+    stale: countOutcome('stale'),
+    activeMedianMs: median(activeValues),
+    activeP90Ms: percentile(activeValues, 90),
+    wallMedianMs: median(wallValues),
+    wallP90Ms: percentile(wallValues, 90),
+    browseMedianMs: median(browseValues),
+    setupMedianMs: median(setupValues),
+    assemblyMedianMs: median(assemblyValues),
+    totalMedianMs: median(totalValues),
+    averageItems: average(itemValues),
+    averageLines: average(lineValues),
+    averageInteractions: average(interactionValues),
+    averageGuests: average(guestValues),
+    itemsPerMinute:
+      totalActiveMs > 0
+        ? round(totalItems / (totalActiveMs / 60_000), 1)
+        : null,
+    searches: totalSearches,
+    emptySearches: totalEmptySearches,
+    emptySearchRate:
+      totalSearches > 0
+        ? round(totalEmptySearches / totalSearches, 3)
+        : null,
+    itemDialogs: totalDialogs,
+    validationErrors: totalValidationErrors,
+    byDay: buildByDay(sent),
+    friction: buildFriction(frictionEvents),
+  }
+}
+
+function buildFriction(events: FrictionEventRow[]) {
+  const count = (name: string) =>
+    events.filter((event) => event.name === name).length
+
+  const opened = count(ANALYTICS_EVENTS.posItemOpened)
+  const cancelled = count(ANALYTICS_EVENTS.posItemDialogCancelled)
+  const emptySearchGroups = new Map<string, number>()
+
+  for (const event of events) {
+    if (event.name !== ANALYTICS_EVENTS.posSearchNoResults) continue
+
+    const query = event.subjectName?.trim()
+
+    if (!query) continue
+
+    emptySearchGroups.set(query, (emptySearchGroups.get(query) ?? 0) + 1)
+  }
+
+  return {
+    opened,
+    added: count(ANALYTICS_EVENTS.itemAddedToCart),
+    cancelled,
+    cancelRate: opened > 0 ? round(cancelled / opened, 3) : null,
+    validationErrors: count(ANALYTICS_EVENTS.posValidationError),
+    emptySearches: count(ANALYTICS_EVENTS.posSearchNoResults),
+    topEmptySearches: [...emptySearchGroups.entries()]
+      .map(([query, count]) => ({ query, count }))
+      .sort((left, right) => right.count - left.count)
+      .slice(0, 10),
+  }
+}
+
+function buildByDay(sent: CaptureEventRow[]) {
+  const groups = new Map<string, number[]>()
+
+  for (const event of sent) {
+    const activeMs = readMetaNumber(event.metadata, 'activeMs')
+
+    if (activeMs === null) continue
+
+    const key = localDayKey(event.occurredAt)
+    const values = groups.get(key) ?? []
+    values.push(activeMs)
+    groups.set(key, values)
+  }
+
+  return [...groups.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([date, values]) => ({
+      date,
+      samples: values.length,
+      activeMedianMs: median(values),
+    }))
 }
 
 /**
