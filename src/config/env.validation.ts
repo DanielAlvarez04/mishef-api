@@ -91,6 +91,19 @@ export function validateEnv(
     if (!config.WEB_ORIGIN) {
       throw new Error('WEB_ORIGIN es obligatoria en producción');
     }
+
+    // Swagger solo debe quedar expuesto detrás de basic auth. Se exige en
+    // producción para que un despliegue sin credenciales falle al arrancar en
+    // lugar de publicar `/docs` abierto.
+    for (const key of ['SWAGGER_USER', 'SWAGGER_PASSWORD'] as const) {
+      const value = config[key];
+
+      if (typeof value !== 'string' || value.trim().length === 0) {
+        throw new Error(
+          `${key} es obligatoria en producción para proteger /docs`,
+        );
+      }
+    }
   }
 
   return config;

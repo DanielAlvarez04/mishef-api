@@ -8,6 +8,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
+import { swaggerBasicAuth } from './common/swagger-basic-auth';
 
 /**
  * Carga `api/.env`.
@@ -26,9 +27,9 @@ config(envPath ? { path: envPath } : {});
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
-  // Caddy es el único proxy delante de la API. Confiar en una sola capa hace
-  // que `req.ip` y el throttler usen la IP real del cliente (X-Forwarded-For)
-  // en lugar de la IP del contenedor del proxy.
+  // Traefik (Dokploy) es el único proxy delante de la API. Confiar en una sola
+  // capa hace que `req.ip` y el throttler usen la IP real del cliente
+  // (X-Forwarded-For) en lugar de la IP del contenedor del proxy.
   app.set('trust proxy', 1);
 
   // Cabeceras de seguridad. La CSP se deja fuera a propósito: la UI de Swagger
@@ -64,6 +65,11 @@ async function bootstrap() {
     .addBearerAuth()
     .build();
   const document = SwaggerModule.createDocument(app, swaggerConfig);
+
+  // Debe registrarse antes que `SwaggerModule.setup`, que añade las rutas de
+  // `/docs` al adaptador HTTP.
+  app.use(swaggerBasicAuth());
+
   SwaggerModule.setup('docs', app, document);
 
   await app.listen(process.env.PORT ?? 3001);
