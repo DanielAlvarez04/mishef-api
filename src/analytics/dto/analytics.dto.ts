@@ -37,6 +37,11 @@ export class ClientAnalyticsEventDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(40)
+  orderId?: string
+
+  @IsOptional()
+  @IsString()
   @MaxLength(120)
   subjectName?: string
 

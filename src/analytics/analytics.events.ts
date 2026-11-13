@@ -20,6 +20,16 @@ export const ANALYTICS_EVENTS = {
   menuFiltered: 'pos.menu_filtered',
   /** POS: se abrió un grupo de opciones al configurar un artículo. */
   optionGroupOpened: 'pos.option_group_opened',
+  /** POS: terminó una captura de pedido (enviada, abandonada o cambiada). */
+  posOrderCaptureFinished: 'pos.order_capture_finished',
+  /** POS: se abrió la card de un artículo para configurarlo. */
+  posItemOpened: 'pos.item_opened',
+  /** POS: una búsqueda no devolvió resultados. */
+  posSearchNoResults: 'pos.search_no_results',
+  /** POS: se cerró el diálogo del platillo sin guardar. */
+  posItemDialogCancelled: 'pos.item_dialog_cancelled',
+  /** POS: validación fallida antes de guardar un platillo. */
+  posValidationError: 'pos.validation_error',
 } as const
 
 export type AnalyticsEventName =
@@ -33,6 +43,11 @@ export const CLIENT_ANALYTICS_EVENTS: readonly AnalyticsEventName[] = [
   ANALYTICS_EVENTS.itemAddedToCart,
   ANALYTICS_EVENTS.menuFiltered,
   ANALYTICS_EVENTS.optionGroupOpened,
+  ANALYTICS_EVENTS.posOrderCaptureFinished,
+  ANALYTICS_EVENTS.posItemOpened,
+  ANALYTICS_EVENTS.posSearchNoResults,
+  ANALYTICS_EVENTS.posItemDialogCancelled,
+  ANALYTICS_EVENTS.posValidationError,
 ]
 
 export function isClientAnalyticsEvent(

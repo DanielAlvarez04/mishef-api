@@ -14,6 +14,7 @@
     "prisma:seed": "ts-node prisma/seed.ts",
     "catalog:assets": "node scripts/migrate-catalog-assets.mjs",
     "recipe:scopes": "node scripts/migrate-recipe-scopes.mjs",
+    "analytics:purge": "node scripts/purge-analytics.mjs",
     "images:optimize": "ts-node --transpile-only scripts/optimize-existing-images.ts",
     "images:seed": "ts-node --transpile-only scripts/upload-food-images.ts",
     "test": "jest",

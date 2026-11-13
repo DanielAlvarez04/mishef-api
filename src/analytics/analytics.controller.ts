@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Post,
   Query,
@@ -98,6 +99,31 @@ export class AnalyticsController {
       ...range,
       limit: parseLimit(limit, 200),
     })
+  }
+
+  @ApiOperation({ summary: 'Tiempos de captura y consumo por cliente del POS' })
+  @RequirePermissions('reports:read')
+  @Get('pos-operations')
+  posOperations(
+    @CurrentUser() user: JwtUser,
+    @CurrentBranch() branchId: string | null,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    const range = parseRange(from, to)
+
+    return this.analytics.posOperationsReport({
+      organizationId: user.organizationId,
+      branchId,
+      ...range,
+    })
+  }
+
+  @ApiOperation({ summary: 'Purgar eventos de analítica vencidos' })
+  @RequirePermissions('organization:manage')
+  @Delete('events/expired')
+  purgeExpired(@CurrentUser() user: JwtUser) {
+    return this.analytics.purgeOlderThan(user.organizationId)
   }
 }
 
