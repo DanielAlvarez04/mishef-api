@@ -155,6 +155,12 @@ enum PromotionType {
   SECOND_HALF_PRICE
 }
 
+/// Origen del tiempo base de preparación en cocina.
+enum PrepTimeSource {
+  MANUAL
+  HISTORICAL
+}
+
 // ============================================================================
 // Identidad y organización
 // ============================================================================
@@ -188,6 +194,14 @@ model Organization {
   useCoreRecipeCategories Boolean @default(true)
   /// Mostrar/activar las categorías core de insumos sugeridas.
   useCoreIngredientCategories Boolean @default(true)
+
+  // Cocina
+  /// Tiempo de preparación manual por defecto, en minutos.
+  kitchenPrepMinutes Int @default(15)
+  /// De dónde sale el tiempo base: manual o promedio histórico real.
+  kitchenPrepSource PrepTimeSource @default(MANUAL)
+  /// Priorizar la cola de cocina por urgencia en lugar de llegada.
+  kitchenSuggestOrder Boolean @default(true)
 
   memberships          Membership[]
   branches             Branch[]
@@ -456,6 +470,8 @@ model Item {
   /// artículos (aunque esté inactivo) y se conserva para volver a publicarla.
   isArchived     Boolean  @default(false)
   isCombo        Boolean  @default(false)
+  /// Minutos de preparación propios. `null` = usa el tiempo del negocio.
+  prepMinutes    Int?
   sortOrder      Int      @default(0)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -1108,6 +1124,8 @@ model OrderRound {
   readyAt        DateTime?
   deliveredAt    DateTime?
   cancelledAt    DateTime?
+  /// Tiempo estimado de preparación al enviar la ronda, en minutos.
+  estimatedMinutes Int?
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
 

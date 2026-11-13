@@ -975,6 +975,9 @@ export class RecipesService {
           : new Prisma.Decimal(dto.taxRate),
       isActive: true,
       isArchived: false,
+      ...(dto.prepMinutes !== undefined
+        ? { prepMinutes: dto.prepMinutes }
+        : {}),
     };
 
     const item = archivedItem

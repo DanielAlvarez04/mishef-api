@@ -570,6 +570,7 @@ export class DashboardService {
         startedAt: true,
         readyAt: true,
         deliveredAt: true,
+        estimatedMinutes: true,
       },
     });
 
@@ -579,6 +580,7 @@ export class DashboardService {
     const prep: number[] = [];
     const delivery: number[] = [];
     const total: number[] = [];
+    const estimatePairs: Array<{ estimate: number; real: number }> = [];
 
     for (const round of rounds) {
       byStatus.set(round.status, (byStatus.get(round.status) ?? 0) + 1);
@@ -593,7 +595,13 @@ export class DashboardService {
       }
 
       if (round.startedAt && round.readyAt) {
-        prep.push((round.readyAt.getTime() - round.startedAt.getTime()) / 60000);
+        const real = (round.readyAt.getTime() - round.startedAt.getTime()) / 60000;
+
+        prep.push(real);
+
+        if (round.estimatedMinutes !== null && round.estimatedMinutes > 0) {
+          estimatePairs.push({ estimate: round.estimatedMinutes, real });
+        }
       }
 
       if (round.readyAt && round.deliveredAt) {
@@ -614,6 +622,14 @@ export class DashboardService {
         ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length)
         : null;
 
+    const estimateValues = estimatePairs.map((pair) => pair.estimate);
+    const deviationValues = estimatePairs.map(
+      (pair) => pair.real - pair.estimate,
+    );
+    const withinEstimate = estimatePairs.filter(
+      (pair) => pair.real <= pair.estimate * 1.1,
+    ).length;
+
     return {
       from: from.toISOString(),
       to: to.toISOString(),
@@ -623,6 +639,13 @@ export class DashboardService {
         averagePrepMinutes: average(prep),
         averageDeliveryMinutes: average(delivery),
         averageTotalMinutes: average(total),
+        averageEstimatedMinutes: average(estimateValues),
+        averageDeviationMinutes: average(deviationValues),
+        estimateSamples: estimatePairs.length,
+        withinEstimateRate:
+          estimatePairs.length > 0
+            ? Math.round((withinEstimate / estimatePairs.length) * 1000) / 1000
+            : null,
       },
       byStatus: [...byStatus].map(([status, count]) => ({ status, count })),
       byDay: [...byDay]

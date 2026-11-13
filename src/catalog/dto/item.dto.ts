@@ -280,6 +280,13 @@ export class CreateItemDto {
   @IsBoolean()
   isCombo?: boolean;
 
+  /** Minutos de preparación propios; `null` hereda el tiempo del negocio. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(180)
+  prepMinutes?: number | null;
+
   @IsOptional()
   @IsInt()
   @Min(0)
@@ -373,6 +380,13 @@ export class UpdateItemDto {
   @IsOptional()
   @IsBoolean()
   isCombo?: boolean;
+
+  /** Minutos de preparación propios; `null` hereda el tiempo del negocio. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(180)
+  prepMinutes?: number | null;
 
   @IsOptional()
   @IsBoolean()

@@ -1,6 +1,8 @@
 import {
+  Body,
   Controller,
   Get,
+  Patch,
   Sse,
   UseGuards,
   type MessageEvent,
@@ -11,9 +13,12 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { CurrentBranch } from '../common/decorators/current-branch.decorator';
 import { JwtUser } from '../auth/auth.service';
+import { RequirePermissions } from '../common/decorators/require-permissions.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { OrdersService } from './orders.service';
 import { OrdersEventsService, type OrderEvent } from './orders.events';
+import { KitchenService } from '../kitchen/kitchen.service';
+import { UpdateKitchenSettingsDto } from '../kitchen/dto/update-kitchen-settings.dto';
 
 @ApiTags('kitchen')
 @Controller('kitchen')
@@ -22,6 +27,7 @@ export class KitchenController {
   constructor(
     private readonly orders: OrdersService,
     private readonly events: OrdersEventsService,
+    private readonly kitchen: KitchenService,
   ) {}
 
   @ApiOperation({ summary: 'Rondas activas para el tablero de cocina' })
@@ -31,6 +37,35 @@ export class KitchenController {
     @CurrentBranch() branchId: string | null,
   ) {
     return this.orders.kitchenRounds(user.organizationId, branchId);
+  }
+
+  @ApiOperation({ summary: 'Configuración de tiempos y prioridad de cocina' })
+  @Get('settings')
+  settings(
+    @CurrentUser() user: JwtUser,
+    @CurrentBranch() branchId: string | null,
+  ) {
+    return this.kitchen.settings(user.organizationId, branchId);
+  }
+
+  @ApiOperation({ summary: 'Actualizar la configuración de cocina (ADMIN)' })
+  @RequirePermissions('organization:manage')
+  @Patch('settings')
+  updateSettings(
+    @CurrentUser() user: JwtUser,
+    @CurrentBranch() branchId: string | null,
+    @Body() dto: UpdateKitchenSettingsDto,
+  ) {
+    return this.kitchen.updateSettings(user.organizationId, dto, branchId);
+  }
+
+  @ApiOperation({ summary: 'Promedio real de preparación y calibración' })
+  @Get('prep-stats')
+  prepStats(
+    @CurrentUser() user: JwtUser,
+    @CurrentBranch() branchId: string | null,
+  ) {
+    return this.kitchen.prepStats(user.organizationId, branchId);
   }
 
   /**

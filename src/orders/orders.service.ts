@@ -21,6 +21,13 @@ import { AnalyticsService } from '../analytics/analytics.service';
 import { ANALYTICS_EVENTS } from '../analytics/analytics.events';
 import { isNoPriceOptionGroup } from '../catalog/option-presets';
 import {
+  DEFAULT_PREP_MINUTES,
+  estimatePrepMinutes,
+  prepPriority,
+  type PrepPriority,
+} from '../common/prep';
+import { KitchenService } from '../kitchen/kitchen.service';
+import {
   CancelOrderDto,
   CreateOrderDto,
   OrderGuestDto,
@@ -143,6 +150,7 @@ export class OrdersService {
     private readonly prisma: PrismaService,
     private readonly events: OrdersEventsService,
     private readonly analytics: AnalyticsService,
+    private readonly kitchen: KitchenService,
   ) {}
 
   // --------------------------------------------------------------------------
@@ -411,6 +419,14 @@ export class OrdersService {
       guestName: row.guestId ? guestById.get(row.guestId) ?? null : null,
     }));
 
+    // Snapshot del estimado: si mañana cambian los tiempos del catálogo, el
+    // histórico de esta ronda no se reescribe.
+    const estimatedMinutes = await this.estimateForLines(
+      organizationId,
+      order.branchId,
+      dto.items,
+    );
+
     const round = await this.prisma.$transaction(async (tx) => {
       const created = await tx.orderRound.create({
         data: {
@@ -418,6 +434,7 @@ export class OrdersService {
           status: OrderRoundStatus.PENDING,
           sentAt: new Date(),
           idempotencyKey,
+          estimatedMinutes,
           items: { create: itemsWithGuest },
         },
         include: roundInclude,
@@ -881,17 +898,186 @@ export class OrdersService {
   // --------------------------------------------------------------------------
 
   kitchenRounds(organizationId: string | null, branchId: string | null = null) {
-    return this.prisma.orderRound.findMany({
-      where: {
-        order: {
-          organizationId: organizationId,
-          status: OrderStatus.OPEN,
-          ...(branchId ? { branchId } : {}),
+    return this.enrichedKitchenRounds(organizationId, branchId);
+  }
+
+  /**
+   * Rondas activas enriquecidas con el estimado y la prioridad sugerida.
+   *
+   * La prioridad se calcula en el servidor para que el tablero no tenga que
+   * repetir las reglas; el cliente solo vuelve a pedirlas por SSE o sondeo.
+   */
+  private async enrichedKitchenRounds(
+    organizationId: string | null,
+    branchId: string | null = null,
+  ) {
+    const [rounds, settings] = await Promise.all([
+      this.prisma.orderRound.findMany({
+        where: {
+          order: {
+            organizationId: organizationId,
+            status: OrderStatus.OPEN,
+            ...(branchId ? { branchId } : {}),
+          },
+          status: { in: OPEN_ROUND_STATUSES },
         },
-        status: { in: OPEN_ROUND_STATUSES },
-      },
-      include: kitchenInclude,
-      orderBy: [{ sentAt: 'asc' }, { createdAt: 'asc' }],
+        include: kitchenInclude,
+        orderBy: [{ sentAt: 'asc' }, { createdAt: 'asc' }],
+      }),
+      this.kitchen.settings(organizationId, branchId),
+    ]);
+
+    const now = Date.now();
+    const enriched = rounds.map((round) => {
+      const estimateMinutes =
+        round.estimatedMinutes ?? settings.effectiveMinutes;
+      const sentAt = round.sentAt ?? round.createdAt;
+      const stageStartedAt =
+        round.status === OrderRoundStatus.READY
+          ? round.readyAt ?? round.startedAt ?? sentAt
+          : round.status === OrderRoundStatus.PREPARING
+            ? round.startedAt ?? sentAt
+            : sentAt;
+
+      const stageMinutes = Math.max(
+        0,
+        Math.floor((now - stageStartedAt.getTime()) / 60_000),
+      );
+      const waitMinutes = Math.max(
+        0,
+        Math.floor((now - sentAt.getTime()) / 60_000),
+      );
+      const items = round.items.reduce(
+        (sum, item) => sum + item.quantity,
+        0,
+      );
+      const actionable =
+        round.status === OrderRoundStatus.PENDING ||
+        round.status === OrderRoundStatus.PREPARING;
+      const urgency = actionable
+        ? estimateMinutes > 0
+          ? stageMinutes / estimateMinutes
+          : 0
+        : 0;
+      const priority: PrepPriority = actionable
+        ? prepPriority(urgency)
+        : 'on_time';
+      const score = actionable
+        ? Math.round(
+            urgency * 100 + waitMinutes * 0.4 + items * 0.3,
+          )
+        : 0;
+      const reasons: string[] = [];
+
+      if (priority === 'late') {
+        reasons.push(
+          `Lleva ${stageMinutes} min de ${estimateMinutes} estimados`,
+        );
+      } else if (priority === 'at_risk') {
+        reasons.push(
+          `Cerca del estimado (${stageMinutes}/${estimateMinutes} min)`,
+        );
+      }
+
+      if (waitMinutes >= estimateMinutes && waitMinutes > 0) {
+        reasons.push(`Espera ${waitMinutes} min desde el envío`);
+      }
+
+      if (items >= 6) reasons.push(`${items} artículos`);
+
+      return {
+        ...round,
+        estimateMinutes,
+        estimateFromSnapshot: round.estimatedMinutes !== null,
+        stageMinutes,
+        waitMinutes,
+        itemCount: items,
+        urgency: Math.round(urgency * 100) / 100,
+        priority,
+        score,
+        reasons,
+        estimatedReadyAt: new Date(
+          (round.startedAt ?? sentAt).getTime() + estimateMinutes * 60_000,
+        ).toISOString(),
+      };
+    });
+
+    const ranked = enriched
+      .filter(
+        (round) =>
+          round.status === OrderRoundStatus.PENDING ||
+          round.status === OrderRoundStatus.PREPARING,
+      )
+      .sort((left, right) => right.score - left.score);
+    const rankById = new Map(
+      ranked.map((round, index) => [round.id, index + 1]),
+    );
+
+    return enriched.map((round) => ({
+      ...round,
+      suggestedRank: rankById.get(round.id) ?? null,
+    }));
+  }
+
+  /**
+   * Minutos estimados de una ronda a partir de sus líneas.
+   *
+   * Los combos toman el máximo de sus componentes; los artículos sin tiempo
+   * propio heredan el del negocio (manual o histórico ya calibrado).
+   */
+  private async estimateForLines(
+    organizationId: string | null,
+    branchId: string | null,
+    lines: Array<{ itemId: string }>,
+  ): Promise<number> {
+    if (lines.length === 0) return DEFAULT_PREP_MINUTES;
+
+    const fallback = await this.kitchen.fallbackMinutes(
+      organizationId,
+      branchId,
+    );
+    const itemIds = [...new Set(lines.map((line) => line.itemId))];
+    const items = await this.prisma.item.findMany({
+      where: { id: { in: itemIds } },
+      select: { id: true, prepMinutes: true, isCombo: true },
+    });
+    const comboIds = items
+      .filter((item) => item.isCombo)
+      .map((item) => item.id);
+    const components =
+      comboIds.length > 0
+        ? await this.prisma.comboComponent.findMany({
+            where: { comboId: { in: comboIds } },
+            select: {
+              comboId: true,
+              componentItem: { select: { prepMinutes: true } },
+            },
+          })
+        : [];
+    const comboMinutes = new Map<string, number>();
+
+    for (const component of components) {
+      const minutes = component.componentItem.prepMinutes ?? fallback;
+      comboMinutes.set(
+        component.comboId,
+        Math.max(comboMinutes.get(component.comboId) ?? 0, minutes),
+      );
+    }
+
+    const byId = new Map(items.map((item) => [item.id, item]));
+    const lineMinutes = lines.map((line) => {
+      const item = byId.get(line.itemId);
+
+      if (!item) return fallback;
+      if (item.prepMinutes !== null) return item.prepMinutes;
+      if (item.isCombo) return comboMinutes.get(item.id) ?? fallback;
+
+      return fallback;
+    });
+
+    return estimatePrepMinutes({
+      lineMinutes,
+      distinctLines: itemIds.length,
     });
   }
 

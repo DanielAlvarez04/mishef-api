@@ -451,6 +451,7 @@ export class ItemsService {
               ? null
               : new Prisma.Decimal(dto.taxRate),
           isCombo,
+          prepMinutes: dto.prepMinutes ?? null,
           sortOrder: dto.sortOrder ?? 0,
           variants: {
             create: variants.map((variant, index) => ({
@@ -624,6 +625,12 @@ export class ItemsService {
     }
     if (dto.isCombo !== undefined && dto.isCombo !== item.isCombo) {
       data.isCombo = dto.isCombo;
+    }
+    if (
+      dto.prepMinutes !== undefined &&
+      (dto.prepMinutes ?? null) !== item.prepMinutes
+    ) {
+      data.prepMinutes = dto.prepMinutes;
     }
     if (dto.isActive !== undefined && dto.isActive !== item.isActive) {
       data.isActive = dto.isActive;

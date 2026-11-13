@@ -135,6 +135,13 @@ export class PublishRecipeDto {
   @Max(1)
   taxRate?: number | null;
 
+  /** Minutos de preparación del artículo publicado; `null` hereda. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(180)
+  prepMinutes?: number | null;
+
   /** Presentaciones; si se omite se crean Chico, Regular y Grande. */
   @IsOptional()
   @IsArray()
