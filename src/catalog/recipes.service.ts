@@ -308,7 +308,7 @@ export class RecipesService {
     // contra el artículo archivado (comparte `catalogEntryId`).
     const scopeItemId =
       recipe.itemId ??
-      (await this.itemIdOfCatalogEntry(recipe.catalogEntryId, true));
+      (await this.itemIdOfCatalogEntry(organizationId, recipe.catalogEntryId, true));
 
     const lines =
       dto.ingredients === undefined
@@ -514,8 +514,8 @@ export class RecipesService {
       );
     }
 
-    const existing = await this.prisma.item.findUnique({
-      where: { catalogEntryId },
+    const existing = await this.prisma.item.findFirst({
+      where: { catalogEntryId, organizationId },
       select: {
         id: true,
         name: true,
@@ -594,7 +594,7 @@ export class RecipesService {
     await this.prisma.recipe.delete({ where: { id: recipe.id } });
 
     // Si no queda artículo ni otra receta, se borra la entrada y su imagen.
-    await this.catalogEntries.deleteIfOrphan(recipe.catalogEntryId);
+    await this.catalogEntries.deleteIfOrphan(recipe.catalogEntryId, organizationId);
 
     return { ok: true };
   }
@@ -631,7 +631,7 @@ export class RecipesService {
     ];
 
     for (const entryId of entryIds) {
-      await this.catalogEntries.deleteIfOrphan(entryId);
+      await this.catalogEntries.deleteIfOrphan(entryId, organizationId);
     }
 
     return { deletedCount: recipes.length };
@@ -941,8 +941,8 @@ export class RecipesService {
 
     // Al despublicar, el artículo se archiva en vez de borrarse: se reutiliza
     // esa misma fila (la entrada de catálogo es única) para no duplicarla.
-    const archivedItem = await tx.item.findUnique({
-      where: { catalogEntryId },
+    const archivedItem = await tx.item.findFirst({
+      where: { catalogEntryId, organizationId },
       select: { id: true },
     });
 
@@ -1137,6 +1137,7 @@ export class RecipesService {
     // El costo de preparación se reparte entre el rendimiento del lote.
     const { total: cost, complete: costComplete } = await this.computeCost(
       tx,
+      organizationId,
       lines,
     );
     const unitCost =
@@ -1219,14 +1220,15 @@ export class RecipesService {
 
   private async computeCost(
     tx: Prisma.TransactionClient,
+    organizationId: string | null,
     lines: Array<{ ingredientId: string; quantity: Prisma.Decimal }>,
   ) {
     let total = new Prisma.Decimal(0);
     let complete = true;
 
     for (const line of lines) {
-      const ingredient = await tx.ingredient.findUnique({
-        where: { id: line.ingredientId },
+      const ingredient = await tx.ingredient.findFirst({
+        where: { id: line.ingredientId, organizationId },
         select: { unitCost: true },
       });
 
@@ -1258,13 +1260,14 @@ export class RecipesService {
    * `onlyArchived` solo devuelve el artículo archivado por despublicación.
    */
   private async itemIdOfCatalogEntry(
+    organizationId: string | null,
     catalogEntryId: string | null,
     onlyArchived = false,
   ): Promise<string | null> {
     if (!catalogEntryId) return null;
 
-    const item = await this.prisma.item.findUnique({
-      where: { catalogEntryId },
+    const item = await this.prisma.item.findFirst({
+      where: { catalogEntryId, organizationId },
       select: { id: true, isArchived: true },
     });
 

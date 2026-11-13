@@ -71,8 +71,15 @@ export class CategoriesController {
   @ApiOperation({ summary: 'Activar o desactivar todas las categorías core de un tipo' })
   @RequirePermissions('catalog:manage')
   @Patch('bulk/core-status')
-  setCoreGroupStatus(@Body() dto: UpdateCoreCategoryGroupDto) {
-    return this.categories.setCoreGroupActive(dto.kind, dto.isActive);
+  setCoreGroupStatus(
+    @CurrentUser() user: JwtUser,
+    @Body() dto: UpdateCoreCategoryGroupDto,
+  ) {
+    return this.categories.setCoreGroupActive(
+      user.organizationId,
+      dto.kind,
+      dto.isActive,
+    );
   }
 
   @ApiOperation({ summary: 'Desactivar categoría' })

@@ -192,6 +192,11 @@ export class InventoryService {
     const category = await this.resolveCategory(organizationId, dto.categoryId);
     const sku = await this.generateSku(organizationId, category.name);
 
+    // La ubicación es opcional, pero si viene debe ser del negocio (o core).
+    const location = dto.locationId
+      ? await this.resolveLocation(organizationId, dto.locationId)
+      : null;
+
     // Las cantidades y el costo llegan en la unidad visible y se guardan en la
     // unidad canónica de la dimensión.
     const displayUnit = dto.displayUnit ?? UnitCode.UNIT;
@@ -217,7 +222,7 @@ export class InventoryService {
               ? toCanonicalCost(dto.unitCost, displayUnit)
               : null,
           categoryId: category.id,
-          locationId: dto.locationId || null,
+          locationId: location?.id ?? null,
         },
       });
 
@@ -593,6 +598,12 @@ export class InventoryService {
       }
     }
 
+    // Si el formulario envía ubicación, debe pertenecer al negocio (o ser core).
+    const nextLocationId =
+      dto.locationId !== undefined && dto.locationId
+        ? (await this.resolveLocation(organizationId, dto.locationId)).id
+        : undefined;
+
     // La unidad visible puede cambiar en cualquier momento: solo se valida que
     // siga midiendo lo mismo. Las cantidades guardadas no se reescriben.
     if (dto.displayUnit !== undefined && !sameDimension(dto.displayUnit, ingredient.baseUnit)) {
@@ -640,9 +651,9 @@ export class InventoryService {
     // no borra la ubicación actual.
     if (
       dto.locationId !== undefined &&
-      (dto.locationId || null) !== ingredient.locationId
+      (nextLocationId ?? null) !== ingredient.locationId
     ) {
-      data.locationId = dto.locationId || null;
+      data.locationId = nextLocationId ?? null;
     }
     if (dto.isActive !== undefined && dto.isActive !== ingredient.isActive) {
       data.isActive = dto.isActive;
@@ -695,6 +706,12 @@ export class InventoryService {
     ids: string[],
     coreIds: string[] = [],
   ) {
+    // Sin organización el filtro desaparecería y el `deleteMany` borraría
+    // insumos de todos los negocios.
+    if (!organizationId) {
+      throw new BadRequestException('Selecciona un negocio');
+    }
+
     const uniqueIds = [...new Set(ids.filter(Boolean))];
 
     if (uniqueIds.length === 0) {
@@ -704,7 +721,7 @@ export class InventoryService {
     const ingredients = await this.prisma.ingredient.findMany({
       where: {
         id: { in: uniqueIds },
-        ...(organizationId ? { organizationId } : {}),
+        organizationId,
       },
       select: { id: true, name: true },
     });
@@ -769,7 +786,7 @@ export class InventoryService {
 
       if (recipeIds.length > 0) {
         await this.prisma.recipe.updateMany({
-          where: { id: { in: recipeIds } },
+          where: { id: { in: recipeIds }, organizationId },
           data: { isActive: false },
         });
       }
@@ -777,7 +794,9 @@ export class InventoryService {
 
     await this.prisma.$transaction(async (tx) => {
       // La FK de `InventoryMovement` es `SetNull`: el kardex se conserva.
-      await tx.ingredient.deleteMany({ where: { id: { in: ingredientIds } } });
+      await tx.ingredient.deleteMany({
+        where: { id: { in: ingredientIds }, organizationId },
+      });
     });
 
     return { ok: true, deletedCount: ingredientIds.length };
@@ -986,37 +1005,59 @@ export class InventoryService {
   }
 
   /**
-   * Activa o desactiva todas las categorías core de inventario.
+   * Activa o desactiva las categorías core de inventario **para el negocio
+   * actual**.
    *
-   * Al desactivarlas se limpia la categoría de los insumos que las usaban para
-   * que no queden apuntando a una categoría oculta.
+   * Las categorías core son filas globales compartidas: no se tocan. La
+   * preferencia vive en la organización y, al desactivar, solo se limpia la
+   * categoría de los insumos de ese negocio.
    */
-  async setCoreIngredientCategoriesActive(isActive: boolean) {
+  async setCoreIngredientCategoriesActive(
+    organizationId: string | null,
+    isActive: boolean,
+  ) {
+    if (!organizationId) {
+      throw new BadRequestException('Selecciona un negocio');
+    }
+
+    const organization = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { useCoreIngredientCategories: true },
+    });
+
+    if (!organization) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    if (organization.useCoreIngredientCategories === isActive) {
+      return { ok: true, updated: 0 };
+    }
+
     const categories = await this.prisma.ingredientCategory.findMany({
       where: { organizationId: null, isCore: true },
       select: { id: true },
     });
 
-    if (categories.length === 0) {
-      return { ok: true, updated: 0 };
-    }
-
     const ids = categories.map((category) => category.id);
 
     return this.prisma.$transaction(async (tx) => {
-      if (!isActive) {
-        await tx.ingredient.updateMany({
-          where: { categoryId: { in: ids } },
+      let detached = 0;
+
+      if (!isActive && ids.length > 0) {
+        const result = await tx.ingredient.updateMany({
+          where: { organizationId, categoryId: { in: ids } },
           data: { categoryId: null },
         });
+
+        detached = result.count;
       }
 
-      const result = await tx.ingredientCategory.updateMany({
-        where: { id: { in: ids } },
-        data: { isActive },
+      await tx.organization.update({
+        where: { id: organizationId },
+        data: { useCoreIngredientCategories: isActive },
       });
 
-      return { ok: true, updated: result.count };
+      return { ok: true, updated: detached };
     });
   }
 
@@ -1037,6 +1078,12 @@ export class InventoryService {
       });
 
       if (existing) {
+        // La clave es única en toda la base: si pertenece a otro negocio no se
+        // devuelve su movimiento (sería una fuga entre organizaciones).
+        if (existing.organizationId !== organizationId) {
+          throw new ConflictException('La clave de idempotencia ya está en uso');
+        }
+
         return this.toDisplayMovement({ ...existing, duplicated: true });
       }
     }
@@ -1119,6 +1166,10 @@ export class InventoryService {
           where: { dedupeKey: dto.dedupeKey },
           include: movementInclude,
         });
+
+        if (existing.organizationId !== organizationId) {
+          throw new ConflictException('La clave de idempotencia ya está en uso');
+        }
 
         return this.toDisplayMovement({ ...existing, duplicated: true });
       }
@@ -1314,7 +1365,7 @@ export class InventoryService {
       if (existing) {
         await this.prisma.ingredientCategory.update({
           where: { id: existing.id },
-          data: { ...cat, isCore: true, isActive: true },
+          data: { ...cat, isCore: true },
         });
       } else {
         try {
@@ -1370,7 +1421,6 @@ export class InventoryService {
             kind: category.kind,
             sortOrder: category.sortOrder,
             isCore: true,
-            isActive: true,
           },
         });
       } else {
@@ -1394,12 +1444,19 @@ export class InventoryService {
     organizationId: string | null,
     includeInactive = false,
   ) {
-    return this.prisma.ingredientCategory.findMany({
+    // Las categorías core son filas compartidas: su visibilidad es una
+    // preferencia del negocio, no un cambio en la fila.
+    const coreEnabled =
+      await this.coreIngredientCategoriesEnabled(organizationId);
+
+    const categories = await this.prisma.ingredientCategory.findMany({
       where: {
-        ...(includeInactive ? {} : { isActive: true }),
         OR: [
-          { organizationId },
-          { organizationId: null },
+          {
+            organizationId,
+            ...(includeInactive ? {} : { isActive: true }),
+          },
+          ...(includeInactive || coreEnabled ? [{ organizationId: null }] : []),
         ],
       },
       orderBy: { sortOrder: 'asc' },
@@ -1412,6 +1469,24 @@ export class InventoryService {
         sortOrder: true,
       },
     });
+
+    return categories.map((category) =>
+      category.isCore ? { ...category, isActive: coreEnabled } : category,
+    );
+  }
+
+  /** Preferencia del negocio sobre las categorías core de insumos. */
+  private async coreIngredientCategoriesEnabled(
+    organizationId: string | null,
+  ) {
+    if (!organizationId) return true;
+
+    const organization = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { useCoreIngredientCategories: true },
+    });
+
+    return organization?.useCoreIngredientCategories ?? false;
   }
 
   async listIngredientLocations(organizationId: string | null) {
@@ -1583,6 +1658,32 @@ export class InventoryService {
     }
 
     return category;
+  }
+
+  /**
+   * Valida que la ubicación exista (core o de la organización) y esté activa.
+   * Evita que un insumo apunte a la ubicación de otro negocio.
+   */
+  private async resolveLocation(
+    organizationId: string | null,
+    locationId: string,
+  ) {
+    const location = await this.prisma.ingredientLocation.findFirst({
+      where: {
+        id: locationId,
+        isActive: true,
+        OR: [{ organizationId }, { organizationId: null }],
+      },
+      select: { id: true },
+    });
+
+    if (!location) {
+      throw new BadRequestException(
+        'Selecciona una ubicación válida para el insumo',
+      );
+    }
+
+    return location;
   }
 
   /**

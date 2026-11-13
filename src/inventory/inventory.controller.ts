@@ -265,9 +265,13 @@ export class InventoryController {
   @RequirePermissions('inventory:manage')
   @Patch('ingredient-categories/bulk/core-status')
   setCoreIngredientCategoriesStatus(
+    @CurrentUser() user: JwtUser,
     @Body() dto: UpdateCoreIngredientCategoriesDto,
   ) {
-    return this.inventory.setCoreIngredientCategoriesActive(dto.isActive);
+    return this.inventory.setCoreIngredientCategoriesActive(
+      user.organizationId,
+      dto.isActive,
+    );
   }
 
   @ApiOperation({ summary: 'Listar ubicaciones de ingredientes (core + personalizadas)' })

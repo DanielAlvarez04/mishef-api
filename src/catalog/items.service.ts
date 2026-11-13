@@ -986,7 +986,7 @@ export class ItemsService {
     // artículo ni receta, junto con su objeto de R2.
     await Promise.all(
       items.map((item) =>
-        this.catalogEntries.deleteIfOrphan(item.catalogEntryId),
+        this.catalogEntries.deleteIfOrphan(item.catalogEntryId, organizationId),
       ),
     );
 
@@ -1654,8 +1654,8 @@ export class ItemsService {
           })
         : [],
       itemId
-        ? this.prisma.item.findUnique({
-            where: { id: itemId },
+        ? this.prisma.item.findFirst({
+            where: { id: itemId, organizationId },
             select: { catalogEntryId: true },
           })
         : null,

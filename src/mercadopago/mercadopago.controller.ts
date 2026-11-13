@@ -18,7 +18,12 @@ import { ConfigService } from '@nestjs/config';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Response, Request } from 'express';
-import { createHash, randomBytes } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} from 'node:crypto';
 
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -38,33 +43,6 @@ interface OAuthCookie {
   verifier: string;
   organizationId: string;
   userId: string;
-}
-
-function encodeCookie(payload: OAuthCookie): string {
-  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
-}
-
-function decodeCookie(value: string | undefined): OAuthCookie | null {
-  if (!value) return null;
-
-  try {
-    const parsed = JSON.parse(
-      Buffer.from(value, 'base64url').toString('utf8'),
-    ) as Partial<OAuthCookie>;
-
-    if (
-      typeof parsed.state !== 'string' ||
-      typeof parsed.verifier !== 'string' ||
-      typeof parsed.organizationId !== 'string' ||
-      typeof parsed.userId !== 'string'
-    ) {
-      return null;
-    }
-
-    return parsed as OAuthCookie;
-  } catch {
-    return null;
-  }
 }
 
 @ApiTags('mercadopago')
@@ -98,7 +76,7 @@ export class MercadoPagoController {
 
     res.cookie(
       OAUTH_COOKIE,
-      encodeCookie({
+      this.encodeCookie({
         state,
         verifier,
         organizationId,
@@ -126,7 +104,7 @@ export class MercadoPagoController {
       this.config.get<string>('WEB_ORIGIN') ?? 'http://localhost:3000'
     ).replace(/\/$/, '');
 
-    const cookie = decodeCookie(req.cookies?.[OAUTH_COOKIE]);
+    const cookie = this.decodeCookie(req.cookies?.[OAUTH_COOKIE]);
     res.clearCookie(OAUTH_COOKIE, {
       path: OAUTH_COOKIE_PATH,
       sameSite: 'lax',
@@ -227,6 +205,74 @@ export class MercadoPagoController {
       id,
       dto.operatingMode,
     );
+  }
+
+  /**
+   * La cookie viaja por el navegador y contiene la organización y el usuario,
+   * así que va firmada con HMAC: sin firma, el callback aceptaría una cookie
+   * fabricada con otra organización.
+   */
+  private encodeCookie(payload: OAuthCookie): string {
+    const body = Buffer.from(JSON.stringify(payload), 'utf8').toString(
+      'base64url',
+    );
+    const signature = createHmac('sha256', this.signingKey())
+      .update(body)
+      .digest('base64url');
+
+    return `${body}.${signature}`;
+  }
+
+  private decodeCookie(value: string | undefined): OAuthCookie | null {
+    if (!value) return null;
+
+    const [body, signature] = value.split('.');
+
+    if (!body || !signature) return null;
+
+    const expected = createHmac('sha256', this.signingKey())
+      .update(body)
+      .digest('base64url');
+    const given = Buffer.from(signature);
+    const computed = Buffer.from(expected);
+
+    if (
+      given.length !== computed.length ||
+      !timingSafeEqual(given, computed)
+    ) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(
+        Buffer.from(body, 'base64url').toString('utf8'),
+      ) as Partial<OAuthCookie>;
+
+      if (
+        typeof parsed.state !== 'string' ||
+        typeof parsed.verifier !== 'string' ||
+        typeof parsed.organizationId !== 'string' ||
+        typeof parsed.userId !== 'string'
+      ) {
+        return null;
+      }
+
+      return parsed as OAuthCookie;
+    } catch {
+      return null;
+    }
+  }
+
+  private signingKey(): string {
+    const secret = this.config.get<string>('JWT_ACCESS_SECRET');
+
+    if (!secret) {
+      throw new ServiceUnavailableException(
+        'La integración con Mercado Pago no está configurada',
+      );
+    }
+
+    return secret;
   }
 
   private organizationId(user: JwtUser): string {

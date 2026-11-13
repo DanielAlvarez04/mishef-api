@@ -267,7 +267,12 @@ export class OrdersService {
       return order;
     });
 
-    this.events.publish({ type: 'ORDER_CREATED', orderId: created.id });
+    this.events.publish({
+      type: 'ORDER_CREATED',
+      organizationId,
+      branchId: created.branchId,
+      orderId: created.id,
+    });
 
     return created;
   }
@@ -435,6 +440,8 @@ export class OrdersService {
 
     this.events.publish({
       type: 'ROUND_CREATED',
+      organizationId,
+      branchId: order.branchId,
       orderId,
       roundId: round.id,
       status: round.status,
@@ -613,6 +620,8 @@ export class OrdersService {
 
     this.events.publish({
       type: 'ROUND_UPDATED',
+      organizationId,
+      branchId: order.branchId,
       orderId,
       roundId,
       status: dto.status,
@@ -705,7 +714,12 @@ export class OrdersService {
       });
     });
 
-    this.events.publish({ type: 'ORDER_CANCELLED', orderId });
+    this.events.publish({
+      type: 'ORDER_CANCELLED',
+      organizationId,
+      branchId: order.branchId,
+      orderId,
+    });
 
     return this.get(organizationId, orderId);
   }

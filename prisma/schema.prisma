@@ -178,6 +178,12 @@ model Organization {
   useCoreSuggestions  Boolean  @default(true)
   /// Mostrar/activar los grupos de opciones core sugeridos en el editor de artículos.
   useCoreOptionGroups Boolean  @default(true)
+  /// Mostrar/activar las categorías core de artículos sugeridas.
+  useCoreCategories   Boolean  @default(true)
+  /// Mostrar/activar las categorías core de recetas sugeridas.
+  useCoreRecipeCategories Boolean @default(true)
+  /// Mostrar/activar las categorías core de insumos sugeridas.
+  useCoreIngredientCategories Boolean @default(true)
 
   memberships          Membership[]
   branches             Branch[]

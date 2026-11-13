@@ -257,6 +257,21 @@ export class UsersService {
       await this.assertNotLastActiveAdmin(organizationId, membership);
     }
 
+    // La contraseña es global de la cuenta (`User`), no de la membresía. Un
+    // administrador solo puede fijarla si el usuario pertenece únicamente a su
+    // negocio; si no, podría tomar la cuenta en otra organización.
+    if (dto.password) {
+      const otherMemberships = await this.prisma.membership.count({
+        where: { userId, organizationId: { not: organizationId } },
+      });
+
+      if (otherMemberships > 0) {
+        throw new BadRequestException(
+          'Este usuario también pertenece a otro negocio: solo puede cambiar su contraseña desde su propia cuenta',
+        );
+      }
+    }
+
     const passwordHash = dto.password ? await hash(dto.password) : undefined;
     const branchId =
       dto.branchId !== undefined

@@ -610,7 +610,12 @@ export class PaymentsService {
       });
     });
 
-    this.events.publish({ type: 'ORDER_CLOSED', orderId });
+    this.events.publish({
+      type: 'ORDER_CLOSED',
+      organizationId,
+      branchId: order.branchId,
+      orderId,
+    });
 
     return updated;
   }

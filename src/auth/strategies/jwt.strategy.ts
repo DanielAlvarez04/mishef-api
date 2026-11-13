@@ -77,6 +77,15 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       throw new UnauthorizedException('Usuario sin membresía activa');
     }
 
+    // Fail-closed: sin organización no hay forma de acotar los datos, y un
+    // filtro `organizationId: null` en Prisma deja de filtrar. Ningún flujo
+    // normal crea membresías sin negocio.
+    if (!membership.organizationId) {
+      throw new UnauthorizedException(
+        'Tu cuenta no está vinculada a un negocio',
+      );
+    }
+
     return {
       sub: session.user.id,
       email: session.user.email,

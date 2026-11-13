@@ -18,28 +18,48 @@ export class CategoriesService {
     includeInactive = false,
     kind: CategoryKind = CategoryKind.ARTICLE,
   ) {
+    // Las categorías core son filas compartidas entre organizaciones, así que
+    // su visibilidad es una preferencia del negocio, no un cambio en la fila.
+    const coreEnabled = await this.coreGroupEnabled(organizationId, kind);
+
     const categories = await this.prisma.category.findMany({
       where: {
         kind,
-        // Categorías propias + core globales.
-        OR: [{ organizationId }, { organizationId: null, isCore: true }],
-        ...(includeInactive ? {} : { isActive: true }),
+        OR: [
+          {
+            organizationId,
+            ...(includeInactive ? {} : { isActive: true }),
+          },
+          ...(includeInactive || coreEnabled
+            ? [{ organizationId: null, isCore: true }]
+            : []),
+        ],
       },
       include:
         kind === CategoryKind.RECIPE
-          ? { _count: { select: { recipes: true } } }
-          : { _count: { select: { items: true } } },
+          ? {
+              // El conteo también se limita al negocio: el `_count` sin filtro
+              // sumaría artículos o recetas de otras organizaciones.
+              _count: { select: { recipes: { where: { organizationId } } } },
+            }
+          : {
+              _count: { select: { items: { where: { organizationId } } } },
+            },
     });
 
-    // Alfabético (es) y las opciones "Otra/Otro…" al final.
-    return categories.sort((a, b) => {
-      const aOther = isOtherCategory(a);
-      const bOther = isOtherCategory(b);
+    return categories
+      .map((category) =>
+        category.isCore ? { ...category, isActive: coreEnabled } : category,
+      )
+      .sort((a, b) => {
+        // Alfabético (es) y las opciones "Otra/Otro…" al final.
+        const aOther = isOtherCategory(a);
+        const bOther = isOtherCategory(b);
 
-      if (aOther !== bOther) return aOther ? 1 : -1;
+        if (aOther !== bOther) return aOther ? 1 : -1;
 
-      return a.name.localeCompare(b.name, 'es', { sensitivity: 'base' });
-    });
+        return a.name.localeCompare(b.name, 'es', { sensitivity: 'base' });
+      });
   }
 
   async create(organizationId: string | null, dto: CreateCategoryDto) {
@@ -148,45 +168,96 @@ export class CategoriesService {
   }
 
   /**
-   * Activa o desactiva todas las categorías core de un tipo.
+   * Activa o desactiva todas las categorías core de un tipo **para el negocio
+   * actual**.
    *
-   * Al desactivar se limpia la categoría de todos los artículos (o recetas)
-   * que usen alguna categoría core de ese tipo.
+   * Las categorías core son filas globales compartidas: no se tocan. La
+   * preferencia se guarda en la organización y, al desactivar, solo se limpia
+   * la categoría de los artículos o recetas de esa organización.
    */
-  async setCoreGroupActive(kind: CategoryKind, isActive: boolean) {
+  async setCoreGroupActive(
+    organizationId: string | null,
+    kind: CategoryKind,
+    isActive: boolean,
+  ) {
+    if (!organizationId) {
+      throw new BadRequestException(
+        'Selecciona un negocio para cambiar las categorías',
+      );
+    }
+
+    const organization = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { useCoreCategories: true, useCoreRecipeCategories: true },
+    });
+
+    if (!organization) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    const enabled =
+      kind === CategoryKind.RECIPE
+        ? organization.useCoreRecipeCategories
+        : organization.useCoreCategories;
+
+    if (enabled === isActive) {
+      return { ok: true, updated: 0 };
+    }
+
     const categories = await this.prisma.category.findMany({
       where: { organizationId: null, isCore: true, kind },
       select: { id: true },
     });
 
-    if (categories.length === 0) {
-      return { ok: true, updated: 0 };
-    }
-
     const ids = categories.map((category) => category.id);
 
     return this.prisma.$transaction(async (tx) => {
-      if (!isActive) {
-        if (kind === CategoryKind.RECIPE) {
-          await tx.recipe.updateMany({
-            where: { categoryId: { in: ids } },
-            data: { categoryId: null },
-          });
-        } else {
-          await tx.item.updateMany({
-            where: { categoryId: { in: ids } },
-            data: { categoryId: null },
-          });
-        }
+      let detached = 0;
+
+      if (!isActive && ids.length > 0) {
+        const result =
+          kind === CategoryKind.RECIPE
+            ? await tx.recipe.updateMany({
+                where: { organizationId, categoryId: { in: ids } },
+                data: { categoryId: null },
+              })
+            : await tx.item.updateMany({
+                where: { organizationId, categoryId: { in: ids } },
+                data: { categoryId: null },
+              });
+
+        detached = result.count;
       }
 
-      const result = await tx.category.updateMany({
-        where: { id: { in: ids } },
-        data: { isActive },
+      await tx.organization.update({
+        where: { id: organizationId },
+        data:
+          kind === CategoryKind.RECIPE
+            ? { useCoreRecipeCategories: isActive }
+            : { useCoreCategories: isActive },
       });
 
-      return { ok: true, updated: result.count };
+      return { ok: true, updated: detached };
     });
+  }
+
+  /** Preferencia del negocio sobre las categorías core del tipo indicado. */
+  private async coreGroupEnabled(
+    organizationId: string | null,
+    kind: CategoryKind,
+  ) {
+    if (!organizationId) return true;
+
+    const organization = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { useCoreCategories: true, useCoreRecipeCategories: true },
+    });
+
+    if (!organization) return false;
+
+    return kind === CategoryKind.RECIPE
+      ? organization.useCoreRecipeCategories
+      : organization.useCoreCategories;
   }
 
   private async find(organizationId: string | null, id: string) {

@@ -152,8 +152,8 @@ export class CatalogEntriesService {
       );
     }
 
-    const entry = await this.prisma.catalogEntry.findUnique({
-      where: { id: entryId },
+    const entry = await this.prisma.catalogEntry.findFirst({
+      where: { id: entryId, organizationId },
       select: { id: true, imageKey: true },
     });
 
@@ -320,8 +320,8 @@ export class CatalogEntriesService {
 
     const entryId =
       item.catalogEntryId ?? (await this.ensureForItem(organizationId, item.id));
-    const entry = await this.prisma.catalogEntry.findUnique({
-      where: { id: entryId },
+    const entry = await this.prisma.catalogEntry.findFirst({
+      where: { id: entryId, organizationId },
       select: { imageKey: true },
     });
 
@@ -394,11 +394,17 @@ export class CatalogEntriesService {
    * Borra la entrada y su objeto cuando ya no la referencia ningún artículo
    * ni receta. Si todavía queda alguno, no hace nada.
    */
-  async deleteIfOrphan(entryId: string | null | undefined): Promise<void> {
+  async deleteIfOrphan(
+    entryId: string | null | undefined,
+    organizationId?: string | null,
+  ): Promise<void> {
     if (!entryId) return;
 
-    const entry = await this.prisma.catalogEntry.findUnique({
-      where: { id: entryId },
+    const entry = await this.prisma.catalogEntry.findFirst({
+      where: {
+        id: entryId,
+        ...(organizationId ? { organizationId } : {}),
+      },
       select: {
         imageKey: true,
         _count: { select: { items: true, recipes: true } },
@@ -409,7 +415,16 @@ export class CatalogEntriesService {
     if (entry._count.items > 0 || entry._count.recipes > 0) return;
 
     try {
-      await this.prisma.catalogEntry.delete({ where: { id: entryId } });
+      const removed = await this.prisma.catalogEntry.deleteMany({
+        where: {
+          id: entryId,
+          ...(organizationId ? { organizationId } : {}),
+        },
+      });
+
+      // Otra organización no debe poder borrar esta entrada: si el `where`
+      // acotado no coincidió, no se toca la imagen.
+      if (removed.count === 0) return;
     } catch {
       // Apareció una referencia entre la consulta y el borrado: se conserva.
       return;

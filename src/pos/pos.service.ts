@@ -65,7 +65,9 @@ export class PosService {
       }
     }
 
-    const code = randomBytes(4).toString('hex').toUpperCase();
+    // 64 bits: el código se muestra y se teclea, pero 32 bits eran adivinables
+    // con el throttling del endpoint.
+    const code = randomBytes(8).toString('hex').toUpperCase();
     const expiresAt = new Date(Date.now() + PAIRING_TTL_MS);
 
     await this.prisma.posPairing.create({
