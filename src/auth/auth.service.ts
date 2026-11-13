@@ -32,6 +32,12 @@ export interface JwtUser {
   roles: Role[];
   organizationId: string | null;
   sid: string;
+  /**
+   * Sucursal fija de la membresía (empleados asignados a un local). Se resuelve
+   * al validar el token para no volver a consultar la membresía en cada
+   * petición. `null` = puede operar en cualquier sucursal de la organización.
+   */
+  branchId?: string | null;
 }
 
 export interface RefreshPayload {

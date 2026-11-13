@@ -1065,6 +1065,7 @@ model Order {
   payments     Payment[]
   guests       OrderGuest[]
 
+  @@index([organizationId, createdAt])
   @@index([organizationId, status, createdAt])
   @@index([branchId, status, createdAt])
   @@index([branchId, createdAt])
@@ -1256,7 +1257,9 @@ model Payment {
   session      CashSession?  @relation(fields: [sessionId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, status, createdAt])
+  @@index([organizationId, status, confirmedAt])
   @@index([branchId, createdAt])
+  @@index([branchId, status, confirmedAt])
   @@index([orderId])
   @@index([provider, providerStatus])
   @@index([sessionId])

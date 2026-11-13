@@ -7,6 +7,7 @@ import {
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { isEmptyPatch, sameJson } from '../common/patch';
+import { globalMenuIsFresh, markGlobalMenuSynced } from './global-menu-cache';
 import {
   CreateMenuDto,
   MenuItemInputDto,
@@ -117,6 +118,12 @@ export class MenusService {
    */
   async ensureGlobalMenu(organizationId: string | null): Promise<void> {
     if (!organizationId) return;
+
+    // Lecturas seguidas del POS no repiten la sincronización: el contenido solo
+    // cambia con mutaciones del catálogo, que invalidan esta marca.
+    if (globalMenuIsFresh(organizationId)) return;
+
+    markGlobalMenuSynced(organizationId);
 
     const existing = await this.prisma.menu.findFirst({
       where: {

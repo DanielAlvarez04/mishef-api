@@ -6,6 +6,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import helmet from 'helmet';
+import compression from 'compression';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 import { swaggerBasicAuth } from './common/swagger-basic-auth';
@@ -45,6 +46,10 @@ async function bootstrap() {
     origin: process.env.WEB_ORIGIN || 'http://localhost:3000',
     credentials: true,
   });
+
+  // Las respuestas grandes (catálogo, menús, dashboard) son JSON y se
+  // benefician mucho de gzip. El umbral evita comprimir respuestas diminutas.
+  app.use(compression({ threshold: 1024 }));
 
   app.use(cookieParser());
 

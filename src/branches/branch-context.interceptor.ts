@@ -1,7 +1,6 @@
 import {
   CallHandler,
   ExecutionContext,
-  ForbiddenException,
   Injectable,
   NestInterceptor,
 } from '@nestjs/common';
@@ -12,6 +11,7 @@ interface RequestWithUser {
   user?: {
     sub: string;
     organizationId: string | null;
+    branchId?: string | null;
   };
   headers: Record<string, string | string[] | undefined>;
   branchId?: string | null;
@@ -52,24 +52,14 @@ export class BranchContextInterceptor implements NestInterceptor {
     }
 
     const organizationId = request.user.organizationId;
-    const membership = await this.prisma.membership.findUnique({
-      where: {
-        userId_organizationId: {
-          userId: request.user.sub,
-          organizationId,
-        },
-      },
-      select: { isActive: true, branchId: true },
-    });
 
-    if (!membership?.isActive) {
-      throw new ForbiddenException('Tu acceso a la organización está inactivo');
-    }
-
-    // Quien está asignado a una sucursal opera siempre dentro de ella, aunque
-    // borre la cookie o pida el consolidado.
-    if (membership.branchId) {
-      request.branchId = membership.branchId;
+    // La membresía ya se validó al autenticar (`JwtStrategy.validate`), que
+    // además deja aquí la sucursal fija del empleado. Con eso se evita una
+    // consulta a `Membership` en cada petición autenticada.
+    if (request.user.branchId) {
+      // Quien está asignado a una sucursal opera siempre dentro de ella, aunque
+      // borre la cookie o pida el consolidado.
+      request.branchId = request.user.branchId;
       return next.handle();
     }
 

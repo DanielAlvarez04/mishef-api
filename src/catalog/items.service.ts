@@ -46,6 +46,7 @@ import {
   ItemOptionGroupInputDto,
 } from './dto/option.dto';
 import { isNoPriceOptionGroup } from './option-presets';
+import { invalidateGlobalMenu } from './global-menu-cache';
 
 const itemListInclude = {
   catalogEntry: {
@@ -232,6 +233,12 @@ export interface ItemFilters {
   /** Incluye artículos archivados (borradores de recetas). */
   includeArchived?: boolean;
   onlyCombos?: boolean;
+  /**
+   * Paginación opcional. Sin `limit` se mantiene el comportamiento histórico
+   * (todo el catálogo), que es lo que necesitan el POS y los selectores.
+   */
+  limit?: number;
+  offset?: number;
 }
 
 @Injectable()
@@ -270,6 +277,8 @@ export class ItemsService {
         { sortOrder: 'asc' },
         { name: 'asc' },
       ],
+      ...(filters.limit ? { take: Math.min(Math.max(filters.limit, 1), 500) } : {}),
+      ...(filters.offset ? { skip: Math.max(filters.offset, 0) } : {}),
     });
 
     return items.map((item) => this.withMenus(item));
@@ -363,6 +372,7 @@ export class ItemsService {
   }
 
   async create(organizationId: string | null, dto: CreateItemDto) {
+    invalidateGlobalMenu(organizationId);
     const name = dto.name.trim();
 
     const category = dto.categoryId
@@ -528,6 +538,7 @@ export class ItemsService {
   }
 
   async update(organizationId: string | null, id: string, dto: UpdateItemDto) {
+    invalidateGlobalMenu(organizationId);
     const item = await this.getItem(organizationId, id);
 
     const category = dto.categoryId
@@ -882,6 +893,7 @@ export class ItemsService {
   }
 
   async deactivate(organizationId: string | null, id: string) {
+    invalidateGlobalMenu(organizationId);
     const item = await this.getItem(organizationId, id);
 
     // Desactivar no borra las relaciones con menús ni combos: el artículo
@@ -903,6 +915,7 @@ export class ItemsService {
    * extras y exclusiones del artículo se eliminan en cascada.
    */
   async deleteItems(organizationId: string | null, ids: string[]) {
+    invalidateGlobalMenu(organizationId);
     const uniqueIds = [...new Set(ids.filter(Boolean))];
 
     if (uniqueIds.length === 0) {
