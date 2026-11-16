@@ -24,6 +24,7 @@ import { UploadsModule } from './uploads/uploads.module';
 import { OriginGuard } from './common/guards/origin.guard';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { AttendanceModule } from './attendance/attendance.module';
+import { WasteModule } from './waste/waste.module';
 
 @Module({
   imports: [
@@ -53,6 +54,7 @@ import { AttendanceModule } from './attendance/attendance.module';
     UploadsModule,
     AnalyticsModule,
     AttendanceModule,
+    WasteModule,
     HealthModule,
   ],
   controllers: [],

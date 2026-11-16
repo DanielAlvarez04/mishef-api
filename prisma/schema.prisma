@@ -260,6 +260,7 @@ model Organization {
   orders               Order[]
   payments             Payment[]
   inventoryMovements   InventoryMovement[]
+  wastes               Waste[]
   auditLogs            AuditLog[]
   categories           Category[]
   items                Item[]
@@ -317,6 +318,7 @@ model User {
   posPairingsCreated     PosPairing[]            @relation("PosPairingCreatedBy")
   posDisplaysCreated     PosDisplay[]            @relation("PosDisplayCreatedBy")
   shifts                 Shift[]
+  wastes                 Waste[]
 
   @@index([isActive])
 }
@@ -363,6 +365,7 @@ model Branch {
   memberships  Membership[]
   stock        BranchStock[]
   movements    InventoryMovement[]
+  wastes       Waste[]
   orders       Order[]
   payments     Payment[]
 
@@ -868,6 +871,7 @@ model Ingredient {
   optionEffects          ItemOptionEffect[]
   optionEffectsReplacing ItemOptionEffect[]          @relation("OptionEffectReplacesIngredient")
   branchStocks           BranchStock[]
+  wastes                 Waste[]
 
   @@unique([organizationId, name])
   @@unique([organizationId, sku])
@@ -1737,4 +1741,43 @@ model Shift {
   @@index([organizationId, startedAt])
   @@index([userId, startedAt])
   @@index([userId, endedAt])
+}
+/// Motivo de la merma registrada.
+enum WasteReason {
+  EXPIRED
+  DAMAGED
+  SPILL
+  OVERPRODUCTION
+  OTHER
+}
+
+/// Merma de un insumo, con costo calculado y evidencia fotográfica.
+model Waste {
+  id             String      @id @default(cuid())
+  organizationId String
+  branchId       String?
+  ingredientId   String?
+  /// Nombre del insumo en el momento del registro (snapshot).
+  ingredientName String
+  /// Cantidad en la unidad canónica del insumo.
+  quantity       Decimal     @db.Decimal(12, 4)
+  /// Unidad visible con la que se capturó.
+  displayUnit    UnitCode
+  reason         WasteReason
+  note           String?
+  /// Costo de la merma (cantidad canónica × costo del insumo).
+  cost           Decimal     @db.Decimal(12, 2)
+  photoKey       String?
+  photoUrl       String?
+  userId         String?
+  createdAt      DateTime    @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  ingredient   Ingredient?  @relation(fields: [ingredientId], references: [id], onDelete: SetNull)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([branchId, createdAt])
+  @@index([ingredientId])
 }
