@@ -15,6 +15,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { IngredientQuantitiesService } from './ingredient-quantities.service';
 import { fromCanonicalQuantity, toCanonicalQuantity, toMoney } from '../common/units';
 import { isEmptyPatch, sameDecimal } from '../common/patch';
+import { computeFoodCost } from '../common/food-cost';
 import { alphabetSuffix, categoryInitials } from '../common/sku';
 import { CatalogEntriesService } from './catalog-entries.service';
 import { deleteR2Object } from '../uploads/r2';
@@ -328,80 +329,12 @@ export class ItemsService {
       orderBy: { name: 'asc' },
     });
 
-    const round2 = (value: number) =>
-      Math.round((value + Number.EPSILON) * 100) / 100;
-    const round4 = (value: number) =>
-      Math.round((value + Number.EPSILON) * 10000) / 10000;
-
-    const rows = items.map((item) => {
-      // Receta base del artículo; si solo hay recetas por variante, se usa la
-      // primera como referencia.
-      const recipe =
-        item.recipes.find((candidate) => candidate.variantId === null) ??
-        item.recipes[0];
-
-      let cost = 0;
-      const missing: string[] = [];
-
-      if (recipe) {
-        for (const line of recipe.ingredients) {
-          if (line.isOptional) continue;
-
-          const unitCost = line.ingredient.unitCost;
-
-          if (!unitCost || Number(unitCost) <= 0) {
-            missing.push(line.ingredient.name);
-            continue;
-          }
-
-          cost += Number(line.quantity) * Number(unitCost);
-        }
-      }
-
-      const price = Number(item.price);
-      const taxRate = item.taxRate ? Number(item.taxRate) : 0;
-      const netPrice = taxRate > 0 ? price / (1 + taxRate) : price;
-
-      const hasRecipe = Boolean(recipe);
-      const complete = hasRecipe && missing.length === 0 && cost > 0;
-      const foodCostPct = netPrice > 0 ? cost / netPrice : 0;
-
-      return {
-        id: item.id,
-        name: item.name,
-        isCombo: item.isCombo,
-        price: round2(price),
-        netPrice: round2(netPrice),
-        cost: round2(cost),
-        foodCostPct: round4(foodCostPct),
-        margin: round2(netPrice - cost),
-        marginPct: round4(1 - foodCostPct),
-        hasRecipe,
-        missing,
-        complete,
-        aboveTarget: complete && foodCostPct > target,
-      };
-    });
-
-    const costed = rows.filter((row) => row.complete);
+    const computed = computeFoodCost(items, target);
 
     return {
       target,
-      items: rows,
-      summary: {
-        items: rows.length,
-        withRecipe: rows.filter((row) => row.hasRecipe).length,
-        withoutRecipe: rows.filter((row) => !row.hasRecipe).length,
-        incomplete: rows.filter((row) => row.hasRecipe && !row.complete)
-          .length,
-        aboveTarget: rows.filter((row) => row.aboveTarget).length,
-        averageFoodCostPct: costed.length
-          ? round4(
-              costed.reduce((sum, row) => sum + row.foodCostPct, 0) /
-                costed.length,
-            )
-          : null,
-      },
+      items: computed.items,
+      summary: computed.summary,
     };
   }
 

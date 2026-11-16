@@ -12,6 +12,8 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { fromCanonicalQuantity } from '../common/units';
 import { rolesHavePermission } from '../common/permissions';
+import { computeFoodCost } from '../common/food-cost';
+import { MIN_COHORT, buildBenchmarkMetric } from '../common/benchmark';
 
 const ACTIVE_ROUNDS = [
   OrderRoundStatus.PENDING,
@@ -565,6 +567,174 @@ export class DashboardService {
       users: flagged,
       ordersWithoutPayment: ordersWithoutPayment.slice(0, 50),
       discounts: discounts.slice(0, 50),
+    };
+  }
+
+  /**
+   * Benchmark anónimo contra negocios similares.
+   *
+   * Compara tres métricas del negocio con los percentiles del grupo. Nunca
+   * devuelve datos de otra organización: solo agregados y siempre con un
+   * mínimo de negocios para que no se pueda deducir a quién pertenece un valor.
+   */
+  async benchmark(organizationId: string | null, days = 30) {
+    const periodDays = Math.min(365, Math.max(1, Math.trunc(days)));
+    const from = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000);
+    const to = new Date();
+
+    if (!organizationId) {
+      return {
+        available: false,
+        reason: 'no_organization' as const,
+        period: { from: from.toISOString(), to: to.toISOString(), days: periodDays },
+        cohort: null,
+        metrics: [],
+      };
+    }
+
+    const current = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { businessType: true },
+    });
+
+    if (!current) {
+      return {
+        available: false,
+        reason: 'no_organization' as const,
+        period: { from: from.toISOString(), to: to.toISOString(), days: periodDays },
+        cohort: null,
+        metrics: [],
+      };
+    }
+
+    const organizations = await this.prisma.organization.findMany({
+      where: {
+        isActive: true,
+        ...(current.businessType
+          ? { businessType: current.businessType }
+          : {}),
+      },
+      select: { id: true },
+      take: 200,
+    });
+
+    const rows = await Promise.all(
+      organizations.map((organization) =>
+        this.organizationBenchmark(organization.id, from, to, periodDays),
+      ),
+    );
+
+    const valid = rows.filter((row) => row.orders > 0);
+    const mine = valid.find((row) => row.organizationId === organizationId);
+
+    const foodCosts = valid
+      .map((row) => row.foodCostPct)
+      .filter((value): value is number => value !== null);
+
+    const cohort = {
+      businessType: current.businessType,
+      organizations: valid.length,
+      minimum: MIN_COHORT,
+    };
+
+    if (valid.length < MIN_COHORT) {
+      return {
+        available: false,
+        reason: 'insufficient_cohort' as const,
+        period: { from: from.toISOString(), to: to.toISOString(), days: periodDays },
+        cohort,
+        metrics: [],
+      };
+    }
+
+    const metrics = [
+      buildBenchmarkMetric({
+        key: 'averageTicket',
+        label: 'Ticket promedio',
+        betterWhen: 'higher',
+        mine: mine?.averageTicket ?? null,
+        cohort: valid.map((row) => row.averageTicket),
+      }),
+      buildBenchmarkMetric({
+        key: 'foodCostPct',
+        label: 'Food cost',
+        betterWhen: 'lower',
+        mine: mine?.foodCostPct ?? null,
+        cohort: foodCosts,
+      }),
+      buildBenchmarkMetric({
+        key: 'rotation',
+        label: 'Rotación (cuentas por día)',
+        betterWhen: 'higher',
+        mine: mine?.rotation ?? null,
+        cohort: valid.map((row) => row.rotation),
+      }),
+    ].filter((metric): metric is NonNullable<typeof metric> => Boolean(metric));
+
+    return {
+      available: true,
+      reason: null,
+      period: { from: from.toISOString(), to: to.toISOString(), days: periodDays },
+      cohort,
+      metrics,
+    };
+  }
+
+  private async organizationBenchmark(
+    organizationId: string,
+    from: Date,
+    to: Date,
+    periodDays: number,
+  ) {
+    const [payments, orders, items] = await Promise.all([
+      this.prisma.payment.aggregate({
+        where: {
+          organizationId,
+          status: PaymentStatus.CONFIRMED,
+          confirmedAt: { gte: from, lte: to },
+        },
+        _sum: { amount: true },
+      }),
+      this.prisma.order.count({
+        where: {
+          organizationId,
+          status: OrderStatus.CLOSED,
+          createdAt: { gte: from, lte: to },
+        },
+      }),
+      this.prisma.item.findMany({
+        where: { organizationId, isActive: true, isArchived: false },
+        select: {
+          id: true,
+          name: true,
+          price: true,
+          taxRate: true,
+          isCombo: true,
+          recipes: {
+            select: {
+              variantId: true,
+              ingredients: {
+                select: {
+                  quantity: true,
+                  isOptional: true,
+                  ingredient: { select: { name: true, unitCost: true } },
+                },
+              },
+            },
+          },
+        },
+      }),
+    ]);
+
+    const revenue = Number(payments._sum.amount ?? 0);
+    const { summary } = computeFoodCost(items, 0.35);
+
+    return {
+      organizationId,
+      orders,
+      averageTicket: orders > 0 ? revenue / orders : 0,
+      foodCostPct: summary.averageFoodCostPct,
+      rotation: orders / periodDays,
     };
   }
 

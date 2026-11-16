@@ -42,6 +42,19 @@ export class DashboardController {
     );
   }
 
+  @ApiOperation({ summary: 'Benchmark anónimo contra negocios similares' })
+  @RequirePermissions('reports:read')
+  @Get('reports/benchmark')
+  benchmark(
+    @CurrentUser() user: JwtUser,
+    @Query('days') days?: string,
+  ) {
+    return this.dashboard.benchmark(
+      user.organizationId,
+      days ? parseDays(days) : 30,
+    );
+  }
+
   @ApiOperation({ summary: 'Señales de fuga interna del periodo' })
   @RequirePermissions('reports:read')
   @Get('reports/leakage')
