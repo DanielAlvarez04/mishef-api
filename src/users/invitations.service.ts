@@ -83,7 +83,7 @@ export class InvitationsService {
 
     const organization = await this.prisma.organization.findUnique({
       where: { id: organizationId },
-      select: { name: true, slug: true },
+      select: { name: true, slug: true, brandColor: true },
     });
 
     if (!organization) {
@@ -111,6 +111,7 @@ export class InvitationsService {
     });
 
     const link = this.link(token);
+    const accent = organization.brandColor ?? '#e2703a';
 
     await this.mail.send({
       to: email,
@@ -131,7 +132,7 @@ export class InvitationsService {
           </p>
           <p style="margin:24px 0">
             <a href="${link}"
-               style="background:#e2703a;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600">
+               style="background:${accent};color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600">
               Aceptar invitación
             </a>
           </p>

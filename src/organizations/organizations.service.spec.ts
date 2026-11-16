@@ -196,4 +196,56 @@ describe('OrganizationsService', () => {
       available: true,
     });
   });
+
+  it('guarda color, logo, dirección y coordenadas del negocio', async () => {
+    const { service, prisma } = createMocks();
+    prisma.organization.findUnique.mockResolvedValue({
+      id: 'org-1',
+      name: 'Café Central',
+      slug: 'cafe-central',
+      domain: null,
+      brandColor: null,
+      logoUrl: null,
+      address: null,
+      latitude: null,
+      longitude: null,
+    });
+    prisma.organization.update.mockResolvedValue({
+      id: 'org-1',
+      name: 'Café Central',
+      slug: 'cafe-central',
+      domain: null,
+      brandColor: '#123456',
+      logoUrl: 'https://img.mishef.co/logo.png',
+      address: 'Av. Reforma 123',
+      latitude: 19.4326077,
+      longitude: -99.133208,
+      taxRate: 0.16,
+      currency: 'MXN',
+      isActive: true,
+      businessType: null,
+      serviceTypes: [],
+      goals: [],
+      hasBranches: false,
+      useCoreSuggestions: true,
+      practiceMode: false,
+      practiceUntil: null,
+    });
+
+    await service.update('org-1', {
+      brandColor: '#123456',
+      logoUrl: 'https://img.mishef.co/logo.png',
+      address: 'Av. Reforma 123',
+      latitude: 19.4326077,
+      longitude: -99.133208,
+    });
+
+    const data = prisma.organization.update.mock.calls[0][0].data;
+
+    expect(data.brandColor).toBe('#123456');
+    expect(data.logoUrl).toBe('https://img.mishef.co/logo.png');
+    expect(data.address).toBe('Av. Reforma 123');
+    expect(data.latitude.toString()).toBe('19.4326077');
+    expect(data.longitude.toString()).toBe('-99.133208');
+  });
 });

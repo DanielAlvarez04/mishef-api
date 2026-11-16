@@ -210,6 +210,15 @@ model Organization {
   taxRate   Decimal  @default(0.16) @db.Decimal(5, 4) // IVA por defecto del negocio (0.16 = 16 %)
   /// Código ISO 4217 de la moneda del negocio (ver `src/common/currency.ts`).
   currency  String   @default("MXN")
+  /// Color primario de la marca en formato `#rrggbb`. `null` = tema por defecto.
+  brandColor String?
+  /// URL pública del logo (R2). `null` = icono genérico.
+  logoUrl   String?
+  /// Dirección escrita del negocio (para el ticket y el menú público).
+  address   String?
+  /// Coordenadas del negocio. Sirven para el mapa y las funciones por cercanía.
+  latitude  Decimal? @db.Decimal(10, 7)
+  longitude Decimal? @db.Decimal(10, 7)
   isActive  Boolean  @default(true)
   /// Modo práctica: no se registra analítica de operación mientras esté activo.
   practiceMode  Boolean   @default(false)

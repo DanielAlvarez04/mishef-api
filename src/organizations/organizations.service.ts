@@ -43,6 +43,11 @@ export class OrganizationsService {
       domain: organization.domain,
       taxRate: organization.taxRate?.toString() ?? '0.16',
       currency: organization.currency ?? 'MXN',
+      brandColor: organization.brandColor ?? null,
+      logoUrl: organization.logoUrl ?? null,
+      address: organization.address ?? null,
+      latitude: organization.latitude?.toString() ?? null,
+      longitude: organization.longitude?.toString() ?? null,
       isActive: organization.isActive,
       useCoreSuggestions: organization.useCoreSuggestions ?? true,
       practiceMode: organization.practiceMode,
@@ -143,14 +148,31 @@ export class OrganizationsService {
 
     const organization = await this.prisma.organization.findUnique({
       where: { slug },
-      select: { name: true, slug: true, isActive: true },
+      select: {
+        name: true,
+        slug: true,
+        isActive: true,
+        brandColor: true,
+        logoUrl: true,
+        address: true,
+        latitude: true,
+        longitude: true,
+      },
     });
 
     if (!organization || !organization.isActive) {
       throw new NotFoundException('Negocio no encontrado');
     }
 
-    return { name: organization.name, slug: organization.slug };
+    return {
+      name: organization.name,
+      slug: organization.slug,
+      brandColor: organization.brandColor ?? null,
+      logoUrl: organization.logoUrl ?? null,
+      address: organization.address ?? null,
+      latitude: organization.latitude?.toString() ?? null,
+      longitude: organization.longitude?.toString() ?? null,
+    };
   }
 
   async update(organizationId: string | null, dto: UpdateOrganizationDto) {
@@ -171,6 +193,11 @@ export class OrganizationsService {
       domain?: string;
       taxRate?: Prisma.Decimal;
       currency?: string;
+      brandColor?: string | null;
+      logoUrl?: string | null;
+      address?: string | null;
+      latitude?: Prisma.Decimal | null;
+      longitude?: Prisma.Decimal | null;
       businessType?: string;
       serviceTypes?: string[];
       goals?: string[];
@@ -222,6 +249,41 @@ export class OrganizationsService {
 
     if (dto.businessType !== undefined && dto.businessType !== current.businessType) {
       data.businessType = dto.businessType;
+    }
+
+    if (dto.brandColor !== undefined) {
+      const brandColor = dto.brandColor.trim().toLowerCase();
+      if (brandColor !== (current.brandColor ?? null)) {
+        data.brandColor = brandColor;
+      }
+    }
+
+    if (dto.logoUrl !== undefined) {
+      const logoUrl = dto.logoUrl.trim();
+      if (logoUrl !== (current.logoUrl ?? null)) {
+        data.logoUrl = logoUrl || null;
+      }
+    }
+
+    if (dto.address !== undefined) {
+      const address = dto.address.trim();
+      if (address !== (current.address ?? null)) {
+        data.address = address || null;
+      }
+    }
+
+    if (dto.latitude !== undefined) {
+      const latitude = new Prisma.Decimal(dto.latitude);
+      if (!sameDecimal(latitude, current.latitude)) {
+        data.latitude = latitude;
+      }
+    }
+
+    if (dto.longitude !== undefined) {
+      const longitude = new Prisma.Decimal(dto.longitude);
+      if (!sameDecimal(longitude, current.longitude)) {
+        data.longitude = longitude;
+      }
     }
 
     if (
@@ -280,6 +342,11 @@ export class OrganizationsService {
       domain: organization.domain,
       taxRate: organization.taxRate?.toString() ?? '0.16',
       currency: organization.currency ?? 'MXN',
+      brandColor: organization.brandColor ?? null,
+      logoUrl: organization.logoUrl ?? null,
+      address: organization.address ?? null,
+      latitude: organization.latitude?.toString() ?? null,
+      longitude: organization.longitude?.toString() ?? null,
       isActive: organization.isActive,
       businessType: organization.businessType,
       serviceTypes: organization.serviceTypes,
