@@ -33,7 +33,7 @@ const dryRun = !args.has('--apply');
 const keepSource = args.has('--keep-source');
 const pruneOrphans = args.has('--prune-orphans');
 
-const bucket = process.env.R2_BUCKET || 'sazona-public';
+const bucket = process.env.R2_BUCKET || 'mishef-public';
 const publicBase = (process.env.R2_PUBLIC_BASE_URL || '').replace(/\/+$/, '');
 
 if (!publicBase) {

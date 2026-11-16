@@ -60,7 +60,7 @@ function requiredEnv(name: string): string {
 }
 
 export function r2Bucket(): string {
-  return process.env.R2_BUCKET || 'sazona-public';
+  return process.env.R2_BUCKET || 'mishef-public';
 }
 
 /** URL pública del bucket, sin barra final. */
