@@ -19,6 +19,7 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { OrganizationsService } from './organizations.service';
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
 import { SetDomainDto } from './dto/set-domain.dto';
+import { ChangeSlugDto } from './dto/change-slug.dto';
 
 @ApiTags('organizations')
 @Controller('organizations')
@@ -44,6 +45,17 @@ export class OrganizationsController {
   @Patch('current')
   update(@CurrentUser() user: JwtUser, @Body() dto: UpdateOrganizationDto) {
     return this.organizations.update(user.organizationId, dto);
+  }
+
+  @ApiOperation({ summary: 'Cambiar la dirección del negocio (una vez)' })
+  @RequirePermissions('organization:manage')
+  @Patch('slug')
+  changeSlug(@CurrentUser() user: JwtUser, @Body() dto: ChangeSlugDto) {
+    return this.organizations.changeSlug(
+      user.organizationId,
+      user.sub,
+      dto.slug,
+    );
   }
 
   @ApiOperation({ summary: 'Conectar un dominio propio (queda pendiente)' })

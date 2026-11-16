@@ -215,6 +215,9 @@ model Organization {
   domainProviderId String?
   /// El plan contratado incluye dominio propio.
   customDomainEnabled Boolean @default(false)
+  /// Cuántas veces el negocio cambió su dirección (máximo 1).
+  slugChanges Int @default(0)
+  slugAliases SlugAlias[]
   taxRate   Decimal  @default(0.16) @db.Decimal(5, 4) // IVA por defecto del negocio (0.16 = 16 %)
   /// Código ISO 4217 de la moneda del negocio (ver `src/common/currency.ts`).
   currency  String   @default("MXN")
@@ -1784,4 +1787,18 @@ model Waste {
   @@index([organizationId, createdAt])
   @@index([branchId, createdAt])
   @@index([ingredientId])
+}
+/// Dirección anterior de un negocio.
+///
+/// Se conserva para que los enlaces y QR ya impresos sigan funcionando: el
+/// resolver busca primero la organización y, si no existe, este alias, y la web
+/// redirige 301 a la dirección nueva.
+model SlugAlias {
+  slug           String   @id
+  organizationId String
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
 }

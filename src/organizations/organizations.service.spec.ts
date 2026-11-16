@@ -20,7 +20,17 @@ function createMocks() {
       findFirst: jest.fn(),
       update: jest.fn(),
     },
+    user: { findUnique: jest.fn() },
+    slugAlias: {
+      findUnique: jest.fn(),
+      upsert: jest.fn(),
+      delete: jest.fn(),
+    },
+    auditLog: { create: jest.fn() },
+    $transaction: jest.fn(),
   };
+
+  prisma.$transaction.mockImplementation((fn: any) => fn(prisma));
 
   const hostnames = {
     enabled: false,

@@ -51,6 +51,7 @@ export class OrganizationsService {
       domainToken: organization.domainToken ?? null,
       domainVerifiedAt: organization.domainVerifiedAt?.toISOString() ?? null,
       customDomainEnabled: organization.customDomainEnabled ?? false,
+      slugChanges: organization.slugChanges ?? 0,
       taxRate: organization.taxRate?.toString() ?? '0.16',
       currency: organization.currency ?? 'MXN',
       brandColor: organization.brandColor ?? null,
@@ -104,11 +105,18 @@ export class OrganizationsService {
       };
     }
 
-    const existing = await this.prisma.organization.findUnique({
-      where: { slug },
-    });
+    const [existing, alias] = await Promise.all([
+      this.prisma.organization.findUnique({
+        where: { slug },
+        select: { id: true },
+      }),
+      this.prisma.slugAlias.findUnique({
+        where: { slug },
+        select: { organizationId: true },
+      }),
+    ]);
 
-    if (existing) {
+    if (existing || alias) {
       return { slug, available: false, reason: 'taken' as const };
     }
 
@@ -130,12 +138,18 @@ export class OrganizationsService {
 
       if (!isValidSlug(candidate)) continue;
 
-      const existing = await this.prisma.organization.findUnique({
-        where: { slug: candidate },
-        select: { id: true },
-      });
+      const [existing, alias] = await Promise.all([
+        this.prisma.organization.findUnique({
+          where: { slug: candidate },
+          select: { id: true },
+        }),
+        this.prisma.slugAlias.findUnique({
+          where: { slug: candidate },
+          select: { slug: true },
+        }),
+      ]);
 
-      if (!existing) {
+      if (!existing && !alias) {
         return { slug: candidate, available: true as const };
       }
     }
@@ -156,19 +170,37 @@ export class OrganizationsService {
       throw new NotFoundException('Negocio no encontrado');
     }
 
-    const organization = await this.prisma.organization.findUnique({
+    const select = {
+      id: true,
+      name: true,
+      slug: true,
+      isActive: true,
+      brandColor: true,
+      logoUrl: true,
+      address: true,
+      latitude: true,
+      longitude: true,
+    } as const;
+
+    let organization = await this.prisma.organization.findUnique({
       where: { slug },
-      select: {
-        name: true,
-        slug: true,
-        isActive: true,
-        brandColor: true,
-        logoUrl: true,
-        address: true,
-        latitude: true,
-        longitude: true,
-      },
+      select,
     });
+
+    // Dirección anterior: se resuelve igual y la web redirige 301 a la nueva.
+    if (!organization) {
+      const alias = await this.prisma.slugAlias.findUnique({
+        where: { slug },
+        select: { organizationId: true },
+      });
+
+      if (alias) {
+        organization = await this.prisma.organization.findUnique({
+          where: { id: alias.organizationId },
+          select,
+        });
+      }
+    }
 
     if (!organization || !organization.isActive) {
       throw new NotFoundException('Negocio no encontrado');
@@ -177,6 +209,8 @@ export class OrganizationsService {
     return {
       name: organization.name,
       slug: organization.slug,
+      /** Dirección usada en la petición; si difiere, hay que redirigir. */
+      requestedSlug: slug,
       brandColor: organization.brandColor ?? null,
       logoUrl: organization.logoUrl ?? null,
       address: organization.address ?? null,
@@ -452,8 +486,117 @@ export class OrganizationsService {
     };
   }
 
-  async update(organizationId: string | null, dto: UpdateOrganizationDto) {
+  /**
+   * Cambia la dirección del negocio.
+   *
+   * Durante el onboarding (primera configuración) es libre; después solo se
+   * permite **un** cambio. El slug anterior queda como alias para que los
+   * enlaces y QR ya impresos sigan funcionando con un 301.
+   */
+  async changeSlug(
+    organizationId: string | null,
+    userId: string,
+    rawSlug: string,
+  ) {
     if (!organizationId) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    const [current, user] = await Promise.all([
+      this.prisma.organization.findUnique({
+        where: { id: organizationId },
+        select: {
+          id: true,
+          slug: true,
+          slugChanges: true,
+        },
+      }),
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { onboardedAt: true },
+      }),
+    ]);
+
+    if (!current) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    const slug = normalizeSlug(rawSlug ?? '');
+
+    if (!isValidSlug(slug)) {
+      throw new BadRequestException(
+        'La dirección no es válida o está reservada',
+      );
+    }
+
+    if (slug === current.slug) {
+      throw new BadRequestException('Es la misma dirección que ya tienes');
+    }
+
+    // Primera configuración: el onboarding puede fijarla sin gastar el cambio.
+    const isInitialSetup = !user?.onboardedAt;
+
+    if (!isInitialSetup && current.slugChanges >= 1) {
+      throw new ForbiddenException('Ya usaste tu cambio de dirección');
+    }
+
+    const [takenOrg, takenAlias] = await Promise.all([
+      this.prisma.organization.findUnique({
+        where: { slug },
+        select: { id: true },
+      }),
+      this.prisma.slugAlias.findUnique({
+        where: { slug },
+        select: { organizationId: true },
+      }),
+    ]);
+
+    if (takenOrg && takenOrg.id !== organizationId) {
+      throw new ConflictException('Esa dirección ya está en uso');
+    }
+
+    if (takenAlias && takenAlias.organizationId !== organizationId) {
+      throw new ConflictException('Esa dirección ya está en uso');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      // Volver a una dirección propia anterior: se borra el alias para no
+      // crear un bucle de redirecciones.
+      if (takenAlias?.organizationId === organizationId) {
+        await tx.slugAlias.delete({ where: { slug } });
+      }
+
+      await tx.slugAlias.upsert({
+        where: { slug: current.slug },
+        create: { slug: current.slug, organizationId },
+        update: {},
+      });
+
+      const updated = await tx.organization.update({
+        where: { id: organizationId },
+        data: {
+          slug,
+          ...(isInitialSetup ? {} : { slugChanges: { increment: 1 } }),
+        },
+        select: { slug: true, slugChanges: true },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          organizationId,
+          action: 'organization.slug_changed',
+          entity: 'Organization',
+          entityId: organizationId,
+          oldValues: { slug: current.slug },
+          newValues: { slug },
+        },
+      });
+
+      return updated;
+    });
+  }
+
+  async update(organizationId: string | null, dto: UpdateOrganizationDto) {    if (!organizationId) {
       throw new NotFoundException('Organización no encontrada');
     }
 
@@ -599,6 +742,7 @@ export class OrganizationsService {
       domainToken: organization.domainToken ?? null,
       domainVerifiedAt: organization.domainVerifiedAt?.toISOString() ?? null,
       customDomainEnabled: organization.customDomainEnabled ?? false,
+      slugChanges: organization.slugChanges ?? 0,
       taxRate: organization.taxRate?.toString() ?? '0.16',
       currency: organization.currency ?? 'MXN',
       brandColor: organization.brandColor ?? null,
