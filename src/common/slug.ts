@@ -43,6 +43,7 @@ const RESERVED_WORDS = [
   'assets',
   'dokploy',
   'mishef',
+  'saas',
   'mail',
   'send',
   'rsend',
