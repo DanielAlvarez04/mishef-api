@@ -183,6 +183,37 @@ export class OrdersService {
       }
     }
 
+    // Reconciliación offline: dos dispositivos pueden haber abierto una cuenta
+    // para la misma mesa sin red. Al sincronizar, la ronda se une a la cuenta
+    // que ya está abierta en el servidor en lugar de abrir una segunda.
+    const requestedChannel =
+      dto.channel ??
+      (dto.isTakeaway ? OrderChannel.COUNTER : OrderChannel.DINE_IN);
+
+    const requestedTable = dto.tableNumber?.trim();
+
+    if (
+      dto.reuseOpenTable &&
+      requestedChannel === OrderChannel.DINE_IN &&
+      requestedTable
+    ) {
+      const openOrder = await this.prisma.order.findFirst({
+        where: {
+          organizationId,
+          ...(branchId ? { branchId } : {}),
+          status: OrderStatus.OPEN,
+          channel: OrderChannel.DINE_IN,
+          tableNumber: requestedTable,
+        },
+        include: orderInclude,
+        orderBy: { createdAt: 'asc' },
+      });
+
+      if (openOrder) {
+        return { ...openOrder, reconciled: true };
+      }
+    }
+
     const created = await this.prisma.$transaction(async (tx) => {
       const channel =
         dto.channel ??

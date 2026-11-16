@@ -172,6 +172,15 @@ export class CreateOrderDto {
   @IsString()
   @MaxLength(80)
   idempotencyKey?: string;
+
+  /**
+   * Sincronización offline: si ya hay una cuenta abierta para la misma mesa,
+   * devolverla en vez de abrir una segunda. Evita que dos dispositivos sin red
+   * creen dos cuentas para la misma mesa.
+   */
+  @IsOptional()
+  @IsBoolean()
+  reuseOpenTable?: boolean;
 }
 
 /** Persona de la cuenta al abrirla. */
