@@ -4,6 +4,7 @@ import type { Request, Response } from 'express';
 import { AuthController } from './auth.controller';
 import type { AuthService, GoogleLinkResult, GoogleLoginResult } from './auth.service';
 import type { GoogleOauthService } from './google-oauth.service';
+import type { TurnstileService } from '../common/turnstile.service';
 
 function responseMock() {
   return {
@@ -71,10 +72,16 @@ function createController(options: {
     redirectUri: () => 'http://localhost:3001/v1/auth/google/callback',
   } as unknown as GoogleOauthService;
 
+  const turnstile = {
+    enabled: false,
+    verify: jest.fn().mockResolvedValue(true),
+  } as unknown as TurnstileService;
+
   return {
-    controller: new AuthController(auth, google, config),
+    controller: new AuthController(auth, google, config, turnstile),
     auth,
     google,
+    turnstile,
   };
 }
 

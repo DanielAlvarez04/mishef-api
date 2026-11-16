@@ -14,7 +14,11 @@ import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
-import { buildOrganizationSlug } from '../common/slug';
+import {
+  buildOrganizationSlug,
+  isValidSlug,
+  normalizeSlug,
+} from '../common/slug';
 import { PRACTICE_WINDOW_MS } from '../common/practice';
 import { isValidUsername, normalizeUsername } from '../common/usernames';
 import { MailService } from '../mail/mail.service';
@@ -788,11 +792,35 @@ export class AuthService {
       sanitizeBusinessName(dto.name) ??
       `Negocio de ${email.split('@')[0]}`;
 
+    // Dirección elegida por el negocio. Se valida y reserva aquí para no
+    // descubrir la colisión a mitad de la transacción.
+    let requestedSlug: string | undefined;
+    if (dto.slug !== undefined && dto.slug.trim() !== '') {
+      const candidate = normalizeSlug(dto.slug);
+
+      if (!isValidSlug(candidate)) {
+        throw new BadRequestException(
+          'La dirección del negocio no es válida o está reservada',
+        );
+      }
+
+      const taken = await this.prisma.organization.findUnique({
+        where: { slug: candidate },
+        select: { id: true },
+      });
+
+      if (taken) {
+        throw new ConflictException('Esa dirección de negocio ya está en uso');
+      }
+
+      requestedSlug = candidate;
+    }
+
     const user = await this.prisma.$transaction(async (tx) => {
       const organization = await tx.organization.create({
         data: {
           name: organizationName,
-          slug: buildOrganizationSlug(organizationName),
+          slug: requestedSlug ?? buildOrganizationSlug(organizationName),
           practiceMode: true,
           practiceUntil: new Date(Date.now() + PRACTICE_WINDOW_MS),
         },

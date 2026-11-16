@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-api-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck + tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `--legacy-peer-deps` es obligatorio: @nestjs/config@3 declara peer deps
+      # de NestJS 10 y el proyecto usa 11.
+      - run: npm ci --legacy-peer-deps
+
+      # El cliente de Prisma se genera en CI: no está en el repositorio y
+      # `tsc` no compila sin los tipos. La URL es ficticia, `generate` no
+      # se conecta a la base.
+      - name: Generar Prisma Client
+        run: npx prisma generate
+        env:
+          DATABASE_URL: postgresql://build:build@localhost:5432/build?schema=public
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Tests
+        run: npx jest --ci

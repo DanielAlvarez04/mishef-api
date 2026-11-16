@@ -251,6 +251,7 @@ describe('InventoryService — ajustes', () => {
     const { service, prisma } = build();
     prisma.inventoryMovement.findUnique.mockResolvedValue({
       id: 'm-existente',
+      organizationId: 'o1',
       quantity: new Prisma.Decimal(5),
       stockAfter: new Prisma.Decimal(10),
       displayUnit: UnitCode.ML,

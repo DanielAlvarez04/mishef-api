@@ -11,6 +11,7 @@ import {
   HttpCode,
   HttpStatus,
   ServiceUnavailableException,
+  BadRequestException,
 } from '@nestjs/common';
 import { Response, Request } from 'express';
 import { Throttle } from '@nestjs/throttler';
@@ -33,6 +34,7 @@ import { JwtUser } from './auth.service';
 import { ConfigService } from '@nestjs/config';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { permissionsForRoles } from '../common/permissions';
+import { TurnstileService } from '../common/turnstile.service';
 
 const ACCESS_TOKEN_COOKIE = 'np_at';
 const REFRESH_TOKEN_COOKIE = 'np_rt';
@@ -49,6 +51,7 @@ export class AuthController {
     private auth: AuthService,
     private google: GoogleOauthService,
     private config: ConfigService,
+    private turnstile: TurnstileService,
   ) {}
 
   @ApiOperation({ summary: 'Iniciar sesión' })
@@ -245,6 +248,14 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
+    const passed = await this.turnstile.verify(dto.turnstileToken, req.ip);
+
+    if (!passed) {
+      throw new BadRequestException(
+        'Completa la verificación anti-bots e inténtalo de nuevo',
+      );
+    }
+
     const result = await this.auth.register(dto, this.metaFrom(req));
 
     this.setAuthCookies(res, result.accessToken, result.refreshToken);

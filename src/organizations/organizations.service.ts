@@ -12,6 +12,12 @@ import {
   isValidDomain,
   normalizeDomain,
 } from '../common/usernames';
+import {
+  MAX_SLUG_LENGTH,
+  RESERVED_SLUGS,
+  isValidSlug,
+  normalizeSlug,
+} from '../common/slug';
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
 
 @Injectable()
@@ -64,6 +70,62 @@ export class OrganizationsService {
     }
 
     return { domain, available: true };
+  }
+
+  /**
+   * Comprueba si una dirección (`micafeteria`) puede usarse como subdominio.
+   *
+   * Es única global porque se resuelve por host: dos negocios con el mismo
+   * slug harían imposible saber a cuál pertenece la petición.
+   */
+  async slugAvailable(rawSlug: string) {
+    const slug = normalizeSlug(rawSlug ?? '');
+
+    if (!isValidSlug(slug)) {
+      return {
+        slug,
+        available: false,
+        reason: RESERVED_SLUGS.has(slug) ? ('reserved' as const) : ('invalid' as const),
+      };
+    }
+
+    const existing = await this.prisma.organization.findUnique({
+      where: { slug },
+    });
+
+    if (existing) {
+      return { slug, available: false, reason: 'taken' as const };
+    }
+
+    return { slug, available: true };
+  }
+
+  /**
+   * Sugiere una dirección a partir del nombre del negocio.
+   *
+   * Si la ideal está ocupada, prueba sufijos cortos (`-2`, `-3`…) para que el
+   * usuario no tenga que inventar. Devuelve siempre un slug válido.
+   */
+  async slugSuggestion(rawName: string) {
+    const base = normalizeSlug(rawName ?? '') || 'mi-negocio';
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const candidate =
+        attempt === 0 ? base : `${base.slice(0, MAX_SLUG_LENGTH - 4)}-${attempt + 1}`;
+
+      if (!isValidSlug(candidate)) continue;
+
+      const existing = await this.prisma.organization.findUnique({
+        where: { slug: candidate },
+        select: { id: true },
+      });
+
+      if (!existing) {
+        return { slug: candidate, available: true as const };
+      }
+    }
+
+    return { slug: base, available: false as const };
   }
 
   async update(organizationId: string | null, dto: UpdateOrganizationDto) {
