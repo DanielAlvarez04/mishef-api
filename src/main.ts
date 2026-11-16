@@ -28,10 +28,12 @@ config(envPath ? { path: envPath } : {});
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
-  // Traefik (Dokploy) es el único proxy delante de la API. Confiar en una sola
-  // capa hace que `req.ip` y el throttler usen la IP real del cliente
-  // (X-Forwarded-For) en lugar de la IP del contenedor del proxy.
-  app.set('trust proxy', 1);
+  // Delante de la API hay dos proxies: Cloudflare y Traefik (Dokploy). Hay que
+  // confiar en dos capas para que `req.ip` y el throttler lean la IP real del
+  // cliente (X-Forwarded-For) y no la del borde de Cloudflare. Con 1 se toma el
+  // segundo salto contando desde la derecha, que es la IP de Cloudflare: todos
+  // los clientes compartirían el mismo cubo de rate limit.
+  app.set('trust proxy', 2);
 
   // Cabeceras de seguridad. La CSP se deja fuera a propósito: la UI de Swagger
   // usa scripts inline y la API no sirve HTML propio.
