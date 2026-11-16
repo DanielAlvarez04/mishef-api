@@ -284,6 +284,127 @@ export class ItemsService {
     return items.map((item) => this.withMenus(item));
   }
 
+  /**
+   * Food cost en vivo por artículo.
+   *
+   * El costo sale de la receta base × el costo actual del insumo (que se
+   * actualiza con cada compra). El precio se compara **sin IVA**, que es como
+   * se mide el food cost en un restaurante.
+   *
+   * `target` es el food cost máximo aceptable (0.35 = 35 %). Por encima de eso
+   * el artículo se marca para revisar precio o porción.
+   */
+  async foodCost(organizationId: string | null, targetRate?: number) {
+    const target = Math.min(
+      0.95,
+      Math.max(0.05, targetRate ?? 0.35),
+    );
+
+    if (!organizationId) {
+      return { target, items: [], summary: null };
+    }
+
+    const items = await this.prisma.item.findMany({
+      where: { organizationId, isActive: true, isArchived: false },
+      select: {
+        id: true,
+        name: true,
+        price: true,
+        taxRate: true,
+        isCombo: true,
+        recipes: {
+          select: {
+            variantId: true,
+            ingredients: {
+              select: {
+                quantity: true,
+                isOptional: true,
+                ingredient: { select: { name: true, unitCost: true } },
+              },
+            },
+          },
+        },
+      },
+      orderBy: { name: 'asc' },
+    });
+
+    const round2 = (value: number) =>
+      Math.round((value + Number.EPSILON) * 100) / 100;
+    const round4 = (value: number) =>
+      Math.round((value + Number.EPSILON) * 10000) / 10000;
+
+    const rows = items.map((item) => {
+      // Receta base del artículo; si solo hay recetas por variante, se usa la
+      // primera como referencia.
+      const recipe =
+        item.recipes.find((candidate) => candidate.variantId === null) ??
+        item.recipes[0];
+
+      let cost = 0;
+      const missing: string[] = [];
+
+      if (recipe) {
+        for (const line of recipe.ingredients) {
+          if (line.isOptional) continue;
+
+          const unitCost = line.ingredient.unitCost;
+
+          if (!unitCost || Number(unitCost) <= 0) {
+            missing.push(line.ingredient.name);
+            continue;
+          }
+
+          cost += Number(line.quantity) * Number(unitCost);
+        }
+      }
+
+      const price = Number(item.price);
+      const taxRate = item.taxRate ? Number(item.taxRate) : 0;
+      const netPrice = taxRate > 0 ? price / (1 + taxRate) : price;
+
+      const hasRecipe = Boolean(recipe);
+      const complete = hasRecipe && missing.length === 0 && cost > 0;
+      const foodCostPct = netPrice > 0 ? cost / netPrice : 0;
+
+      return {
+        id: item.id,
+        name: item.name,
+        isCombo: item.isCombo,
+        price: round2(price),
+        netPrice: round2(netPrice),
+        cost: round2(cost),
+        foodCostPct: round4(foodCostPct),
+        margin: round2(netPrice - cost),
+        marginPct: round4(1 - foodCostPct),
+        hasRecipe,
+        missing,
+        complete,
+        aboveTarget: complete && foodCostPct > target,
+      };
+    });
+
+    const costed = rows.filter((row) => row.complete);
+
+    return {
+      target,
+      items: rows,
+      summary: {
+        items: rows.length,
+        withRecipe: rows.filter((row) => row.hasRecipe).length,
+        withoutRecipe: rows.filter((row) => !row.hasRecipe).length,
+        incomplete: rows.filter((row) => row.hasRecipe && !row.complete)
+          .length,
+        aboveTarget: rows.filter((row) => row.aboveTarget).length,
+        averageFoodCostPct: costed.length
+          ? round4(
+              costed.reduce((sum, row) => sum + row.foodCostPct, 0) /
+                costed.length,
+            )
+          : null,
+      },
+    };
+  }
+
   async findOne(organizationId: string | null, id: string) {
     const item = await this.prisma.item.findFirst({
       where: { id, organizationId },

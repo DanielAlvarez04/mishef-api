@@ -1112,6 +1112,20 @@ export class InventoryService {
       );
     }
 
+    // Costo de compra: llega en la unidad visible y se guarda en la canónica,
+    // igual que `unitCost` del insumo.
+    const canonicalCost =
+      dto.unitCost !== undefined
+        ? toCanonicalCost(
+            new Prisma.Decimal(dto.unitCost),
+            ingredient.displayUnit,
+          )
+        : null;
+
+    if (canonicalCost && canonicalCost.isNegative()) {
+      throw new BadRequestException('El costo no puede ser negativo');
+    }
+
     try {
       if (!organizationId) {
         throw new BadRequestException(
@@ -1135,6 +1149,15 @@ export class InventoryService {
               quantity,
             );
 
+        // Una entrada con costo es una compra: el insumo pasa a valer eso. Es
+        // lo que alimenta el food cost “con la última compra”.
+        if (canonicalCost && quantity.greaterThan(0)) {
+          await tx.ingredient.update({
+            where: { id: ingredient.id },
+            data: { unitCost: canonicalCost },
+          });
+        }
+
         return tx.inventoryMovement.create({
           data: {
             organizationId,
@@ -1145,6 +1168,7 @@ export class InventoryService {
             userId,
             type: InventoryMovementType.ADJUSTMENT,
             quantity,
+            unitCost: canonicalCost,
             stockAfter,
             reason: dto.reason.trim(),
             referenceId: dto.referenceId?.trim() || null,

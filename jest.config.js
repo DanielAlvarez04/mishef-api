@@ -4,10 +4,10 @@ module.exports = {
   testEnvironment: 'node',
   rootDir: 'src',
   testRegex: '.*\\.spec\\.ts$',
-  // Argon2 es deliberadamente caro: en CI lento un hash puede rozar los 5 s por
-  // defecto y hacer fallar una prueba correcta. 20 s deja margen sin ocultar
-  // un cuelgue de verdad.
-  testTimeout: 20000,
+  // Argon2 es deliberadamente caro: con 17 suites en paralelo un hash puede
+  // tardar decenas de segundos en una máquina cargada y hacer fallar una prueba
+  // correcta. 60 s deja margen sin ocultar un cuelgue de verdad.
+  testTimeout: 60000,
   moduleFileExtensions: ['ts', 'js', 'json'],
   moduleNameMapper: {
     // @nestjs/jwt v12 es ESM puro; Jest no puede require() ese módulo en Node 22.

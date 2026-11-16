@@ -264,6 +264,17 @@ export class CreateAdjustmentDto {
   @IsString()
   @MaxLength(120)
   dedupeKey?: string;
+
+  /**
+   * Costo por unidad visible al registrar una entrada (compra). Opcional: si
+   * llega, actualiza el costo del insumo y queda guardado en el movimiento.
+   */
+  @IsOptional()
+  @IsString()
+  @Matches(DECIMAL_PATTERN, {
+    message: 'El costo debe ser un número decimal (máx. 6 decimales)',
+  })
+  unitCost?: string;
 }
 
 export class CreateEquivalenceDto {

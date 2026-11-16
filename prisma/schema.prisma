@@ -1088,6 +1088,8 @@ model InventoryMovement {
   quantity       Decimal               @db.Decimal(12, 4) // Positivo = entrada, Negativo = salida
   stockAfter     Decimal?              @db.Decimal(12, 4) // Saldo resultante (kardex auditable)
   reason         String?
+  /// Costo por unidad canónica en el momento del movimiento (compras).
+  unitCost       Decimal?              @db.Decimal(12, 6)
   referenceId    String? // ID de orden, ronda, etc.
   referenceType  String? // "ORDER_ROUND", "ADJUSTMENT", etc.
   dedupeKey      String?               @unique // idempotencia de consumos

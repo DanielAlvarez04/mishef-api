@@ -62,6 +62,20 @@ export class ItemsController {
     });
   }
 
+  @ApiOperation({ summary: 'Food cost por artículo (costo y margen en vivo)' })
+  @Get('food-cost')
+  foodCost(
+    @CurrentUser() user: JwtUser,
+    @Query('target') target?: string,
+  ) {
+    const parsed = target !== undefined ? Number(target) : NaN;
+
+    return this.items.foodCost(
+      user.organizationId,
+      Number.isFinite(parsed) ? parsed : undefined,
+    );
+  }
+
   @ApiOperation({ summary: 'Detalle de un artículo' })
   @Get(':id')
   findOne(@CurrentUser() user: JwtUser, @Param('id') id: string) {
