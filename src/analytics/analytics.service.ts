@@ -3,7 +3,7 @@ import {
   Injectable,
   Logger,
 } from '@nestjs/common'
-import { Prisma } from '@prisma/client'
+import { PaymentStatus, Prisma } from '@prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 import { ClientAnalyticsEventDto } from './dto/analytics.dto'
 import {
@@ -347,10 +347,308 @@ export class AnalyticsService {
   }
 
   /**
-   * Purga eventos de analítica vencidos para cumplir la retención mínima.
+   * Reporte de pagos y propinas.
    *
-   * Se expone por organización: un ADMIN solo borra los eventos de la suya.
+   * Solo suma pagos confirmados para ventas y propinas. Los pagos pendientes,
+   * anulados y reembolsados se devuelven como conteos para medir fricción.
    */
+  async paymentsReport(params: {
+    organizationId: string | null
+    branchId?: string | null
+    from: Date
+    to: Date
+  }) {
+    const empty = {
+      from: params.from.toISOString(),
+      to: params.to.toISOString(),
+      totals: {
+        sales: 0,
+        tips: 0,
+        tipRate: null as number | null,
+        payments: 0,
+        averageTicket: null as number | null,
+        averageTip: null as number | null,
+        withTip: 0,
+        tipShare: null as number | null,
+        averageTipPercent: null as number | null,
+        splitPayments: 0,
+      },
+      byMethod: [] as Array<{
+        method: string
+        count: number
+        sales: number
+        tips: number
+        tipRate: number | null
+      }>,
+      byTipSource: [] as Array<{
+        source: string
+        count: number
+        tips: number
+      }>,
+      byDay: [] as Array<{
+        date: string
+        sales: number
+        tips: number
+        count: number
+      }>,
+      splits: {
+        orders: 0,
+        parts: 0,
+        paidParts: 0,
+        expectedTotal: 0,
+        paidTotal: 0,
+      },
+      topTipRecipients: [] as Array<{
+        id: string
+        name: string
+        count: number
+        tips: number
+      }>,
+      statuses: [] as Array<{
+        status: string
+        count: number
+        amount: number
+        tips: number
+      }>,
+    }
+
+    if (!params.organizationId) return empty
+
+    const scope = params.branchId ? { branchId: params.branchId } : {}
+    const baseWhere = {
+      organizationId: params.organizationId,
+      ...scope,
+      createdAt: { gte: params.from, lte: params.to },
+    }
+    const confirmedWhere = {
+      ...baseWhere,
+      status: PaymentStatus.CONFIRMED,
+    }
+
+    const [payments, statusGroups, splits, tipGroups] = await Promise.all([
+      this.prisma.payment.findMany({
+        where: confirmedWhere,
+        select: {
+          id: true,
+          orderId: true,
+          method: true,
+          amount: true,
+          tipAmount: true,
+          tipPercent: true,
+          tipSource: true,
+          tipRecipientId: true,
+          splitId: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: 'asc' },
+        take: 20_000,
+      }),
+      this.prisma.payment.groupBy({
+        by: ['status'],
+        where: baseWhere,
+        _count: { _all: true },
+        _sum: { amount: true, tipAmount: true },
+      }),
+      this.prisma.orderSplit.findMany({
+        where: {
+          createdAt: { gte: params.from, lte: params.to },
+          order: {
+            organizationId: params.organizationId,
+            ...(params.branchId ? { branchId: params.branchId } : {}),
+          },
+        },
+        select: {
+          id: true,
+          orderId: true,
+          status: true,
+          expectedAmount: true,
+          payments: {
+            where: { status: PaymentStatus.CONFIRMED },
+            select: { amount: true },
+          },
+        },
+        take: 20_000,
+      }),
+      this.prisma.payment.groupBy({
+        by: ['tipRecipientId'],
+        where: {
+          ...confirmedWhere,
+          tipAmount: { gt: 0 },
+        },
+        _sum: { tipAmount: true },
+        _count: { _all: true },
+        orderBy: { _sum: { tipAmount: 'desc' } },
+        take: 10,
+      }),
+    ])
+
+    const sales = round(
+      sum(payments.map((payment) => Number(payment.amount))),
+      2,
+    )
+    const tips = round(
+      sum(payments.map((payment) => Number(payment.tipAmount))),
+      2,
+    )
+    const withTip = payments.filter(
+      (payment) => Number(payment.tipAmount) > 0,
+    )
+    const tipPercents = payments
+      .map((payment) =>
+        payment.tipPercent === null ? null : Number(payment.tipPercent),
+      )
+      .filter((value): value is number => value !== null)
+    const tipRate = sales > 0 ? round((tips / sales) * 100, 2) : null
+
+    const methodGroups = new Map<
+      string,
+      { count: number; sales: number; tips: number }
+    >()
+    const sourceGroups = new Map<string, { count: number; tips: number }>()
+    const dayGroups = new Map<
+      string,
+      { sales: number; tips: number; count: number }
+    >()
+
+    for (const payment of payments) {
+      const amount = Number(payment.amount)
+      const tip = Number(payment.tipAmount)
+      const method = methodGroups.get(payment.method) ?? {
+        count: 0,
+        sales: 0,
+        tips: 0,
+      }
+      method.count += 1
+      method.sales += amount
+      method.tips += tip
+      methodGroups.set(payment.method, method)
+
+      const source = sourceGroups.get(payment.tipSource) ?? {
+        count: 0,
+        tips: 0,
+      }
+      source.count += 1
+      source.tips += tip
+      sourceGroups.set(payment.tipSource, source)
+
+      const day = dayGroups.get(localDayKey(payment.createdAt)) ?? {
+        sales: 0,
+        tips: 0,
+        count: 0,
+      }
+      day.sales += amount
+      day.tips += tip
+      day.count += 1
+      dayGroups.set(localDayKey(payment.createdAt), day)
+    }
+
+    const splitRows = splits.map((split) => {
+      const paid = sum(
+        split.payments.map((payment) => Number(payment.amount)),
+      )
+      const expected = Number(split.expectedAmount)
+
+      return {
+        orderId: split.orderId,
+        paid,
+        paidOff: paid + 0.004 >= expected,
+      }
+    })
+    const splitOrderIds = new Set(splitRows.map((row) => row.orderId))
+
+    const recipients = tipGroups
+      .map((row) => row.tipRecipientId)
+      .filter((id): id is string => Boolean(id))
+    const users =
+      recipients.length > 0
+        ? await this.prisma.user.findMany({
+            where: { id: { in: recipients } },
+            select: { id: true, name: true, username: true },
+          })
+        : []
+    const userById = new Map(users.map((user) => [user.id, user]))
+
+    return {
+      from: params.from.toISOString(),
+      to: params.to.toISOString(),
+      totals: {
+        sales,
+        tips,
+        tipRate,
+        payments: payments.length,
+        averageTicket:
+          payments.length > 0 ? round(sales / payments.length, 2) : null,
+        averageTip:
+          withTip.length > 0 ? round(tips / withTip.length, 2) : null,
+        withTip: withTip.length,
+        tipShare:
+          payments.length > 0
+            ? round((withTip.length / payments.length) * 100, 2)
+            : null,
+        averageTipPercent:
+          tipPercents.length > 0
+            ? round(sum(tipPercents) / tipPercents.length, 2)
+            : null,
+        splitPayments: payments.filter((payment) => payment.splitId).length,
+      },
+      byMethod: [...methodGroups.entries()]
+        .map(([method, value]) => ({
+          method,
+          count: value.count,
+          sales: round(value.sales, 2),
+          tips: round(value.tips, 2),
+          tipRate:
+            value.sales > 0 ? round((value.tips / value.sales) * 100, 2) : null,
+        }))
+        .sort((left, right) => right.sales - left.sales),
+      byTipSource: [...sourceGroups.entries()]
+        .map(([source, value]) => ({
+          source,
+          count: value.count,
+          tips: round(value.tips, 2),
+        }))
+        .sort((left, right) => right.tips - left.tips),
+      byDay: [...dayGroups.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([date, value]) => ({
+          date,
+          sales: round(value.sales, 2),
+          tips: round(value.tips, 2),
+          count: value.count,
+        })),
+      splits: {
+        orders: splitOrderIds.size,
+        parts: splitRows.length,
+        paidParts: splitRows.filter((row) => row.paidOff).length,
+        expectedTotal: round(
+          sum(splits.map((split) => Number(split.expectedAmount))),
+          2,
+        ),
+        paidTotal: round(sum(splitRows.map((row) => row.paid)), 2),
+      },
+      topTipRecipients: tipGroups.map((row) => {
+        const id = row.tipRecipientId ?? ''
+        const user = userById.get(id)
+
+        return {
+          id,
+          name: user?.name ?? user?.username ?? 'Sin asignar',
+          count: row._count._all,
+          tips: round(Number(row._sum.tipAmount ?? 0), 2),
+        }
+      }),
+      statuses: statusGroups
+        .map((row) => ({
+          status: row.status,
+          count: row._count._all,
+          amount: round(Number(row._sum.amount ?? 0), 2),
+          tips: round(Number(row._sum.tipAmount ?? 0), 2),
+        }))
+        .sort((left, right) => right.amount - left.amount),
+    }
+  }
+
+
   async purgeOlderThan(
     organizationId: string | null,
     days = ANALYTICS_RETENTION_DAYS,

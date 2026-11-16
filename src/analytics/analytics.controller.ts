@@ -119,6 +119,24 @@ export class AnalyticsController {
     })
   }
 
+  @ApiOperation({ summary: 'Pagos, propinas y cuentas divididas del periodo' })
+  @RequirePermissions('reports:read')
+  @Get('payments')
+  payments(
+    @CurrentUser() user: JwtUser,
+    @CurrentBranch() branchId: string | null,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    const range = parseRange(from, to)
+
+    return this.analytics.paymentsReport({
+      organizationId: user.organizationId,
+      branchId,
+      ...range,
+    })
+  }
+
   @ApiOperation({ summary: 'Purgar eventos de analítica vencidos' })
   @RequirePermissions('organization:manage')
   @Delete('events/expired')

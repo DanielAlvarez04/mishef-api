@@ -1,4 +1,5 @@
 import {
+  IsBoolean,
   IsEnum,
   IsInt,
   IsNumber,
@@ -9,7 +10,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
-import { PaymentMethod, PaymentStatus } from '@prisma/client';
+import { PaymentMethod, PaymentStatus, TipSource } from '@prisma/client';
 
 /** Registro de un pago (queda PENDIENTE hasta que se confirme). */
 export class CreatePaymentDto {
@@ -25,6 +26,39 @@ export class CreatePaymentDto {
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   tipAmount?: number;
+
+  /** Porcentaje de propina aplicado (0–100). */
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(100)
+  tipPercent?: number | null;
+
+  /** Origen de la propina: sugerida, manual o pantalla del cliente. */
+  @IsOptional()
+  @IsEnum(TipSource)
+  tipSource?: TipSource;
+
+  /** Base sobre la que se calculó el porcentaje de propina. */
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  tipBaseAmount?: number | null;
+
+  /** Parte de la cuenta a la que se aplica el pago. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  splitId?: string;
+
+  /**
+   * Registra y confirma el pago en la misma petición.
+   *
+   * Solo se permite a roles con `payments:confirm`; el controlador lo valida.
+   */
+  @IsOptional()
+  @IsBoolean()
+  confirm?: boolean;
 
   /** Quién recibe la propina; por defecto, quien cobra. */
   @IsOptional()

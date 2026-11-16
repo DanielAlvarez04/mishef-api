@@ -70,6 +70,12 @@ export class OrdersController {
     return this.orders.get(user.organizationId, id);
   }
 
+  @ApiOperation({ summary: 'Resumen ligero para el diálogo de cobro' })
+  @Get(':id/charge-summary')
+  chargeSummary(@CurrentUser() user: JwtUser, @Param('id') id: string) {
+    return this.orders.chargeSummary(user.organizationId, id);
+  }
+
   @ApiOperation({ summary: 'Enviar una ronda (comanda) a cocina' })
   @RequirePermissions('orders:send')
   @Post(':id/rounds')

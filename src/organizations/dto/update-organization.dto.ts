@@ -1,6 +1,7 @@
 import {
   IsArray,
   IsBoolean,
+  IsIn,
   IsNumber,
   IsOptional,
   IsString,
@@ -9,6 +10,7 @@ import {
   Min,
   MinLength,
 } from 'class-validator';
+import { SUPPORTED_CURRENCIES } from '../../common/currency';
 
 export class UpdateOrganizationDto {
   @IsOptional()
@@ -28,6 +30,12 @@ export class UpdateOrganizationDto {
   @Min(0)
   @Max(1)
   taxRate?: number;
+
+  /** Moneda del negocio (código ISO 4217). */
+  @IsOptional()
+  @IsString()
+  @IsIn(SUPPORTED_CURRENCIES)
+  currency?: string;
 
   // Onboarding fields
   @IsOptional()

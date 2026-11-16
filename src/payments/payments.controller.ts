@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Param,
   Post,
@@ -15,6 +16,7 @@ import { CurrentBranch } from '../common/decorators/current-branch.decorator';
 import { JwtUser } from '../auth/auth.service';
 import { RequirePermissions } from '../common/decorators/require-permissions.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
+import { rolesHavePermission } from '../common/permissions';
 import { PaymentsService } from './payments.service';
 import {
   CreatePaymentDto,
@@ -58,7 +60,16 @@ export class PaymentsController {
     @Param('id') id: string,
     @Body() dto: CreatePaymentDto,
   ) {
-    return this.payments.register(user.organizationId, user.sub, id, dto);
+    if (
+      dto.confirm &&
+      !rolesHavePermission(user.roles, 'payments:confirm')
+    ) {
+      throw new ForbiddenException('No puedes confirmar pagos');
+    }
+
+    return this.payments.register(user.organizationId, user.sub, id, dto, {
+      confirm: Boolean(dto.confirm),
+    });
   }
 
   @ApiOperation({ summary: 'Confirmar un pago pendiente' })

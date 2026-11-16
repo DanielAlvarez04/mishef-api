@@ -11,11 +11,15 @@ import {
   PaymentMethod,
   PaymentStatus,
   Prisma,
+  TipSource,
   type Role,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { AnalyticsService } from '../analytics/analytics.service';
+import { ANALYTICS_EVENTS } from '../analytics/analytics.events';
 import { rolesHavePermission } from '../common/permissions';
 import { OrdersEventsService } from '../orders/orders.events';
+import { OrderSplitsService } from '../orders/order-splits.service';
 import { CreatePaymentDto, VoidPaymentDto } from './dto/payments.dto';
 
 const ACTIVE_ROUND_STATUSES = [
@@ -38,6 +42,14 @@ const paymentInclude = {
   confirmedBy: { select: { id: true, name: true, username: true } },
   tipRecipient: { select: { id: true, name: true, username: true } },
   session: { select: { id: true, status: true } },
+  split: {
+    select: {
+      id: true,
+      label: true,
+      expectedAmount: true,
+      status: true,
+    },
+  },
 } satisfies Prisma.PaymentInclude;
 
 export interface PaymentFilters {
@@ -59,6 +71,8 @@ export class PaymentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly events: OrdersEventsService,
+    private readonly splits: OrderSplitsService,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   /**
@@ -160,7 +174,11 @@ export class PaymentsService {
     userId: string,
     orderId: string,
     dto: CreatePaymentDto,
-    options: { paidAt?: Date | null; pointCharge?: boolean } = {},
+    options: {
+      paidAt?: Date | null;
+      pointCharge?: boolean;
+      confirm?: boolean;
+    } = {},
   ) {
     if (
       dto.method === PaymentMethod.MERCADO_PAGO_POINT &&
@@ -247,7 +265,11 @@ export class PaymentsService {
       );
     }
 
-    return this.prisma.payment.create({
+    if (dto.splitId) {
+      await this.splits.assertPaymentFits(orderId, dto.splitId, amount);
+    }
+
+    const created = await this.prisma.payment.create({
       data: {
         organizationId,
         branchId: order.branchId,
@@ -256,11 +278,21 @@ export class PaymentsService {
         method: dto.method,
         amount,
         tipAmount,
+        tipPercent:
+          dto.tipPercent === undefined || dto.tipPercent === null
+            ? null
+            : new Prisma.Decimal(dto.tipPercent).toDecimalPlaces(2),
+        tipSource: dto.tipSource ?? TipSource.NONE,
+        tipBaseAmount:
+          dto.tipBaseAmount === undefined || dto.tipBaseAmount === null
+            ? null
+            : new Prisma.Decimal(dto.tipBaseAmount).toDecimalPlaces(2),
         tipRecipientId:
           dto.tipRecipientId ?? (tipAmount.gt(0) ? userId : null),
         cashReceived,
         changeGiven,
         sessionId: session.id,
+        splitId: dto.splitId ?? null,
         status: PaymentStatus.PENDING,
         paidAt:
           options.paidAt === undefined ? new Date() : options.paidAt,
@@ -268,6 +300,36 @@ export class PaymentsService {
       },
       include: paymentInclude,
     });
+
+    await this.analytics.recordMany([
+      {
+        name: ANALYTICS_EVENTS.paymentRegistered,
+        organizationId,
+        branchId: order.branchId,
+        userId,
+        orderId,
+        subjectType: 'payment',
+        subjectId: created.id,
+        amount: Number(amount),
+        metadata: {
+          method: dto.method,
+          tipAmount: Number(tipAmount),
+          tipPercent: dto.tipPercent ?? null,
+          tipSource: dto.tipSource ?? TipSource.NONE,
+          splitId: dto.splitId ?? null,
+          cash: cashReceived !== null,
+        },
+      },
+    ]);
+
+    if (options.confirm) {
+      return this.confirmInternal(organizationId, created.id, {
+        userId,
+        source: 'pos',
+      });
+    }
+
+    return created;
   }
 
   /** Exige una caja abierta para la sucursal de la cuenta. */
@@ -313,7 +375,6 @@ export class PaymentsService {
       source: 'manual',
     });
   }
-
   /**
    * Confirma un pago que el proveedor ya cobró (webhook o conciliación).
    *
@@ -353,6 +414,17 @@ export class PaymentsService {
       throw new NotFoundException('Pago no encontrado');
     }
 
+    // Un cobro con terminal solo se confirma cuando Mercado Pago lo reporta:
+    // confirmarlo a mano marcaría como pagado algo que no ocurrió.
+    if (
+      options.source === 'manual' &&
+      payment.method === PaymentMethod.MERCADO_PAGO_POINT
+    ) {
+      throw new BadRequestException(
+        'Los cobros con terminal se confirman solos cuando el cliente paga',
+      );
+    }
+
     if (payment.status === PaymentStatus.CONFIRMED) {
       return { ...payment, duplicated: true };
     }
@@ -369,7 +441,7 @@ export class PaymentsService {
 
     const now = options.paidAt ?? new Date();
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       const confirmed = await tx.payment.aggregate({
         where: {
           orderId: payment.orderId,
@@ -428,13 +500,42 @@ export class PaymentsService {
 
       return current;
     });
+
+    await this.splits.recomputeStatus(payment.splitId);
+
+    await this.analytics.recordMany([
+      {
+        name: ANALYTICS_EVENTS.paymentConfirmed,
+        organizationId,
+        branchId: payment.branchId,
+        userId: options.userId,
+        orderId: payment.orderId,
+        subjectType: 'payment',
+        subjectId: paymentId,
+        amount: Number(payment.amount),
+        metadata: {
+          method: payment.method,
+          tipAmount: Number(payment.tipAmount),
+          tipPercent:
+            payment.tipPercent === null
+              ? null
+              : Number(payment.tipPercent),
+          tipSource: payment.tipSource,
+          splitId: payment.splitId,
+          source: options.source,
+        },
+      },
+    ]);
+
+    return result;
   }
 
   /**
    * Anula un pago pendiente o reembolsa uno confirmado.
    *
    * Reglas aprobadas para el MVP:
-   * - PENDIENTE → CANCELADO: lo puede hacer quien confirma pagos.
+   * - PENDIENTE → CANCELADO: cualquier rol que registra pagos puede corregir
+   *   su captura antes de que caja la confirme.
    * - CONFIRMADO → REEMBOLSADO: solo ADMIN, exige motivo y queda auditado.
    * - Nunca se borra ni se sobrescribe un pago histórico.
    */
@@ -469,8 +570,19 @@ export class PaymentsService {
     }
 
     if (isPending) {
-      if (!rolesHavePermission(actor.roles, 'payments:confirm')) {
+      if (!rolesHavePermission(actor.roles, 'payments:register')) {
         throw new ForbiddenException('No puedes anular pagos');
+      }
+
+      // Un cobro de terminal se cancela en Mercado Pago: anularlo solo en la
+      // base dejaría la orden viva en el dispositivo.
+      if (
+        payment.method === PaymentMethod.MERCADO_PAGO_POINT &&
+        payment.provider === 'MERCADO_PAGO'
+      ) {
+        throw new BadRequestException(
+          'Cancela el cobro desde la terminal antes de anularlo',
+        );
       }
     } else if (!rolesHavePermission(actor.roles, 'payments:refund')) {
       throw new ForbiddenException('Solo administración puede reembolsar');
@@ -480,7 +592,7 @@ export class PaymentsService {
       ? PaymentStatus.CANCELLED
       : PaymentStatus.REFUNDED;
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       const updated = await tx.payment.update({
         where: { id: paymentId },
         data: { status },
@@ -546,6 +658,30 @@ export class PaymentsService {
 
       return updated;
     });
+
+    await this.splits.recomputeStatus(payment.splitId);
+
+    await this.analytics.recordMany([
+      {
+        name: ANALYTICS_EVENTS.paymentVoided,
+        organizationId,
+        branchId: payment.branchId,
+        userId: actor.id,
+        orderId: payment.orderId,
+        subjectType: 'payment',
+        subjectId: paymentId,
+        amount: Number(payment.amount),
+        metadata: {
+          status,
+          method: payment.method,
+          tipAmount: Number(payment.tipAmount),
+          splitId: payment.splitId,
+          reason,
+        },
+      },
+    ]);
+
+    return result;
   }
 
   /**

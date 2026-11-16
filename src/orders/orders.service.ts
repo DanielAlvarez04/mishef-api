@@ -14,6 +14,7 @@ import {
   PaymentStatus,
   Prisma,
   PromotionType,
+  SplitStatus,
   UnitCode,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -37,6 +38,7 @@ import {
   TransitionRoundDto,
 } from './dto/orders.dto';
 import { OrdersEventsService } from './orders.events';
+import { OrderSplitsService } from './order-splits.service';
 
 /** Estados a los que puede pasar cada estado de ronda (plan.md §6.6). */
 const ALLOWED_TRANSITIONS: Record<OrderRoundStatus, OrderRoundStatus[]> = {
@@ -151,6 +153,7 @@ export class OrdersService {
     private readonly events: OrdersEventsService,
     private readonly analytics: AnalyticsService,
     private readonly kitchen: KitchenService,
+    private readonly splits: OrderSplitsService,
   ) {}
 
   // --------------------------------------------------------------------------
@@ -208,6 +211,8 @@ export class OrdersService {
       const guestInputs = (dto.guests ?? []).map((raw) => ({
         name: raw.name?.trim() ?? '',
         title: raw.title ?? null,
+        sex: raw.sex ?? null,
+        ageRange: raw.ageRange ?? null,
       }));
       const guestNames: string[] = [];
 
@@ -263,6 +268,8 @@ export class OrdersService {
                   create: guestInputs.map((guest, index) => ({
                     name: guest.name,
                     title: guest.title,
+                    sex: guest.sex,
+                    ageRange: guest.ageRange,
                     sortOrder: index,
                   })),
                 },
@@ -350,6 +357,166 @@ export class OrdersService {
     }
 
     return this.withBalance(order);
+  }
+
+  /**
+   * Resumen mínimo para el diálogo de cobro.
+   *
+   * Evita el detalle completo (historial, extras, opciones, exclusiones y
+   * usuarios de pago): el repaso solo necesita nombres, cantidades e importes.
+   */
+  async chargeSummary(organizationId: string | null, orderId: string) {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, organizationId },
+      select: {
+        id: true,
+        tableNumber: true,
+        partySize: true,
+        channel: true,
+        customerName: true,
+        total: true,
+        subtotal: true,
+        taxTotal: true,
+        deliveryFee: true,
+        guests: {
+          orderBy: { sortOrder: 'asc' },
+          select: {
+            id: true,
+            name: true,
+            title: true,
+            sex: true,
+            ageRange: true,
+            sortOrder: true,
+          },
+        },
+        rounds: {
+          where: { status: { not: OrderRoundStatus.CANCELLED } },
+          orderBy: { createdAt: 'asc' },
+          select: {
+            id: true,
+            items: {
+              select: {
+                id: true,
+                itemName: true,
+                variantName: true,
+                quantity: true,
+                subtotal: true,
+                guestId: true,
+                guestName: true,
+                notes: true,
+              },
+            },
+          },
+        },
+        payments: {
+          orderBy: { createdAt: 'asc' },
+          select: {
+            id: true,
+            amount: true,
+            tipAmount: true,
+            status: true,
+            method: true,
+            splitId: true,
+            provider: true,
+            createdAt: true,
+            confirmedAt: true,
+          },
+        },
+        splits: {
+          where: { status: { not: SplitStatus.CANCELLED } },
+          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+          select: {
+            id: true,
+            label: true,
+            mode: true,
+            status: true,
+            guestId: true,
+            expectedAmount: true,
+            sortOrder: true,
+            guest: { select: { name: true } },
+            payments: {
+              where: {
+                status: {
+                  in: [PaymentStatus.PENDING, PaymentStatus.CONFIRMED],
+                },
+              },
+              select: { amount: true, status: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException('Pedido no encontrado');
+    }
+
+    const paid = order.payments
+      .filter((payment) => payment.status === PaymentStatus.CONFIRMED)
+      .reduce(
+        (sum, payment) => sum.plus(payment.amount),
+        new Prisma.Decimal(0),
+      );
+
+    return {
+      id: order.id,
+      tableNumber: order.tableNumber,
+      partySize: order.partySize,
+      channel: order.channel,
+      customerName: order.customerName,
+      total: order.total.toFixed(2),
+      subtotal: order.subtotal.toFixed(2),
+      taxTotal: order.taxTotal.toFixed(2),
+      deliveryFee: order.deliveryFee.toFixed(2),
+      paidTotal: paid.toFixed(2),
+      balance: order.total.minus(paid).toFixed(2),
+      payments: order.payments.map((payment) => ({
+        id: payment.id,
+        method: payment.method,
+        amount: payment.amount.toFixed(2),
+        tipAmount: payment.tipAmount.toFixed(2),
+        status: payment.status,
+        splitId: payment.splitId,
+        provider: payment.provider,
+        createdAt: payment.createdAt.toISOString(),
+        confirmedAt: payment.confirmedAt?.toISOString() ?? null,
+      })),
+      guests: order.guests,
+      rounds: order.rounds,
+      splits: order.splits.map((split) => {
+        const splitPaid = split.payments
+          .filter((payment) => payment.status === PaymentStatus.CONFIRMED)
+          .reduce(
+            (sum, payment) => sum + Number(payment.amount),
+            0,
+          );
+        const splitPending = split.payments
+          .filter((payment) => payment.status === PaymentStatus.PENDING)
+          .reduce(
+            (sum, payment) => sum + Number(payment.amount),
+            0,
+          );
+        const expected = Number(split.expectedAmount);
+
+        return {
+          id: split.id,
+          label: split.label,
+          mode: split.mode,
+          status:
+            splitPaid + 0.004 >= expected
+              ? SplitStatus.PAID
+              : split.status,
+          guestId: split.guestId,
+          guestName: split.guest?.name ?? null,
+          expectedAmount: expected,
+          paidAmount: Math.round(splitPaid * 100) / 100,
+          pendingAmount: Math.round(splitPending * 100) / 100,
+          remainingAmount:
+            Math.max(0, Math.round((expected - splitPaid) * 100) / 100),
+          sortOrder: split.sortOrder,
+        };
+      }),
+    };
   }
 
   // --------------------------------------------------------------------------
@@ -451,6 +618,20 @@ export class OrdersService {
       });
 
       await this.recalculateTotals(tx, orderId);
+
+      // Si la cuenta ya estaba dividida, lo nuevo se cobra en una parte
+      // adicional para no recalcular importes que el cliente ya pagó.
+      const roundAmount = itemsWithGuest.reduce(
+        (sum, item) => sum.plus(item.subtotal),
+        new Prisma.Decimal(0),
+      );
+      await this.splits.addRoundShare(
+        tx,
+        orderId,
+        created.id,
+        `Adicional · Ronda ${created.id.slice(-4)}`,
+        roundAmount,
+      );
 
       return created;
     });
@@ -775,6 +956,8 @@ export class OrdersService {
           orderId,
           name,
           title: dto.title ?? null,
+          sex: dto.sex ?? null,
+          ageRange: dto.ageRange ?? null,
           sortOrder,
         },
       });
@@ -816,6 +999,9 @@ export class OrdersService {
 
     const name = dto.name === undefined ? guest.name : dto.name.trim();
     const title = dto.title === undefined ? guest.title : dto.title;
+    const sex = dto.sex === undefined ? guest.sex : dto.sex;
+    const ageRange =
+      dto.ageRange === undefined ? guest.ageRange : dto.ageRange;
 
     if (name) {
       const others = await this.prisma.orderGuest.findMany({
@@ -832,7 +1018,12 @@ export class OrdersService {
       }
     }
 
-    if (name === guest.name && title === guest.title) {
+    if (
+      name === guest.name &&
+      title === guest.title &&
+      sex === guest.sex &&
+      ageRange === guest.ageRange
+    ) {
       return guest;
     }
 
@@ -842,6 +1033,8 @@ export class OrdersService {
         data: {
           ...(name === guest.name ? {} : { name }),
           ...(title === guest.title ? {} : { title }),
+          ...(sex === guest.sex ? {} : { sex }),
+          ...(ageRange === guest.ageRange ? {} : { ageRange }),
         },
       });
 

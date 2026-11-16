@@ -15,7 +15,13 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
-import { OrderChannel, OrderRoundStatus, GuestTitle } from '@prisma/client';
+import {
+  OrderChannel,
+  OrderRoundStatus,
+  GuestTitle,
+  GuestSex,
+  GuestAgeRange,
+} from '@prisma/client';
 
 /** Extra elegido para una línea (ej. "extra queso"). */
 export class RoundItemExtraDto {
@@ -178,6 +184,14 @@ export class CreateOrderGuestDto {
   @IsOptional()
   @IsEnum(GuestTitle)
   title?: GuestTitle | null;
+
+  @IsOptional()
+  @IsEnum(GuestSex)
+  sex?: GuestSex | null;
+
+  @IsOptional()
+  @IsEnum(GuestAgeRange)
+  ageRange?: GuestAgeRange | null;
 }
 
 /** Alta o edición de una persona de la cuenta. */
@@ -190,6 +204,14 @@ export class OrderGuestDto {
   @IsOptional()
   @IsEnum(GuestTitle)
   title?: GuestTitle | null;
+
+  @IsOptional()
+  @IsEnum(GuestSex)
+  sex?: GuestSex | null;
+
+  @IsOptional()
+  @IsEnum(GuestAgeRange)
+  ageRange?: GuestAgeRange | null;
 }
 
 /** Transición de estado de una ronda. */

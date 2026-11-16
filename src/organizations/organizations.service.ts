@@ -36,6 +36,7 @@ export class OrganizationsService {
       slug: organization.slug,
       domain: organization.domain,
       taxRate: organization.taxRate?.toString() ?? '0.16',
+      currency: organization.currency ?? 'MXN',
       isActive: organization.isActive,
       useCoreSuggestions: organization.useCoreSuggestions ?? true,
       practiceMode: organization.practiceMode,
@@ -82,6 +83,7 @@ export class OrganizationsService {
       name?: string;
       domain?: string;
       taxRate?: Prisma.Decimal;
+      currency?: string;
       businessType?: string;
       serviceTypes?: string[];
       goals?: string[];
@@ -125,6 +127,10 @@ export class OrganizationsService {
 
       const taxRate = new Prisma.Decimal(dto.taxRate);
       if (!sameDecimal(taxRate, current.taxRate)) data.taxRate = taxRate;
+    }
+
+    if (dto.currency !== undefined && dto.currency !== current.currency) {
+      data.currency = dto.currency;
     }
 
     if (dto.businessType !== undefined && dto.businessType !== current.businessType) {
@@ -186,6 +192,7 @@ export class OrganizationsService {
       slug: organization.slug,
       domain: organization.domain,
       taxRate: organization.taxRate?.toString() ?? '0.16',
+      currency: organization.currency ?? 'MXN',
       isActive: organization.isActive,
       businessType: organization.businessType,
       serviceTypes: organization.serviceTypes,

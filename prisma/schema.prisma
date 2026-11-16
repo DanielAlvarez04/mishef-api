@@ -78,6 +78,43 @@ enum GuestTitle {
   SENORA_MAYOR
 }
 
+/// Sexo declarado del cliente (opcional, se usa para el servicio).
+enum GuestSex {
+  MASCULINO
+  FEMENINO
+  LGBT
+}
+
+/// Rango de edad del cliente (opcional, se usa para el servicio).
+enum GuestAgeRange {
+  NINO
+  JOVEN
+  ADULTO
+  ADULTO_MAYOR
+}
+
+/// Cómo se dividió una cuenta para cobrarla.
+enum SplitMode {
+  BY_GUEST
+  EQUAL
+  CUSTOM
+}
+
+/// Estado de una parte de la cuenta.
+enum SplitStatus {
+  OPEN
+  PAID
+  CANCELLED
+}
+
+/// Origen del porcentaje de propina registrado.
+enum TipSource {
+  NONE
+  SUGGESTED
+  CUSTOM
+  CUSTOMER_DISPLAY
+}
+
 enum CashSessionStatus {
   OPEN
   CLOSED
@@ -171,6 +208,8 @@ model Organization {
   slug      String   @unique
   domain    String?  @unique // dominio de los usuarios del equipo (ej. naranjapimienta.cafe)
   taxRate   Decimal  @default(0.16) @db.Decimal(5, 4) // IVA por defecto del negocio (0.16 = 16 %)
+  /// Código ISO 4217 de la moneda del negocio (ver `src/common/currency.ts`).
+  currency  String   @default("MXN")
   isActive  Boolean  @default(true)
   /// Modo práctica: no se registra analítica de operación mientras esté activo.
   practiceMode  Boolean   @default(false)
@@ -681,7 +720,7 @@ model ComboPromotion {
   itemId              String
   name                String
   type                PromotionType
-  /// Porcentaje (0-100) o importe fijo en MXN.
+  /// Porcentaje (0-100) o importe fijo en la moneda del negocio.
   value               Decimal       @default(0) @db.Decimal(12, 2)
   /// Para PAY_X_GET_Y: cantidad que paga y cantidad que recibe.
   payQuantity         Int?
@@ -1090,6 +1129,7 @@ model Order {
   rounds       OrderRound[]
   payments     Payment[]
   guests       OrderGuest[]
+  splits       OrderSplit[]
 
   @@index([organizationId, createdAt])
   @@index([organizationId, status, createdAt])
@@ -1103,15 +1143,44 @@ model OrderGuest {
   orderId   String
   /// Vacío cuando la persona todavía no tiene nombre.
   name      String      @default("")
-  /// Tratamiento demográfico; dato para estadísticas.
+  /// Tratamiento demográfico legado; se conserva para registros anteriores.
   title     GuestTitle?
+  /// Sexo declarado (opcional).
+  sex       GuestSex?
+  /// Rango de edad declarado (opcional).
+  ageRange  GuestAgeRange?
   sortOrder Int         @default(0)
   createdAt DateTime    @default(now())
 
   order Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
   items OrderItem[]
+  splits OrderSplit[]
 
   @@index([orderId])
+}
+
+/// Parte de una cuenta cuando se cobra dividida.
+model OrderSplit {
+  id             String      @id @default(cuid())
+  orderId        String
+  /// Cliente de la parte en el modo BY_GUEST.
+  guestId        String?
+  /// Nombre visible: «Ana», «Parte 2 de 3», «Adicional».
+  label          String?
+  mode           SplitMode
+  /// Importe que debe cubrir esta parte, con IVA.
+  expectedAmount Decimal     @db.Decimal(12, 2)
+  status         SplitStatus @default(OPEN)
+  sortOrder      Int         @default(0)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  order    Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  guest    OrderGuest? @relation(fields: [guestId], references: [id], onDelete: SetNull)
+  payments Payment[]
+
+  @@index([orderId, status])
+  @@index([guestId])
 }
 
 model OrderRound {
@@ -1257,10 +1326,18 @@ model Payment {
 
   // Propinas y control de caja.
   tipAmount      Decimal  @default(0) @db.Decimal(12, 2)
+  /// Porcentaje de propina aplicado (0–100); `null` si fue un monto manual.
+  tipPercent     Decimal? @db.Decimal(5, 2)
+  /// De dónde salió la propina.
+  tipSource      TipSource @default(NONE)
+  /// Base sobre la que se calculó el porcentaje.
+  tipBaseAmount  Decimal? @db.Decimal(12, 2)
   tipRecipientId String?
   cashReceived   Decimal? @db.Decimal(12, 2)
   changeGiven    Decimal? @db.Decimal(12, 2)
   sessionId      String?
+  /// Parte de la cuenta a la que se aplica el pago, si está dividida.
+  splitId        String?
 
   // Integración con proveedores de pago (Mercado Pago Point).
   provider             String?
@@ -1283,6 +1360,7 @@ model Payment {
   confirmedBy  User?         @relation("PaymentConfirmedBy", fields: [confirmedById], references: [id], onDelete: SetNull)
   tipRecipient User?         @relation("PaymentTipRecipient", fields: [tipRecipientId], references: [id], onDelete: SetNull)
   session      CashSession?  @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  split        OrderSplit?   @relation(fields: [splitId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, status, createdAt])
   @@index([organizationId, status, confirmedAt])
@@ -1292,6 +1370,7 @@ model Payment {
   @@index([provider, providerStatus])
   @@index([sessionId])
   @@index([tipRecipientId])
+  @@index([splitId])
 }
 
 // ============================================================================

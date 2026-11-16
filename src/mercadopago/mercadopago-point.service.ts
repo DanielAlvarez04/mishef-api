@@ -126,6 +126,11 @@ export class MercadoPagoPointService {
       {
         method: PaymentMethod.MERCADO_PAGO_POINT,
         amount: dto.amount,
+        tipAmount: dto.tipAmount,
+        tipPercent: dto.tipPercent,
+        tipSource: dto.tipSource,
+        tipBaseAmount: dto.tipBaseAmount,
+        splitId: dto.splitId,
         idempotencyKey: dto.idempotencyKey,
       },
       { paidAt: null, pointCharge: true },
@@ -474,7 +479,11 @@ export class MercadoPagoPointService {
   }
 
   private buildOrderPayload(
-    payment: { id: string; amount: Prisma.Decimal },
+    payment: {
+      id: string;
+      amount: Prisma.Decimal;
+      tipAmount: Prisma.Decimal;
+    },
     order: {
       id: string;
       tableNumber: string | null;
@@ -492,13 +501,17 @@ export class MercadoPagoPointService {
         ? 'Para llevar'
         : `Cuenta ${order.id.slice(-6)}`;
 
+    // La terminal cobra la venta más la propina en una sola operación; en la
+    // base siguen separadas para no alterar el saldo de la cuenta.
+    const terminalAmount = payment.amount.plus(payment.tipAmount ?? 0);
+
     return {
       type: 'point',
       external_reference: payment.id,
       expiration_time: 'PT5M',
       description: `Naranja Pimienta · ${label}`.slice(0, 120),
       transactions: {
-        payments: [{ amount: payment.amount.toFixed(2) }],
+        payments: [{ amount: terminalAmount.toFixed(2) }],
       },
       config: {
         point: {

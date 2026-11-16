@@ -30,6 +30,14 @@ export const ANALYTICS_EVENTS = {
   posItemDialogCancelled: 'pos.item_dialog_cancelled',
   /** POS: validación fallida antes de guardar un platillo. */
   posValidationError: 'pos.validation_error',
+  /** Pago registrado (pendiente o confirmado según el flujo). */
+  paymentRegistered: 'payment.registered',
+  /** Pago confirmado. */
+  paymentConfirmed: 'payment.confirmed',
+  /** Pago anulado o reembolsado. */
+  paymentVoided: 'payment.voided',
+  /** Se dividió una cuenta para cobrarla por partes. */
+  paymentSplitCreated: 'payment.split_created',
 } as const
 
 export type AnalyticsEventName =

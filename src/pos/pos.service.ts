@@ -439,6 +439,7 @@ export class PosService {
 
     return {
       organizationName: display.organization.name,
+      currency: display.organization.currency ?? 'MXN',
       branchName: display.branch?.name ?? null,
       displayName: display.name,
       state: (display.state as unknown as DisplayState | null) ?? null,
@@ -562,7 +563,7 @@ export class PosService {
     const display = await this.prisma.posDisplay.findFirst({
       where: { tokenHash: sha256(token), isActive: true },
       include: {
-        organization: { select: { name: true } },
+        organization: { select: { name: true, currency: true } },
         branch: { select: { name: true } },
       },
     });
