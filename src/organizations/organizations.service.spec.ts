@@ -2,10 +2,22 @@ import { NotFoundException, BadRequestException, ConflictException } from '@nest
 import { PrismaService } from '../prisma/prisma.service';
 import { OrganizationsService } from './organizations.service';
 
+// El DNS se sustituye por mocks: la verificación real se prueba en producción
+// con el dominio del negocio, aquí solo la lógica de decisión.
+jest.mock('node:dns/promises', () => ({
+  resolveTxt: jest.fn(),
+  resolveCname: jest.fn(),
+}));
+
+const txtMock = jest.requireMock('node:dns/promises').resolveTxt as jest.Mock;
+const cnameMock = jest.requireMock('node:dns/promises')
+  .resolveCname as jest.Mock;
+
 function createMocks() {
   const prisma: Record<string, any> = {
     organization: {
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
       update: jest.fn(),
     },
   };
@@ -67,52 +79,47 @@ describe('OrganizationsService', () => {
     expect(result.name).toBe('Café Central');
   });
 
-  it('acepta un dominio libre y lo normaliza', async () => {
+  it('conecta un dominio y devuelve las instrucciones de DNS', async () => {
     const { service, prisma } = createMocks();
-    // 1.ª consulta: la organización actual (por id). 2.ª: dominio destino, libre.
     prisma.organization.findUnique
       .mockResolvedValueOnce({
         id: 'org-1',
-        name: 'Café Central',
-        slug: 'naranja-pimienta',
+        slug: 'cafe-central',
         domain: null,
-        isActive: true,
+        domainToken: null,
+        domainVerifiedAt: null,
       })
       .mockResolvedValueOnce(null);
-    prisma.organization.update.mockResolvedValue({
-      id: 'org-1',
-      name: 'Café Central',
-      slug: 'naranja-pimienta',
-      domain: 'naranjapimienta.cafe',
-      isActive: true,
-    });
+    prisma.organization.update.mockResolvedValue({});
 
-    const result = await service.update('org-1', {
-      domain: ' NaranjaPimienta.Cafe ',
-    });
+    const result = await service.setDomain('org-1', ' App.MiCafeteria.com ');
 
-    expect(prisma.organization.findUnique).toHaveBeenCalledWith({
-      where: { domain: 'naranjapimienta.cafe' },
+    expect(result.domain).toBe('app.micafeteria.com');
+    expect(result.status).toBe('pending');
+    expect(result.cname).toEqual({
+      name: 'app.micafeteria.com',
+      value: 'cafe-central.mishef.co',
     });
-    expect(prisma.organization.update).toHaveBeenCalledWith({
-      where: { id: 'org-1' },
-      data: { domain: 'naranjapimienta.cafe' },
-    });
-    expect(result.domain).toBe('naranjapimienta.cafe');
+    expect(result.txt.name).toBe('_mishef.app.micafeteria.com');
+    expect(result.txt.value).toMatch(/^mishef-verify=[0-9a-f]{32}$/);
+
+    const data = prisma.organization.update.mock.calls[0][0].data;
+    expect(data.domain).toBe('app.micafeteria.com');
+    expect(data.domainVerifiedAt).toBeNull();
   });
 
   it('rechaza un dominio inválido', async () => {
     const { service, prisma } = createMocks();
     prisma.organization.findUnique.mockResolvedValue({
       id: 'org-1',
-      name: 'Café Central',
-      slug: 'naranja-pimienta',
+      slug: 'cafe-central',
       domain: null,
-      isActive: true,
+      domainToken: null,
+      domainVerifiedAt: null,
     });
 
     await expect(
-      service.update('org-1', { domain: 'sin punto' }),
+      service.setDomain('org-1', 'sin punto'),
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(prisma.organization.update).not.toHaveBeenCalled();
@@ -123,18 +130,86 @@ describe('OrganizationsService', () => {
     prisma.organization.findUnique
       .mockResolvedValueOnce({
         id: 'org-1',
-        name: 'Café Central',
-        slug: 'naranja-pimienta',
+        slug: 'cafe-central',
         domain: null,
-        isActive: true,
+        domainToken: null,
+        domainVerifiedAt: null,
       })
       .mockResolvedValueOnce({ id: 'org-2' });
 
     await expect(
-      service.update('org-1', { domain: 'naranjapimienta.cafe' }),
+      service.setDomain('org-1', 'app.micafeteria.com'),
     ).rejects.toBeInstanceOf(ConflictException);
 
     expect(prisma.organization.update).not.toHaveBeenCalled();
+  });
+
+  it('verifica el dominio cuando el TXT y el CNAME coinciden', async () => {
+    const { service, prisma } = createMocks();
+    prisma.organization.findUnique.mockResolvedValue({
+      slug: 'cafe-central',
+      domain: 'app.micafeteria.com',
+      domainToken: 'mishef-verify=abc',
+      domainVerifiedAt: null,
+    });
+    prisma.organization.update.mockResolvedValue({});
+
+    txtMock.mockResolvedValue([['mishef-verify=abc']]);
+    cnameMock.mockResolvedValue(['cafe-central.mishef.co.']);
+
+    const result = await service.verifyDomain('org-1');
+
+    expect(result.verified).toBe(true);
+    expect(result.checks).toEqual({ txt: true, cname: true });
+    expect(prisma.organization.update).toHaveBeenCalledWith({
+      where: { id: 'org-1' },
+      data: { domainVerifiedAt: expect.any(Date) },
+    });
+  });
+
+  it('no verifica si falta el TXT', async () => {
+    const { service, prisma } = createMocks();
+    prisma.organization.findUnique.mockResolvedValue({
+      slug: 'cafe-central',
+      domain: 'app.micafeteria.com',
+      domainToken: 'mishef-verify=abc',
+      domainVerifiedAt: null,
+    });
+
+    txtMock.mockRejectedValue(new Error('ENOTFOUND'));
+    cnameMock.mockResolvedValue(['cafe-central.mishef.co.']);
+
+    const result = await service.verifyDomain('org-1');
+
+    expect(result.verified).toBe(false);
+    expect(result.checks).toEqual({ txt: false, cname: true });
+    expect(prisma.organization.update).not.toHaveBeenCalled();
+  });
+
+  it('resuelve el negocio solo si el dominio está verificado', async () => {
+    const { service, prisma } = createMocks();
+    prisma.organization.findFirst.mockResolvedValue({
+      name: 'Café Central',
+      slug: 'cafe-central',
+      brandColor: '#123456',
+      logoUrl: null,
+      address: null,
+      latitude: null,
+      longitude: null,
+    });
+
+    const tenant = await service.tenantByDomain('App.MiCafeteria.com:443');
+
+    expect(tenant.slug).toBe('cafe-central');
+    expect(prisma.organization.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          domain: 'app.micafeteria.com',
+          domainVerifiedAt: { not: null },
+          isActive: true,
+        },
+      }),
+    );
   });
 
   it('indica la disponibilidad de un dominio', async () => {

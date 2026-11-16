@@ -1,9 +1,12 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
+  HttpCode,
   Patch,
   Post,
+  Put,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -15,6 +18,7 @@ import { RequirePermissions } from '../common/decorators/require-permissions.dec
 import { RolesGuard } from '../common/guards/roles.guard';
 import { OrganizationsService } from './organizations.service';
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
+import { SetDomainDto } from './dto/set-domain.dto';
 
 @ApiTags('organizations')
 @Controller('organizations')
@@ -40,6 +44,28 @@ export class OrganizationsController {
   @Patch('current')
   update(@CurrentUser() user: JwtUser, @Body() dto: UpdateOrganizationDto) {
     return this.organizations.update(user.organizationId, dto);
+  }
+
+  @ApiOperation({ summary: 'Conectar un dominio propio (queda pendiente)' })
+  @RequirePermissions('organization:manage')
+  @Put('domain')
+  setDomain(@CurrentUser() user: JwtUser, @Body() dto: SetDomainDto) {
+    return this.organizations.setDomain(user.organizationId, dto.domain);
+  }
+
+  @ApiOperation({ summary: 'Verificar el dominio contra el DNS' })
+  @HttpCode(200)
+  @RequirePermissions('organization:manage')
+  @Post('domain/verify')
+  verifyDomain(@CurrentUser() user: JwtUser) {
+    return this.organizations.verifyDomain(user.organizationId);
+  }
+
+  @ApiOperation({ summary: 'Desconectar el dominio propio' })
+  @RequirePermissions('organization:manage')
+  @Delete('domain')
+  removeDomain(@CurrentUser() user: JwtUser) {
+    return this.organizations.removeDomain(user.organizationId);
   }
 
   @ApiOperation({ summary: 'Cerrar el modo práctica de la organización' })

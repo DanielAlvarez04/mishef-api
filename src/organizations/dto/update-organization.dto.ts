@@ -16,14 +16,8 @@ import { SUPPORTED_CURRENCIES } from '../../common/currency';
 export class UpdateOrganizationDto {
   @IsOptional()
   @IsString()
-  @MinLength(2)
   @MaxLength(80)
   name?: string;
-
-  @IsOptional()
-  @IsString()
-  @MaxLength(80)
-  domain?: string;
 
   /** Color primario de la marca, `#rrggbb`. */
   @IsOptional()

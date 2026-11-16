@@ -206,7 +206,11 @@ model Organization {
   id        String   @id @default(cuid())
   name      String
   slug      String   @unique
-  domain    String?  @unique // dominio de los usuarios del equipo (ej. naranjapimienta.cafe)
+  domain    String?  @unique // dominio personalizado del negocio (ej. app.micafeteria.com)
+  /// Token que el negocio publica en `_mishef.<domain>` para demostrar control.
+  domainToken      String?
+  /// `null` mientras el dominio no esté verificado.
+  domainVerifiedAt DateTime?
   taxRate   Decimal  @default(0.16) @db.Decimal(5, 4) // IVA por defecto del negocio (0.16 = 16 %)
   /// Código ISO 4217 de la moneda del negocio (ver `src/common/currency.ts`).
   currency  String   @default("MXN")

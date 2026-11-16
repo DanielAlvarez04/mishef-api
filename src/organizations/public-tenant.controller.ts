@@ -32,4 +32,10 @@ export class PublicTenantController {
   tenant(@Param('slug') slug: string) {
     return this.organizations.tenant(slug);
   }
+
+  @ApiOperation({ summary: 'Negocio por su dominio propio verificado' })
+  @Get('tenant-by-domain')
+  tenantByDomain(@Query('host') host?: string) {
+    return this.organizations.tenantByDomain(host ?? '');
+  }
 }

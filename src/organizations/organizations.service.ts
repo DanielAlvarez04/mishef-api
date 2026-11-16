@@ -5,6 +5,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { randomBytes } from 'node:crypto';
+import { resolveCname, resolveTxt } from 'node:dns/promises';
 import { PrismaService } from '../prisma/prisma.service';
 import { PRACTICE_WINDOW_MS } from '../common/practice';
 import { isEmptyPatch, sameDecimal, sameStringSet } from '../common/patch';
@@ -41,6 +43,8 @@ export class OrganizationsService {
       name: organization.name,
       slug: organization.slug,
       domain: organization.domain,
+      domainToken: organization.domainToken ?? null,
+      domainVerifiedAt: organization.domainVerifiedAt?.toISOString() ?? null,
       taxRate: organization.taxRate?.toString() ?? '0.16',
       currency: organization.currency ?? 'MXN',
       brandColor: organization.brandColor ?? null,
@@ -175,6 +179,237 @@ export class OrganizationsService {
     };
   }
 
+  /** Nombre del TXT donde el negocio publica el token de verificación. */
+  private domainTxtName(domain: string): string {
+    return `_mishef.${domain}`;
+  }
+
+  private get tenantBaseDomain(): string {
+    return (process.env.TENANT_DOMAIN ?? 'mishef.co').trim().toLowerCase();
+  }
+
+  private domainInstructions(
+    slug: string,
+    domain: string,
+    token: string,
+    verifiedAt: Date | null,
+  ) {
+    return {
+      domain,
+      status: verifiedAt ? ('verified' as const) : ('pending' as const),
+      verifiedAt: verifiedAt?.toISOString() ?? null,
+      /** Registro CNAME que apunta al subdominio del negocio. */
+      cname: { name: domain, value: `${slug}.${this.tenantBaseDomain}` },
+      /** Registro TXT que demuestra el control del dominio. */
+      txt: { name: this.domainTxtName(domain), value: token },
+    };
+  }
+
+  /**
+   * Conecta un dominio propio. Queda **pendiente** hasta que el DNS responda:
+   * un dominio escrito a mano sin verificar no debe servir tráfico, porque
+   * cualquiera podría reclamar el de otro.
+   */
+  async setDomain(organizationId: string | null, rawDomain: string) {
+    if (!organizationId) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    const current = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: {
+        id: true,
+        slug: true,
+        domain: true,
+        domainToken: true,
+        domainVerifiedAt: true,
+      },
+    });
+
+    if (!current) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    const domain = normalizeDomain(rawDomain ?? '');
+
+    if (!isValidDomain(domain)) {
+      throw new BadRequestException('El dominio no es válido');
+    }
+
+    // Volver a enviar el mismo dominio no rota el token: si el DNS ya estaba
+    // publicado, el negocio no tiene que volver a tocar su proveedor.
+    if (domain === current.domain && current.domainToken) {
+      return this.domainInstructions(
+        current.slug,
+        domain,
+        current.domainToken,
+        current.domainVerifiedAt,
+      );
+    }
+
+    const taken = await this.prisma.organization.findUnique({
+      where: { domain },
+      select: { id: true },
+    });
+
+    if (taken && taken.id !== organizationId) {
+      throw new ConflictException('Ese dominio ya está en uso');
+    }
+
+    const token = `mishef-verify=${randomBytes(16).toString('hex')}`;
+
+    await this.prisma.organization.update({
+      where: { id: organizationId },
+      data: { domain, domainToken: token, domainVerifiedAt: null },
+    });
+
+    return this.domainInstructions(current.slug, domain, token, null);
+  }
+
+  /**
+   * Comprueba el CNAME y el TXT contra el DNS real.
+   *
+   * Devuelve qué falló en lugar de lanzar: el panel muestra dos palomitas y el
+   * usuario entiende qué registro le falta.
+   */
+  async verifyDomain(organizationId: string | null) {
+    if (!organizationId) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    const organization = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: {
+        slug: true,
+        domain: true,
+        domainToken: true,
+        domainVerifiedAt: true,
+      },
+    });
+
+    if (!organization?.domain || !organization.domainToken) {
+      throw new BadRequestException('Primero conecta un dominio');
+    }
+
+    const expectedCname = `${organization.slug}.${this.tenantBaseDomain}`;
+    let txt = false;
+    let cname = false;
+
+    try {
+      const records = await resolveTxt(
+        this.domainTxtName(organization.domain),
+      );
+      txt = records
+        .map((parts) => parts.join(''))
+        .some((value) => value.trim() === organization.domainToken);
+    } catch {
+      txt = false;
+    }
+
+    try {
+      const records = await resolveCname(organization.domain);
+      cname = records.some(
+        (value) => value.replace(/\.$/, '').toLowerCase() === expectedCname,
+      );
+    } catch {
+      cname = false;
+    }
+
+    if (txt && cname) {
+      const verifiedAt = new Date();
+
+      await this.prisma.organization.update({
+        where: { id: organizationId },
+        data: { domainVerifiedAt: verifiedAt },
+      });
+
+      return {
+        verified: true as const,
+        checks: { txt: true, cname: true },
+        ...this.domainInstructions(
+          organization.slug,
+          organization.domain,
+          organization.domainToken,
+          verifiedAt,
+        ),
+      };
+    }
+
+    return {
+      verified: false as const,
+      checks: { txt, cname },
+      ...this.domainInstructions(
+        organization.slug,
+        organization.domain,
+        organization.domainToken,
+        null,
+      ),
+    };
+  }
+
+  /** Desconecta el dominio y borra el token. */
+  async removeDomain(organizationId: string | null) {
+    if (!organizationId) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    await this.prisma.organization.update({
+      where: { id: organizationId },
+      data: { domain: null, domainToken: null, domainVerifiedAt: null },
+    });
+
+    return { ok: true };
+  }
+
+  /**
+   * Resuelve un negocio por su dominio propio **verificado**.
+   *
+   * Solo devuelve datos públicos. Un dominio pendiente no resuelve: si no, se
+   * podría reclamar el de otra persona y recibir su tráfico.
+   */
+  async tenantByDomain(rawHost: string) {
+    const host = (rawHost ?? '')
+      .trim()
+      .toLowerCase()
+      .replace(/:\d+$/, '')
+      .replace(/\.$/, '');
+
+    if (!isValidDomain(host)) {
+      throw new NotFoundException('Negocio no encontrado');
+    }
+
+    const organization = await this.prisma.organization.findFirst({
+      where: {
+        domain: host,
+        domainVerifiedAt: { not: null },
+        isActive: true,
+      },
+      select: {
+        name: true,
+        slug: true,
+        brandColor: true,
+        logoUrl: true,
+        address: true,
+        latitude: true,
+        longitude: true,
+      },
+    });
+
+    if (!organization) {
+      throw new NotFoundException('Negocio no encontrado');
+    }
+
+    return {
+      name: organization.name,
+      slug: organization.slug,
+      brandColor: organization.brandColor ?? null,
+      logoUrl: organization.logoUrl ?? null,
+      address: organization.address ?? null,
+      latitude: organization.latitude?.toString() ?? null,
+      longitude: organization.longitude?.toString() ?? null,
+    };
+  }
+
   async update(organizationId: string | null, dto: UpdateOrganizationDto) {
     if (!organizationId) {
       throw new NotFoundException('Organización no encontrada');
@@ -190,7 +425,6 @@ export class OrganizationsService {
 
     const data: {
       name?: string;
-      domain?: string;
       taxRate?: Prisma.Decimal;
       currency?: string;
       brandColor?: string | null;
@@ -210,26 +444,6 @@ export class OrganizationsService {
     if (dto.name !== undefined) {
       const name = dto.name.trim();
       if (name !== current.name) data.name = name;
-    }
-
-    if (dto.domain !== undefined) {
-      const domain = normalizeDomain(dto.domain);
-
-      if (!isValidDomain(domain)) {
-        throw new BadRequestException('El dominio no es válido');
-      }
-
-      if (domain !== current.domain) {
-        const taken = await this.prisma.organization.findUnique({
-          where: { domain },
-        });
-
-        if (taken && taken.id !== organizationId) {
-          throw new ConflictException('Ese dominio ya está en uso');
-        }
-
-        data.domain = domain;
-      }
     }
 
     if (dto.taxRate !== undefined) {
@@ -340,6 +554,8 @@ export class OrganizationsService {
       name: organization.name,
       slug: organization.slug,
       domain: organization.domain,
+      domainToken: organization.domainToken ?? null,
+      domainVerifiedAt: organization.domainVerifiedAt?.toISOString() ?? null,
       taxRate: organization.taxRate?.toString() ?? '0.16',
       currency: organization.currency ?? 'MXN',
       brandColor: organization.brandColor ?? null,
