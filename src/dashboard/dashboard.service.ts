@@ -312,6 +312,262 @@ export class DashboardService {
   }
 
   /** Reporte de ventas: totales, métodos de pago, serie diaria y productos. */
+  /**
+   * Señales de fuga interna del periodo.
+   *
+   * Cruza pedidos (cancelados y cerrados), pagos y `AuditLog` para responder
+   * tres preguntas que un dueño hace todas las semanas:
+   *
+   *  1. ¿Quién cancela cuentas más que el resto del equipo?
+   *  2. ¿Hay cuentas cerradas sin el pago completo?
+   *  3. ¿Hay cuentas cuyo total no coincide con sus conceptos (descuento no
+   *     registrado)?
+   *
+   * No acusa a nadie: señala patrones con su evidencia para que el dueño
+   * revise. El umbral es conservador para no llenar la pantalla de ruido.
+   */
+  async leakageReport(
+    organizationId: string | null,
+    days = 30,
+    branchId: string | null = null,
+  ) {
+    const periodDays = Math.min(365, Math.max(1, Math.trunc(days)));
+    const from = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000);
+    const to = new Date();
+
+    if (!organizationId) {
+      return {
+        from: from.toISOString(),
+        to: to.toISOString(),
+        days: periodDays,
+        summary: null,
+        users: [],
+        ordersWithoutPayment: [],
+        discounts: [],
+      };
+    }
+
+    const branchFilter = branchId ? { branchId } : {};
+
+    const [orders, audit] = await Promise.all([
+      this.prisma.order.findMany({
+        where: {
+          organizationId,
+          ...branchFilter,
+          createdAt: { gte: from, lte: to },
+          status: { in: [OrderStatus.CLOSED, OrderStatus.CANCELLED] },
+        },
+        select: {
+          id: true,
+          userId: true,
+          status: true,
+          total: true,
+          subtotal: true,
+          taxTotal: true,
+          ticketNumber: true,
+          tableNumber: true,
+          createdAt: true,
+          updatedAt: true,
+          payments: {
+            select: { amount: true, tipAmount: true, status: true },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.auditLog.findMany({
+        where: {
+          organizationId,
+          createdAt: { gte: from, lte: to },
+          action: {
+            in: ['order.cancelled', 'payment.cancelled', 'payment.refunded'],
+          },
+        },
+        select: { action: true, userId: true },
+      }),
+    ]);
+
+    const round2 = (value: number) =>
+      Math.round((value + Number.EPSILON) * 100) / 100;
+
+    const users = new Map<
+      string,
+      {
+        userId: string;
+        cancellations: number;
+        refunds: number;
+        ordersClosed: number;
+        ordersWithoutPayment: number;
+        sales: number;
+        riskScore: number;
+      }
+    >();
+
+    const userEntry = (userId: string) => {
+      const current = users.get(userId) ?? {
+        userId,
+        cancellations: 0,
+        refunds: 0,
+        ordersClosed: 0,
+        ordersWithoutPayment: 0,
+        sales: 0,
+        riskScore: 0,
+      };
+      users.set(userId, current);
+      return current;
+    };
+
+    const ordersWithoutPayment: Array<{
+      id: string;
+      userId: string | null;
+      ticketNumber: number | null;
+      tableNumber: string | null;
+      total: number;
+      paid: number;
+      missing: number;
+      createdAt: string;
+    }> = [];
+
+    const discounts: Array<{
+      id: string;
+      userId: string | null;
+      ticketNumber: number | null;
+      expected: number;
+      total: number;
+      difference: number;
+      createdAt: string;
+    }> = [];
+
+    for (const order of orders) {
+      const paid = order.payments
+        .filter((payment) => payment.status === PaymentStatus.CONFIRMED)
+        .reduce(
+          (sum, payment) =>
+            sum + Number(payment.amount) + Number(payment.tipAmount),
+          0,
+        );
+
+      if (order.userId) {
+        const entry = userEntry(order.userId);
+
+        if (order.status === OrderStatus.CANCELLED) {
+          entry.cancellations += 1;
+        } else {
+          entry.ordersClosed += 1;
+          entry.sales += Number(order.total);
+        }
+      }
+
+      if (order.status !== OrderStatus.CLOSED) continue;
+
+      const total = Number(order.total);
+      const expected = Number(order.subtotal) + Number(order.taxTotal);
+      const missing = round2(total - paid);
+
+      // Cuenta cerrada sin el pago completo (o pagada de más).
+      if (Math.abs(missing) > 0.01) {
+        ordersWithoutPayment.push({
+          id: order.id,
+          userId: order.userId,
+          ticketNumber: order.ticketNumber,
+          tableNumber: order.tableNumber,
+          total: round2(total),
+          paid: round2(paid),
+          missing,
+          createdAt: order.createdAt.toISOString(),
+        });
+
+        if (order.userId && missing > 0) {
+          userEntry(order.userId).ordersWithoutPayment += 1;
+        }
+      }
+
+      // El total no coincide con los conceptos: descuento o ajuste manual que
+      // no quedó registrado en la cuenta.
+      const unexplained = round2(expected - total);
+
+      if (unexplained > 0.01) {
+        discounts.push({
+          id: order.id,
+          userId: order.userId,
+          ticketNumber: order.ticketNumber,
+          expected: round2(expected),
+          total: round2(total),
+          difference: unexplained,
+          createdAt: order.createdAt.toISOString(),
+        });
+      }
+    }
+
+    for (const log of audit) {
+      if (!log.userId) continue;
+      const entry = userEntry(log.userId);
+      if (log.action === 'order.cancelled') entry.cancellations += 1;
+      else entry.refunds += 1;
+    }
+
+    // Puntaje simple y explicable: una cancelación pesa 2, un reembolso 3 y una
+    // cuenta sin pago 3. Con 4 o más se muestra en la lista de revisión.
+    for (const entry of users.values()) {
+      entry.riskScore =
+        entry.cancellations * 2 +
+        entry.refunds * 3 +
+        entry.ordersWithoutPayment * 3;
+    }
+
+    const userIds = [...users.keys()];
+
+    const people = userIds.length
+      ? await this.prisma.user.findMany({
+          where: { id: { in: userIds } },
+          select: { id: true, name: true, username: true, email: true },
+        })
+      : [];
+
+    const names = new Map(people.map((person) => [person.id, person]));
+
+    const flagged = [...users.values()]
+      .filter((entry) => entry.riskScore >= 4)
+      .sort((a, b) => b.riskScore - a.riskScore)
+      .map((entry) => ({
+        ...entry,
+        name: names.get(entry.userId)?.name ?? null,
+        username: names.get(entry.userId)?.username ?? null,
+        email: names.get(entry.userId)?.email ?? null,
+        sales: round2(entry.sales),
+      }));
+
+    return {
+      from: from.toISOString(),
+      to: to.toISOString(),
+      days: periodDays,
+      summary: {
+        orders: orders.length,
+        cancelledOrders: orders.filter(
+          (order) => order.status === OrderStatus.CANCELLED,
+        ).length,
+        cancellations: audit.filter(
+          (log) => log.action === 'order.cancelled',
+        ).length,
+        refunds: audit.filter((log) => log.action !== 'order.cancelled')
+          .length,
+        ordersWithoutPayment: ordersWithoutPayment.length,
+        missingAmount: round2(
+          ordersWithoutPayment
+            .filter((order) => order.missing > 0)
+            .reduce((sum, order) => sum + order.missing, 0),
+        ),
+        discounts: discounts.length,
+        discountAmount: round2(
+          discounts.reduce((sum, order) => sum + order.difference, 0),
+        ),
+        usersFlagged: flagged.length,
+      },
+      users: flagged,
+      ordersWithoutPayment: ordersWithoutPayment.slice(0, 50),
+      discounts: discounts.slice(0, 50),
+    };
+  }
+
   async salesReport(
     organizationId: string | null,
     from: Date,

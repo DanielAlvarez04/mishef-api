@@ -42,6 +42,21 @@ export class DashboardController {
     );
   }
 
+  @ApiOperation({ summary: 'Señales de fuga interna del periodo' })
+  @RequirePermissions('reports:read')
+  @Get('reports/leakage')
+  leakage(
+    @CurrentUser() user: JwtUser,
+    @CurrentBranch() branchId: string | null,
+    @Query('days') days?: string,
+  ) {
+    return this.dashboard.leakageReport(
+      user.organizationId,
+      days ? parseDays(days) : 30,
+      branchId,
+    );
+  }
+
   @ApiOperation({ summary: 'Reporte de ventas del periodo' })
   @RequirePermissions('reports:read')
   @Get('reports/sales')
