@@ -128,35 +128,25 @@ describe('AuthService', () => {
     expect(result).toMatchObject({ user: { id: 'user-1' } });
   });
 
-  it('inicia sesión con un usuario que incluye el dominio del negocio', async () => {
+  it('no permite entrar con un usuario que parece correo', async () => {
     const { service, prisma } = createMocks();
-    prisma.user.findUnique
-      .mockResolvedValueOnce(null)
-      .mockResolvedValue(
-        await userFixture({
-          username: 'ana@naranjapimienta.cafe',
-          email: null,
-        }),
-      );
+    prisma.user.findUnique.mockResolvedValue(null);
 
-    const result = await service.login({
-      identifier: ' Ana@NaranjaPimienta.Cafe ',
-      password: 'Naranja123!',
-    });
+    await expect(
+      service.login({
+        identifier: 'ana@naranjapimienta.cafe',
+        password: 'Naranja123!',
+      }),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
 
-    expect(prisma.user.findUnique).toHaveBeenNthCalledWith(
-      1,
+    // Una sola consulta, por correo. El nombre de usuario con `@` ya no es una
+    // vía de acceso: se eliminó para que no se confundan cuentas.
+    expect(prisma.user.findUnique).toHaveBeenCalledTimes(1);
+    expect(prisma.user.findUnique).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { email: 'ana@naranjapimienta.cafe' },
       }),
     );
-    expect(prisma.user.findUnique).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        where: { username: 'ana@naranjapimienta.cafe' },
-      }),
-    );
-    expect(result).toMatchObject({ user: { id: 'user-1' } });
   });
 
   it('rechaza una cuenta sin contraseña (solo Google)', async () => {

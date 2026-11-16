@@ -171,21 +171,15 @@ export class AuthService {
       },
     } as const;
 
-    // El correo gana; si no hay cuenta con ese correo, el identificador puede
-    // ser un usuario con dominio (`ana@naranjapimienta.cafe`).
+    // El identificador con `@` es siempre un correo. Antes se probaba también
+    // como `username`, lo que permitía crear usuarios con forma de correo y
+    // confundir cuentas entre negocios: ya no se admite.
     let user = await this.prisma.user.findUnique({
       where: identifier.includes('@')
         ? { email: identifier }
         : { username: identifier },
       include,
     });
-
-    if (!user && identifier.includes('@')) {
-      user = await this.prisma.user.findUnique({
-        where: { username: identifier },
-        include,
-      });
-    }
 
     if (!user || !user.passwordHash) {
       throw new UnauthorizedException('Credenciales inválidas');
