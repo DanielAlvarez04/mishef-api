@@ -3,10 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, WasteReason } from '@prisma/client';
-import { randomUUID } from 'node:crypto';
-import { PutObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { Prisma, WasteReason, type Waste } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   sameDimension,
@@ -15,13 +12,19 @@ import {
 } from '../common/units';
 import {
   IMAGE_CONTENT_TYPES,
+  buildTempObjectKey,
   deleteR2Object,
+  getR2Object,
+  isTempObjectKey,
   maxUploadBytes,
-  objectSize,
-  publicUrlForKey,
-  r2Bucket,
-  r2Client,
+  presignPutUrl,
+  type ImageContentType,
 } from '../uploads/r2';
+import { imageFallbackUrl } from '../uploads/image-assets';
+import {
+  storeOptimizedImage,
+  type StoredImage,
+} from '../uploads/image-storage';
 import { StorageService } from '../storage/storage.service';
 import { CreateWasteDto } from './dto/waste.dto';
 
@@ -38,10 +41,10 @@ export class WasteService {
   /**
    * Firma la subida de la foto de la merma.
    *
-   * Va a `{org}/waste/` en el bucket público, con el mismo formato que el resto
-   * de imágenes: la clave se guarda y la URL se arma al leer. La cuota se
-   * comprueba aquí (con el tamaño que manda el navegador) y otra vez al
-   * registrar la merma, con el tamaño real del objeto.
+   * El original va a `{org}/tmp/` y al registrar la merma se optimiza igual
+   * que el resto de imágenes (AVIF/JPEG 640 y 1280): en el bucket nunca queda
+   * la foto original. La cuota se comprueba aquí con el tamaño que manda el
+   * navegador y otra vez al guardar, con los bytes reales de las variantes.
    */
   async presignPhoto(
     organizationId: string | null,
@@ -54,28 +57,18 @@ export class WasteService {
 
     await this.storage.assertWithinLimit(organizationId, size);
 
-    const ext =
-      IMAGE_CONTENT_TYPES[contentType as keyof typeof IMAGE_CONTENT_TYPES];
+    const type = contentType as ImageContentType;
 
-    if (!ext) {
-      throw new BadRequestException(
-        'La foto debe ser JPEG, PNG o WebP',
-      );
+    if (!IMAGE_CONTENT_TYPES[type]) {
+      throw new BadRequestException('La foto debe ser JPEG, PNG o WebP');
     }
 
-    const key = `${organizationId}/waste/${randomUUID()}.${ext}`;
+    const key = buildTempObjectKey(organizationId, type);
 
-    const uploadUrl = await getSignedUrl(
-      r2Client(),
-      new PutObjectCommand({
-        Bucket: r2Bucket(),
-        Key: key,
-        ContentType: contentType,
-      }),
-      { expiresIn: 300 },
-    );
-
-    return { key, uploadUrl, publicUrl: publicUrlForKey(key) };
+    return {
+      key,
+      uploadUrl: await presignPutUrl(key, type),
+    };
   }
 
   async create(
@@ -120,17 +113,18 @@ export class WasteService {
     const unitCost = ingredient.unitCost ?? new Prisma.Decimal(0);
     const cost = toMoney(quantity.times(unitCost));
 
-    const photoKey = dto.photoKey?.trim() || null;
+    const photoInputKey = dto.photoKey?.trim() || null;
+    let photo: StoredImage | null = null;
     let photoBytes = 0;
 
-    if (photoKey) {
-      if (!photoKey.startsWith(`${organizationId}/waste/`)) {
+    if (photoInputKey) {
+      if (!isTempObjectKey(organizationId, photoInputKey)) {
         throw new BadRequestException('La foto no pertenece a este negocio');
       }
 
-      const size = await objectSize(photoKey);
+      const buffer = await getR2Object(photoInputKey);
 
-      if (size === null) {
+      if (!buffer) {
         throw new BadRequestException(
           'La foto no se subió o ya no está disponible. Vuelve a intentarlo.',
         );
@@ -138,36 +132,57 @@ export class WasteService {
 
       const maxBytes = maxUploadBytes();
 
-      if (size > maxBytes) {
-        await deleteR2Object(photoKey);
+      if (buffer.length > maxBytes) {
+        await deleteR2Object(photoInputKey);
         throw new BadRequestException(
           `La foto supera el máximo de ${Math.round(maxBytes / 1024 / 1024)} MB`,
         );
       }
 
-      await this.storage.assertWithinLimit(organizationId, size);
-      photoBytes = size;
+      try {
+        // Igual que el catálogo: se generan AVIF/JPEG 640 y 1280. El original
+        // temporal se borra siempre, incluso si la optimización falla.
+        photo = await storeOptimizedImage(`${organizationId}/waste`, buffer);
+      } finally {
+        await deleteR2Object(photoInputKey);
+      }
+
+      try {
+        await this.storage.assertWithinLimit(organizationId, photo.bytes);
+      } catch (error) {
+        // La imagen recién escrita no se ha contado: se borra sin descontar.
+        await this.storage.releaseImage(null, photo.key);
+        throw error;
+      }
+
+      photoBytes = photo.bytes;
     }
 
-    const waste = await this.prisma.waste.create({
-      data: {
-        organizationId,
-        branchId,
-        ingredientId: ingredient.id,
-        ingredientName: ingredient.name,
-        quantity,
-        displayUnit: ingredient.displayUnit,
-        reason: dto.reason,
-        note: dto.note?.trim() || null,
-        cost,
-        photoKey,
-        photoUrl: photoKey ? publicUrlForKey(photoKey) : null,
-        userId,
-      },
-    });
+    let waste: Waste;
 
-    // La foto de merma no se optimiza: se guarda tal cual y se contabiliza su
-    // tamaño real en la cuota.
+    try {
+      waste = await this.prisma.waste.create({
+        data: {
+          organizationId,
+          branchId,
+          ingredientId: ingredient.id,
+          ingredientName: ingredient.name,
+          quantity,
+          displayUnit: ingredient.displayUnit,
+          reason: dto.reason,
+          note: dto.note?.trim() || null,
+          cost,
+          photoKey: photo?.key ?? null,
+          photoUrl: photo ? imageFallbackUrl(photo.assets) : null,
+          userId,
+        },
+      });
+    } catch (error) {
+      // Sin registro no hay quien referencie la imagen: se borra.
+      if (photo) await this.storage.releaseImage(null, photo.key);
+      throw error;
+    }
+
     await this.storage.add(organizationId, photoBytes);
 
     return {

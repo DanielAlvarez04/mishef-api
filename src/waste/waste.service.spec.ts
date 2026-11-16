@@ -5,7 +5,12 @@ import {
 } from '@nestjs/common';
 import { Prisma, UnitCode, WasteReason } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { deleteR2Object, objectSize } from '../uploads/r2';
+import {
+  deleteR2Object,
+  getR2Object,
+  maxUploadBytes,
+} from '../uploads/r2';
+import { storeOptimizedImage } from '../uploads/image-storage';
 import { WasteService } from './waste.service';
 
 jest.mock('../uploads/r2', () => {
@@ -13,18 +18,24 @@ jest.mock('../uploads/r2', () => {
 
   return {
     ...actual,
-    objectSize: jest.fn(),
+    getR2Object: jest.fn(),
     deleteR2Object: jest.fn(),
+    maxUploadBytes: jest.fn(() => 5 * 1024 * 1024),
   };
 });
 
-const sizeMock = objectSize as jest.Mock;
-const deleteMock = deleteR2Object as jest.Mock;
+jest.mock('../uploads/image-storage', () => ({
+  storeOptimizedImage: jest.fn(),
+}));
 
-process.env.R2_PUBLIC_BASE_URL = 'https://img.test';
+const getMock = getR2Object as jest.Mock;
+const deleteMock = deleteR2Object as jest.Mock;
+const optimizeMock = storeOptimizedImage as jest.Mock;
+const maxMock = maxUploadBytes as jest.Mock;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  maxMock.mockReturnValue(5 * 1024 * 1024);
 });
 
 function build() {
@@ -41,6 +52,7 @@ function build() {
   const storage = {
     add: jest.fn(),
     assertWithinLimit: jest.fn(),
+    releaseImage: jest.fn(),
   };
 
   const service = new WasteService(
@@ -187,8 +199,32 @@ describe('WasteService — merma', () => {
   });
 });
 
-describe('WasteService — foto y cuota', () => {
-  const photoKey = 'org1/waste/foto.jpg';
+describe('WasteService — foto optimizada y cuota', () => {
+  const tempKey = 'org1/tmp/foto.jpg';
+  const buffer = Buffer.from('foto-original');
+
+  const stored = {
+    key: 'org1/waste/hash-1000x1000',
+    bytes: 2048,
+    assets: {
+      width: 1000,
+      height: 1000,
+      variants: [
+        {
+          width: 640,
+          height: 640,
+          avif: 'https://img.test/org1/waste/hash-640.avif',
+          jpg: 'https://img.test/org1/waste/hash-640.jpg',
+        },
+        {
+          width: 1000,
+          height: 1000,
+          avif: 'https://img.test/org1/waste/hash-1000.avif',
+          jpg: 'https://img.test/org1/waste/hash-1000.jpg',
+        },
+      ],
+    },
+  };
 
   it('rechaza la foto de otro negocio', async () => {
     const { service, prisma } = build();
@@ -199,52 +235,55 @@ describe('WasteService — foto y cuota', () => {
         ingredientId: 'i1',
         quantity: '10',
         reason: WasteReason.SPILL,
-        photoKey: 'org2/waste/foto.jpg',
+        photoKey: 'org2/tmp/foto.jpg',
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
 
+    expect(getMock).not.toHaveBeenCalled();
     expect(prisma.waste.create).not.toHaveBeenCalled();
   });
 
-  it('rechaza la foto que ya no está en R2', async () => {
+  it('rechaza la foto temporal que ya no está en R2', async () => {
     const { service, prisma } = build();
     prisma.ingredient.findFirst.mockResolvedValue(ingredient);
-    sizeMock.mockResolvedValue(null);
+    getMock.mockResolvedValue(null);
 
     await expect(
       service.create('org1', 'u1', null, {
         ingredientId: 'i1',
         quantity: '10',
         reason: WasteReason.SPILL,
-        photoKey,
+        photoKey: tempKey,
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(prisma.waste.create).not.toHaveBeenCalled();
   });
 
-  it('rechaza la foto que supera el máximo y borra el objeto', async () => {
+  it('rechaza la foto que supera el máximo y borra el temporal', async () => {
     const { service, prisma } = build();
     prisma.ingredient.findFirst.mockResolvedValue(ingredient);
-    sizeMock.mockResolvedValue(50 * 1024 * 1024);
+    maxMock.mockReturnValue(1024);
+    getMock.mockResolvedValue(Buffer.alloc(2048));
 
     await expect(
       service.create('org1', 'u1', null, {
         ingredientId: 'i1',
         quantity: '10',
         reason: WasteReason.SPILL,
-        photoKey,
+        photoKey: tempKey,
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
 
-    expect(deleteMock).toHaveBeenCalledWith(photoKey);
+    expect(deleteMock).toHaveBeenCalledWith(tempKey);
     expect(prisma.waste.create).not.toHaveBeenCalled();
   });
 
-  it('rechaza la foto si no cabe en la cuota', async () => {
+  it('rechaza si las variantes no caben en la cuota y las borra', async () => {
     const { service, prisma, storage } = build();
     prisma.ingredient.findFirst.mockResolvedValue(ingredient);
-    sizeMock.mockResolvedValue(2048);
+    getMock.mockResolvedValue(buffer);
+    optimizeMock.mockResolvedValue(stored);
     storage.assertWithinLimit.mockRejectedValue(
       new PayloadTooLargeException('sin espacio'),
     );
@@ -254,28 +293,57 @@ describe('WasteService — foto y cuota', () => {
         ingredientId: 'i1',
         quantity: '10',
         reason: WasteReason.SPILL,
-        photoKey,
+        photoKey: tempKey,
       }),
     ).rejects.toBeInstanceOf(PayloadTooLargeException);
 
+    expect(storage.releaseImage).toHaveBeenCalledWith(null, stored.key);
     expect(prisma.waste.create).not.toHaveBeenCalled();
   });
 
-  it('guarda la clave y suma el tamaño real de la foto', async () => {
+  it('optimiza la foto, guarda la clave y suma los bytes reales', async () => {
     const { service, prisma, storage } = build();
     prisma.ingredient.findFirst.mockResolvedValue(ingredient);
-    sizeMock.mockResolvedValue(2048);
+    getMock.mockResolvedValue(buffer);
+    optimizeMock.mockResolvedValue(stored);
 
     const result = await service.create('org1', 'u1', null, {
       ingredientId: 'i1',
       quantity: '10',
       reason: WasteReason.SPILL,
-      photoKey,
+      photoKey: tempKey,
     });
 
-    expect(result.photoKey).toBe(photoKey);
-    expect(result.photoUrl).toBe(`https://img.test/${photoKey}`);
+    expect(optimizeMock).toHaveBeenCalledWith('org1/waste', buffer);
+    expect(deleteMock).toHaveBeenCalledWith(tempKey);
+    expect(result.photoKey).toBe(stored.key);
+    expect(result.photoUrl).toBe(
+      'https://img.test/org1/waste/hash-1000.jpg',
+    );
     expect(storage.assertWithinLimit).toHaveBeenCalledWith('org1', 2048);
     expect(storage.add).toHaveBeenCalledWith('org1', 2048);
+
+    const data = prisma.waste.create.mock.calls[0][0].data;
+    expect(data.photoKey).toBe(stored.key);
+    expect(data.photoUrl).toBe('https://img.test/org1/waste/hash-1000.jpg');
+  });
+
+  it('borra el temporal aunque la optimización falle', async () => {
+    const { service, prisma } = build();
+    prisma.ingredient.findFirst.mockResolvedValue(ingredient);
+    getMock.mockResolvedValue(buffer);
+    optimizeMock.mockRejectedValue(new Error('sharp falló'));
+
+    await expect(
+      service.create('org1', 'u1', null, {
+        ingredientId: 'i1',
+        quantity: '10',
+        reason: WasteReason.SPILL,
+        photoKey: tempKey,
+      }),
+    ).rejects.toThrow('sharp falló');
+
+    expect(deleteMock).toHaveBeenCalledWith(tempKey);
+    expect(prisma.waste.create).not.toHaveBeenCalled();
   });
 });
