@@ -1,4 +1,4 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Param, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { OrganizationsService } from './organizations.service';
 
@@ -25,5 +25,11 @@ export class PublicTenantController {
   @Get('slug-suggestion')
   slugSuggestion(@Query('name') name?: string) {
     return this.organizations.slugSuggestion(name ?? '');
+  }
+
+  @ApiOperation({ summary: 'Datos públicos de un negocio por su dirección' })
+  @Get('tenant/:slug')
+  tenant(@Param('slug') slug: string) {
+    return this.organizations.tenant(slug);
   }
 }

@@ -267,6 +267,7 @@ model Organization {
   posPairings   PosPairing[]
   posDisplays   PosDisplay[]
   imageJobs     ImageJob[]
+  invitations   Invitation[]
 }
 
 model User {
@@ -1675,4 +1676,26 @@ model ImageJob {
 
   @@index([organizationId, status])
   @@index([status, createdAt])
+}
+
+/// Invitación para que una persona entre al equipo de un negocio.
+///
+/// El token se guarda hasheado: si alguien obtiene una copia de la base no
+/// puede canjear invitaciones. Caduca y solo sirve una vez.
+model Invitation {
+  id             String   @id @default(cuid())
+  organizationId String
+  email          String
+  roles          Role[]   @default([])
+  branchId       String?
+  tokenHash      String   @unique
+  invitedById    String?
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, email])
+  @@index([expiresAt])
 }

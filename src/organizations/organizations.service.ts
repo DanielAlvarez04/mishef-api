@@ -128,6 +128,31 @@ export class OrganizationsService {
     return { slug: base, available: false as const };
   }
 
+  /**
+   * Datos públicos de un negocio a partir de su dirección.
+   *
+   * Lo usa el middleware del frontend para resolver `micafeteria.mishef.co`
+   * antes de que exista una sesión. Nunca devuelve datos internos.
+   */
+  async tenant(rawSlug: string) {
+    const slug = normalizeSlug(rawSlug ?? '');
+
+    if (!isValidSlug(slug)) {
+      throw new NotFoundException('Negocio no encontrado');
+    }
+
+    const organization = await this.prisma.organization.findUnique({
+      where: { slug },
+      select: { name: true, slug: true, isActive: true },
+    });
+
+    if (!organization || !organization.isActive) {
+      throw new NotFoundException('Negocio no encontrado');
+    }
+
+    return { name: organization.name, slug: organization.slug };
+  }
+
   async update(organizationId: string | null, dto: UpdateOrganizationDto) {
     if (!organizationId) {
       throw new NotFoundException('Organización no encontrada');

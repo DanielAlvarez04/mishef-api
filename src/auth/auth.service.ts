@@ -196,6 +196,22 @@ export class AuthService {
       throw new UnauthorizedException('Credenciales inválidas');
     }
 
+    // Si la petición viene de un subdominio de negocio, la cuenta debe
+    // pertenecer a esa organización. Sin esto, el login de `micafeteria`
+    // aceptaría a un empleado de otro negocio y la sesión se crearía igual.
+    if (dto.tenant) {
+      const tenant = normalizeSlug(dto.tenant);
+      const belongs = user.memberships.some(
+        (membership) => membership.organization?.slug === tenant,
+      );
+
+      if (!belongs) {
+        throw new UnauthorizedException(
+          'Esta cuenta no pertenece a este negocio',
+        );
+      }
+    }
+
     if (!user.isActive) {
       throw new UnauthorizedException('Usuario desactivado');
     }
