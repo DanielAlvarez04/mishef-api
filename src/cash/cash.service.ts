@@ -330,6 +330,194 @@ export class CashService {
   }
 
   /**
+   * Conciliación del turno para el cierre asistido.
+   *
+   * Devuelve de dónde sale cada peso del efectivo esperado (fondo, ventas,
+   * propinas, retiros, gastos, ingresos), lo que entró por otros medios y las
+   * alertas que el cajero debería revisar antes de cerrar. Con `counted`
+   * calcula la diferencia en vivo sin cerrar el turno.
+   */
+  async reconciliation(
+    organizationId: string | null,
+    sessionId: string,
+    counted?: number,
+  ) {
+    const session = await this.findSession(organizationId, sessionId);
+
+    const [payments, movements] = await Promise.all([
+      this.prisma.payment.findMany({
+        where: { sessionId, status: PaymentStatus.CONFIRMED },
+        select: { method: true, amount: true, tipAmount: true },
+      }),
+      this.prisma.cashMovement.findMany({
+        where: { sessionId },
+        select: { type: true, amount: true },
+      }),
+    ]);
+
+    const round2 = (value: number) =>
+      Math.round((value + Number.EPSILON) * 100) / 100;
+
+    let cashSales = 0;
+    let cashTips = 0;
+    let tipsTotal = 0;
+
+    const byMethod = new Map<
+      PaymentMethod,
+      { method: PaymentMethod; total: number; tips: number; count: number }
+    >();
+
+    for (const payment of payments) {
+      const amount = Number(payment.amount);
+      const tip = Number(payment.tipAmount);
+
+      tipsTotal += tip;
+
+      const row = byMethod.get(payment.method) ?? {
+        method: payment.method,
+        total: 0,
+        tips: 0,
+        count: 0,
+      };
+
+      row.total += amount;
+      row.tips += tip;
+      row.count += 1;
+      byMethod.set(payment.method, row);
+
+      if (payment.method === PaymentMethod.CASH) {
+        cashSales += amount;
+        cashTips += tip;
+      }
+    }
+
+    let withdrawals = 0;
+    let expenses = 0;
+    let deposits = 0;
+    let adjustments = 0;
+
+    for (const movement of movements) {
+      const amount = Number(movement.amount);
+
+      switch (movement.type) {
+        case CashMovementType.WITHDRAWAL:
+          withdrawals += amount;
+          break;
+        case CashMovementType.EXPENSE:
+          expenses += amount;
+          break;
+        case CashMovementType.DEPOSIT:
+          deposits += amount;
+          break;
+        default:
+          adjustments += amount;
+      }
+    }
+
+    const openingFloat = Number(session.openingFloat);
+    const expectedCash = round2(
+      openingFloat + cashSales + cashTips + deposits + adjustments -
+        withdrawals - expenses,
+    );
+
+    const nonCash = [...byMethod.values()].filter(
+      (row) => row.method !== PaymentMethod.CASH,
+    );
+
+    const alerts: Array<{ code: string; message: string }> = [];
+
+    if (expectedCash < 0) {
+      alerts.push({
+        code: 'negative_cash',
+        message:
+          'El efectivo esperado es negativo: revisa los retiros y los gastos del turno.',
+      });
+    }
+
+    if (withdrawals + expenses > openingFloat + cashSales + cashTips + deposits) {
+      alerts.push({
+        code: 'withdrawals_exceed_available',
+        message:
+          'Los retiros y gastos superan el efectivo disponible del turno.',
+      });
+    }
+
+    if (cashTips > 0) {
+      alerts.push({
+        code: 'cash_tips_included',
+        message: `El conteo debe incluir ${round2(cashTips)} de propinas en efectivo.`,
+      });
+    }
+
+    if (payments.length === 0) {
+      alerts.push({
+        code: 'no_payments',
+        message: 'El turno no tiene cobros confirmados.',
+      });
+    }
+
+    const proposed =
+      counted !== undefined && Number.isFinite(counted)
+        ? {
+            counted: round2(counted),
+            difference: round2(round2(counted) - expectedCash),
+          }
+        : null;
+
+    if (proposed && Math.abs(proposed.difference) >= 50) {
+      alerts.push({
+        code: 'large_difference',
+        message: `La diferencia del conteo es de ${proposed.difference}. Revisa antes de cerrar.`,
+      });
+    }
+
+    return {
+      sessionId: session.id,
+      status: session.status,
+      openedAt: session.openedAt,
+      openingFloat: round2(openingFloat),
+      cash: {
+        openingFloat: round2(openingFloat),
+        sales: round2(cashSales),
+        tips: round2(cashTips),
+        withdrawals: round2(withdrawals),
+        expenses: round2(expenses),
+        deposits: round2(deposits),
+        adjustments: round2(adjustments),
+        expected: expectedCash,
+      },
+      other: {
+        total: round2(
+          nonCash.reduce((sum, row) => sum + row.total + row.tips, 0),
+        ),
+        count: nonCash.reduce((sum, row) => sum + row.count, 0),
+      },
+      byMethod: [...byMethod.values()].map((row) => ({
+        ...row,
+        total: round2(row.total),
+        tips: round2(row.tips),
+      })),
+      tips: {
+        total: round2(tipsTotal),
+        cash: round2(cashTips),
+        other: round2(tipsTotal - cashTips),
+      },
+      totals: {
+        payments: payments.length,
+        amount: round2(
+          payments.reduce(
+            (sum, payment) =>
+              sum + Number(payment.amount) + Number(payment.tipAmount),
+            0,
+          ),
+        ),
+      },
+      proposed,
+      alerts,
+    };
+  }
+
+  /**
    * Cobros agrupados por usuario para detectar fallas o manejos indebidos:
    * ventas, propinas, anulaciones, reembolsos y cuentas canceladas.
    */

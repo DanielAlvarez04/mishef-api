@@ -58,6 +58,19 @@ export class CashController {
     return this.cash.detail(user.organizationId, id);
   }
 
+  @ApiOperation({ summary: 'Conciliación del turno (cierre asistido)' })
+  @RequirePermissions('cash:read')
+  @Get('sessions/:id/reconciliation')
+  reconciliation(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Query('counted') counted?: string,
+  ) {
+    const value = counted !== undefined ? Number(counted) : undefined;
+
+    return this.cash.reconciliation(user.organizationId, id, value);
+  }
+
   @ApiOperation({ summary: 'Cobros por usuario para control de caja' })
   @RequirePermissions('reports:read')
   @Get('reports/charges')
