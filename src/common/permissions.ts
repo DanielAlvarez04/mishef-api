@@ -33,6 +33,16 @@ export const PERMISSIONS = {
     'KITCHEN',
     'INVENTORY_MANAGER',
   ],
+  /** Checador: cualquier miembro activo puede marcar su entrada y salida. */
+  'attendance:clock': [
+    'ADMIN',
+    'WAITER',
+    'KITCHEN',
+    'CASHIER',
+    'INVENTORY_MANAGER',
+  ],
+  /** Ver turnos del equipo y reparto de propinas. */
+  'attendance:read': ['ADMIN', 'CASHIER'],
 } as const satisfies Record<string, readonly Role[]>;
 
 export type Permission = keyof typeof PERMISSIONS;

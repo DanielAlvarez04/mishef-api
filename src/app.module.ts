@@ -23,6 +23,7 @@ import { DashboardModule } from './dashboard/dashboard.module';
 import { UploadsModule } from './uploads/uploads.module';
 import { OriginGuard } from './common/guards/origin.guard';
 import { AnalyticsModule } from './analytics/analytics.module';
+import { AttendanceModule } from './attendance/attendance.module';
 
 @Module({
   imports: [
@@ -51,6 +52,7 @@ import { AnalyticsModule } from './analytics/analytics.module';
     DashboardModule,
     UploadsModule,
     AnalyticsModule,
+    AttendanceModule,
     HealthModule,
   ],
   controllers: [],

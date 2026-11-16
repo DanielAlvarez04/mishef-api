@@ -281,6 +281,7 @@ model Organization {
   posDisplays   PosDisplay[]
   imageJobs     ImageJob[]
   invitations   Invitation[]
+  shifts        Shift[]
 }
 
 model User {
@@ -315,6 +316,7 @@ model User {
   posDevicesPaired       PosDevice[]             @relation("PosDevicePairedBy")
   posPairingsCreated     PosPairing[]            @relation("PosPairingCreatedBy")
   posDisplaysCreated     PosDisplay[]            @relation("PosDisplayCreatedBy")
+  shifts                 Shift[]
 
   @@index([isActive])
 }
@@ -371,6 +373,7 @@ model Branch {
   posDevices           PosDevice[]
   posPairings          PosPairing[]
   posDisplays          PosDisplay[]
+  shifts               Shift[]
 
   @@unique([organizationId, name])
   @@index([organizationId, isActive])
@@ -1713,4 +1716,25 @@ model Invitation {
 
   @@index([organizationId, email])
   @@index([expiresAt])
+}
+
+/// Turno de trabajo (checador). Un turno abierto por persona a la vez.
+model Shift {
+  id             String    @id @default(cuid())
+  organizationId String
+  branchId       String?
+  userId         String
+  startedAt      DateTime  @default(now())
+  endedAt        DateTime?
+  note           String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, startedAt])
+  @@index([userId, startedAt])
+  @@index([userId, endedAt])
 }
