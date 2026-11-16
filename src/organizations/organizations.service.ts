@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -45,6 +46,7 @@ export class OrganizationsService {
       domain: organization.domain,
       domainToken: organization.domainToken ?? null,
       domainVerifiedAt: organization.domainVerifiedAt?.toISOString() ?? null,
+      customDomainEnabled: organization.customDomainEnabled ?? false,
       taxRate: organization.taxRate?.toString() ?? '0.16',
       currency: organization.currency ?? 'MXN',
       brandColor: organization.brandColor ?? null,
@@ -223,11 +225,18 @@ export class OrganizationsService {
         domain: true,
         domainToken: true,
         domainVerifiedAt: true,
+        customDomainEnabled: true,
       },
     });
 
     if (!current) {
       throw new NotFoundException('Organización no encontrada');
+    }
+
+    if (!current.customDomainEnabled) {
+      throw new ForbiddenException(
+        'Tu plan no incluye dominio propio. Actualiza el plan para conectarlo.',
+      );
     }
 
     const domain = normalizeDomain(rawDomain ?? '');
@@ -556,6 +565,7 @@ export class OrganizationsService {
       domain: organization.domain,
       domainToken: organization.domainToken ?? null,
       domainVerifiedAt: organization.domainVerifiedAt?.toISOString() ?? null,
+      customDomainEnabled: organization.customDomainEnabled ?? false,
       taxRate: organization.taxRate?.toString() ?? '0.16',
       currency: organization.currency ?? 'MXN',
       brandColor: organization.brandColor ?? null,

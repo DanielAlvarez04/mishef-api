@@ -211,6 +211,8 @@ model Organization {
   domainToken      String?
   /// `null` mientras el dominio no esté verificado.
   domainVerifiedAt DateTime?
+  /// El plan contratado incluye dominio propio.
+  customDomainEnabled Boolean @default(false)
   taxRate   Decimal  @default(0.16) @db.Decimal(5, 4) // IVA por defecto del negocio (0.16 = 16 %)
   /// Código ISO 4217 de la moneda del negocio (ver `src/common/currency.ts`).
   currency  String   @default("MXN")

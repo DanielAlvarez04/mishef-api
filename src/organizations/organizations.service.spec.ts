@@ -1,4 +1,4 @@
-import { NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
+import { NotFoundException, BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { OrganizationsService } from './organizations.service';
 
@@ -88,6 +88,7 @@ describe('OrganizationsService', () => {
         domain: null,
         domainToken: null,
         domainVerifiedAt: null,
+        customDomainEnabled: true,
       })
       .mockResolvedValueOnce(null);
     prisma.organization.update.mockResolvedValue({});
@@ -116,11 +117,30 @@ describe('OrganizationsService', () => {
       domain: null,
       domainToken: null,
       domainVerifiedAt: null,
+      customDomainEnabled: true,
     });
 
     await expect(
       service.setDomain('org-1', 'sin punto'),
     ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(prisma.organization.update).not.toHaveBeenCalled();
+  });
+
+  it('rechaza conectar un dominio si el plan no lo incluye', async () => {
+    const { service, prisma } = createMocks();
+    prisma.organization.findUnique.mockResolvedValue({
+      id: 'org-1',
+      slug: 'cafe-central',
+      domain: null,
+      domainToken: null,
+      domainVerifiedAt: null,
+      customDomainEnabled: false,
+    });
+
+    await expect(
+      service.setDomain('org-1', 'app.micafeteria.com'),
+    ).rejects.toBeInstanceOf(ForbiddenException);
 
     expect(prisma.organization.update).not.toHaveBeenCalled();
   });
@@ -134,6 +154,7 @@ describe('OrganizationsService', () => {
         domain: null,
         domainToken: null,
         domainVerifiedAt: null,
+        customDomainEnabled: true,
       })
       .mockResolvedValueOnce({ id: 'org-2' });
 
