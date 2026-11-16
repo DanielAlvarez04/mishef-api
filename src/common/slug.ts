@@ -26,28 +26,96 @@ export const MIN_SLUG_LENGTH = 3;
 
 /**
  * Direcciones que no puede tomar un negocio porque chocan con servicios,
- * subdominios de infraestructura o rutas que ya existen.
+ * subdominios de infraestructura, correo o rutas que ya existen.
+ *
+ * Regla: solo se reservan palabras de infraestructura, producto y marca. Nunca
+ * palabras normales de negocio (`menu`, `cafe`, `bar`, `pan`…), porque eso le
+ * quitaría direcciones legítimas a los clientes.
  */
-export const RESERVED_SLUGS = new Set([
-  'admin',
-  'api',
+const RESERVED_WORDS = [
+  // Infraestructura y marca
+  'www',
   'app',
-  'auth',
-  'blog',
+  'api',
+  'img',
   'cdn',
+  'static',
+  'assets',
   'dokploy',
+  'mishef',
+  'mail',
+  'send',
+  'rsend',
+  'links',
+  'ns1',
+  'ns2',
+  'mx',
+  'dns',
+  'autodiscover',
+  'autoconfig',
+  'ftp',
+  'ssh',
+  'vpn',
+  'internal',
+  // Autenticación y cuentas
+  'admin',
+  'auth',
+  'login',
+  'logout',
+  'register',
+  'signup',
+  'onboarding',
+  'account',
+  'sso',
+  'id',
+  // Producto y futuro
+  'pay',
+  'pagos',
+  'billing',
+  'checkout',
+  'dash',
+  'dashboard',
+  'panel',
+  'console',
+  'ai',
+  'ia',
+  'cfdi',
+  'facturas',
   'docs',
   'help',
-  'img',
-  'login',
-  'mail',
-  'mishef',
-  'status',
   'soporte',
-  'static',
   'support',
-  'www',
-]);
+  'status',
+  'blog',
+  'm',
+  'mobile',
+  // Operación técnica
+  'webhook',
+  'webhooks',
+  'hooks',
+  'jobs',
+  'queue',
+  'metrics',
+  'monitor',
+  'db',
+  'postgres',
+  'redis',
+  'test',
+  'demo',
+  'staging',
+  'dev',
+  'prod',
+  'sandbox',
+  // Analítica
+  'tracking',
+  'analytics',
+  'data',
+  // Letras sueltas (hoy imposibles por la longitud mínima, reservadas por si
+  // algún día cambia)
+  ...'abcdefghijklmnopqrstuvwxyz'.split(''),
+];
+
+export const RESERVED_SLUGS = new Set(RESERVED_WORDS);
 
 /**
  * Normaliza una dirección escrita por el usuario: mayúsculas, acentos,

@@ -15,8 +15,30 @@ describe('slug de organización', () => {
   });
 
   it('rechaza direcciones reservadas', () => {
-    for (const reserved of ['api', 'app', 'www', 'admin', 'dokploy']) {
+    for (const reserved of [
+      'api',
+      'app',
+      'www',
+      'admin',
+      'dokploy',
+      'pay',
+      'dash',
+      'cfdi',
+      'ai',
+      'links',
+      'send',
+      'rsend',
+      'webhooks',
+      'metrics',
+      'register',
+    ]) {
       expect(isValidSlug(reserved)).toBe(false);
+    }
+  });
+
+  it('no reserva palabras normales de negocio', () => {
+    for (const libre of ['menu', 'cafe', 'bar', 'pan', 'sushi', 'taqueria']) {
+      expect(isValidSlug(libre)).toBe(true);
     }
   });
 

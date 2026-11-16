@@ -25,6 +25,7 @@ import { OriginGuard } from './common/guards/origin.guard';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { AttendanceModule } from './attendance/attendance.module';
 import { WasteModule } from './waste/waste.module';
+import { PublicModule } from './public/public.module';
 
 @Module({
   imports: [
@@ -55,6 +56,7 @@ import { WasteModule } from './waste/waste.module';
     AnalyticsModule,
     AttendanceModule,
     WasteModule,
+    PublicModule,
     HealthModule,
   ],
   controllers: [],
