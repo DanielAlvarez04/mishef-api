@@ -23,12 +23,14 @@ import {
 } from '../common/slug';
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
 import { CloudflareHostnamesService } from './cloudflare-hostnames.service';
+import { StorageService } from '../storage/storage.service';
 
 @Injectable()
 export class OrganizationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly hostnames: CloudflareHostnamesService,
+    private readonly storage: StorageService,
   ) {}
 
   async current(organizationId: string | null) {
@@ -52,6 +54,7 @@ export class OrganizationsService {
       domainVerifiedAt: organization.domainVerifiedAt?.toISOString() ?? null,
       customDomainEnabled: organization.customDomainEnabled ?? false,
       slugChanges: organization.slugChanges ?? 0,
+      storage: await this.storage.usage(organizationId),
       taxRate: organization.taxRate?.toString() ?? '0.16',
       currency: organization.currency ?? 'MXN',
       brandColor: organization.brandColor ?? null,

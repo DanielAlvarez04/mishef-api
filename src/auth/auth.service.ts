@@ -689,9 +689,13 @@ export class AuthService {
     }
 
     const membership = user.memberships[0];
+    // `storageBytes` es BigInt y JSON no lo serializa. La sesión no lo usa: el
+    // consumo vive en `/organizations/current`, ya formateado.
+    const { storageBytes: _storageBytes, ...organizationFields } =
+      membership?.organization ?? {};
     const organization = membership?.organization
       ? {
-          ...membership.organization,
+          ...organizationFields,
           practiceActive:
             membership.organization.practiceMode &&
             (!membership.organization.practiceUntil ||

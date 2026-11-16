@@ -18,8 +18,7 @@ import { isEmptyPatch, sameDecimal } from '../common/patch';
 import { computeFoodCost } from '../common/food-cost';
 import { alphabetSuffix, categoryInitials } from '../common/sku';
 import { CatalogEntriesService } from './catalog-entries.service';
-import { deleteR2Object } from '../uploads/r2';
-import { imageObjectKeys } from '../uploads/image-assets';
+import { StorageService } from '../storage/storage.service';
 import {
   ComboComponentInputDto,
   CreateExtraDto,
@@ -248,6 +247,7 @@ export class ItemsService {
     private readonly prisma: PrismaService,
     private readonly ingredientQuantities: IngredientQuantitiesService,
     private readonly catalogEntries: CatalogEntriesService,
+    private readonly storage: StorageService,
   ) {}
 
   async list(organizationId: string | null, filters: ItemFilters = {}) {
@@ -1055,8 +1055,7 @@ export class ItemsService {
       variantImages
         .map((variant) => variant.imageKey)
         .filter((key): key is string => Boolean(key))
-        .flatMap((key) => imageObjectKeys(key))
-        .map((key) => deleteR2Object(key)),
+        .map((key) => this.storage.releaseImage(organizationId!, key)),
     );
 
     return { ok: true, deletedCount: items.length };

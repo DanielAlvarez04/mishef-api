@@ -13,6 +13,8 @@ export interface StoredImage {
   key: string;
   /** URLs y medidas de cada variante. */
   assets: ImageAssets;
+  /** Bytes totales de las variantes guardadas (para la cuota). */
+  bytes: number;
 }
 
 /**
@@ -27,12 +29,15 @@ export async function storeOptimizedImage(
   input: Buffer,
 ): Promise<StoredImage> {
   const processed = await processImage(input);
+  let bytes = 0;
   const key = buildImageKey(folder, processed.width, processed.height);
   const sizes = variantWidths(processed.width, processed.height);
 
   try {
     for (const [index, size] of sizes.entries()) {
       const variant = processed.variants[index];
+
+      bytes += variant.avif.length + variant.jpeg.length;
 
       await putR2Object(
         `${key}-${size}.avif`,
@@ -62,5 +67,5 @@ export async function storeOptimizedImage(
     throw new Error(`La clave generada no es válida: ${key}`);
   }
 
-  return { key, assets };
+  return { key, assets, bytes };
 }

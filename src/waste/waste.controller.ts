@@ -32,7 +32,11 @@ export class WasteController {
     @CurrentUser() user: JwtUser,
     @Body() dto: PresignWastePhotoDto,
   ) {
-    return this.waste.presignPhoto(user.organizationId, dto.contentType);
+    return this.waste.presignPhoto(
+      user.organizationId,
+      dto.contentType,
+      dto.size ?? 0,
+    );
   }
 
   @ApiOperation({ summary: 'Registrar una merma' })

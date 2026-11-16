@@ -1,4 +1,4 @@
-import { IsEnum, IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, IsString, Matches, MaxLength, Min, MinLength } from 'class-validator';
 import { UnitCode, WasteReason } from '@prisma/client';
 
 const DECIMAL_PATTERN = /^-?\d+(\.\d{1,6})?$/;
@@ -39,4 +39,10 @@ export class PresignWastePhotoDto {
   @IsString()
   @MaxLength(60)
   contentType!: string;
+
+  /** Tamaño del archivo en bytes (lo conoce el navegador). */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  size?: number;
 }

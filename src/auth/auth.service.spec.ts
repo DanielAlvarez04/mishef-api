@@ -895,5 +895,29 @@ describe('AuthService', () => {
 
       expect(result.googleLinked).toBe(false);
     });
+
+    it('no expone el contador BigInt de almacenamiento en la sesión', async () => {
+      const { service, prisma } = createMocks();
+      prisma.user.findUnique.mockResolvedValue({
+        ...(await userFixture()),
+        memberships: [
+          {
+            roles: ['ADMIN'],
+            organizationId: 'org-1',
+            organization: {
+              id: 'org-1',
+              name: 'Naranja Pimienta',
+              storageBytes: 1024n,
+            },
+          },
+        ],
+      });
+
+      const result = await service.me('user-1');
+
+      expect(result.organization).not.toHaveProperty('storageBytes');
+      // Lo que sí serializa JSON debe seguir ahí.
+      expect(result.organization).toMatchObject({ id: 'org-1' });
+    });
   });
 });

@@ -38,9 +38,21 @@ function createMocks() {
     remove: jest.fn().mockResolvedValue(undefined),
   };
 
+  const storage = {
+    usage: jest.fn().mockResolvedValue({
+      used: 0,
+      limit: 250 * 1024 * 1024,
+      branches: 1,
+      remaining: 250 * 1024 * 1024,
+      percent: 0,
+      perBranch: 250 * 1024 * 1024,
+    }),
+  };
+
   const service = new OrganizationsService(
     prisma as unknown as PrismaService,
     hostnames as never,
+    storage as never,
   );
 
   return { service, prisma, hostnames };

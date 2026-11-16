@@ -15,10 +15,14 @@ import {
 } from '../common/units';
 import {
   IMAGE_CONTENT_TYPES,
+  deleteR2Object,
+  maxUploadBytes,
+  objectSize,
   publicUrlForKey,
   r2Bucket,
   r2Client,
 } from '../uploads/r2';
+import { StorageService } from '../storage/storage.service';
 import { CreateWasteDto } from './dto/waste.dto';
 
 const round2 = (value: number) =>
@@ -26,18 +30,29 @@ const round2 = (value: number) =>
 
 @Injectable()
 export class WasteService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storage: StorageService,
+  ) {}
 
   /**
    * Firma la subida de la foto de la merma.
    *
    * Va a `{org}/waste/` en el bucket público, con el mismo formato que el resto
-   * de imágenes: la clave se guarda y la URL se arma al leer.
+   * de imágenes: la clave se guarda y la URL se arma al leer. La cuota se
+   * comprueba aquí (con el tamaño que manda el navegador) y otra vez al
+   * registrar la merma, con el tamaño real del objeto.
    */
-  async presignPhoto(organizationId: string | null, contentType: string) {
+  async presignPhoto(
+    organizationId: string | null,
+    contentType: string,
+    size = 0,
+  ) {
     if (!organizationId) {
       throw new NotFoundException('Organización no encontrada');
     }
+
+    await this.storage.assertWithinLimit(organizationId, size);
 
     const ext =
       IMAGE_CONTENT_TYPES[contentType as keyof typeof IMAGE_CONTENT_TYPES];
@@ -105,6 +120,35 @@ export class WasteService {
     const unitCost = ingredient.unitCost ?? new Prisma.Decimal(0);
     const cost = toMoney(quantity.times(unitCost));
 
+    const photoKey = dto.photoKey?.trim() || null;
+    let photoBytes = 0;
+
+    if (photoKey) {
+      if (!photoKey.startsWith(`${organizationId}/waste/`)) {
+        throw new BadRequestException('La foto no pertenece a este negocio');
+      }
+
+      const size = await objectSize(photoKey);
+
+      if (size === null) {
+        throw new BadRequestException(
+          'La foto no se subió o ya no está disponible. Vuelve a intentarlo.',
+        );
+      }
+
+      const maxBytes = maxUploadBytes();
+
+      if (size > maxBytes) {
+        await deleteR2Object(photoKey);
+        throw new BadRequestException(
+          `La foto supera el máximo de ${Math.round(maxBytes / 1024 / 1024)} MB`,
+        );
+      }
+
+      await this.storage.assertWithinLimit(organizationId, size);
+      photoBytes = size;
+    }
+
     const waste = await this.prisma.waste.create({
       data: {
         organizationId,
@@ -116,13 +160,15 @@ export class WasteService {
         reason: dto.reason,
         note: dto.note?.trim() || null,
         cost,
-        photoKey: dto.photoKey?.trim() || null,
-        photoUrl: dto.photoKey?.trim()
-          ? publicUrlForKey(dto.photoKey.trim())
-          : null,
+        photoKey,
+        photoUrl: photoKey ? publicUrlForKey(photoKey) : null,
         userId,
       },
     });
+
+    // La foto de merma no se optimiza: se guarda tal cual y se contabiliza su
+    // tamaño real en la cuota.
+    await this.storage.add(organizationId, photoBytes);
 
     return {
       ...waste,

@@ -9,7 +9,6 @@ import {
   buildImageKey,
   catalogFolder,
   copyR2Object,
-  deleteR2Object,
   imageSnapshotName,
   maxUploadBytes,
   objectSize,
@@ -19,10 +18,10 @@ import {
   imageAssetsForKey,
   imageFallbackUrl,
   imageMainObjectKey,
-  imageObjectKeys,
   variantWidths,
   type ImageAssets,
 } from '../uploads/image-assets';
+import { StorageService } from '../storage/storage.service';
 
 /** Prisma normal o dentro de una transacción. */
 type Db = Prisma.TransactionClient | PrismaService;
@@ -37,7 +36,10 @@ type Db = Prisma.TransactionClient | PrismaService;
  */
 @Injectable()
 export class CatalogEntriesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storage: StorageService,
+  ) {}
 
   /**
    * Devuelve la entrada de un artículo o la crea si todavía no existe.
@@ -176,7 +178,7 @@ export class CatalogEntriesService {
         },
       });
 
-      await this.deleteImageAssets(previousKey);
+      await this.deleteImageAssets(organizationId, previousKey);
       return;
     }
 
@@ -185,7 +187,7 @@ export class CatalogEntriesService {
       imageKey,
     );
 
-    await this.assertObjectsExist(imageKey);
+    await this.assertObjectsExist(organizationId, imageKey);
 
     await this.prisma.catalogEntry.update({
       where: { id: entry.id },
@@ -198,16 +200,18 @@ export class CatalogEntriesService {
       },
     });
 
-    await this.deleteImageAssets(previousKey);
+    await this.deleteImageAssets(organizationId, previousKey);
   }
 
   /**
    * Copia una imagen optimizada a otra carpeta (misma imagen, clave nueva).
    *
    * Se usa cuando la presentación principal estrena imagen y el artículo no
-   * tiene una: el artículo toma esa misma imagen como base.
+   * tiene una: el artículo toma esa misma imagen como base. La copia ocupa
+   * espacio real en R2, así que también se suma a la cuota.
    */
   private async copyImageToFolder(
+    organizationId: string,
     sourceKey: string,
     assets: ImageAssets,
     folder: string,
@@ -224,6 +228,8 @@ export class CatalogEntriesService {
         `${targetKey}-${width}.jpg`,
       );
     }
+
+    await this.storage.addImage(organizationId, targetKey);
 
     return targetKey;
   }
@@ -253,7 +259,10 @@ export class CatalogEntriesService {
   }
 
   /** Comprueba el tamaño real del archivo principal (best-effort). */
-  private async assertObjectsExist(key: string): Promise<void> {
+  private async assertObjectsExist(
+    organizationId: string,
+    key: string,
+  ): Promise<void> {
     const mainKey = imageMainObjectKey(key);
 
     if (!mainKey) return;
@@ -262,20 +271,21 @@ export class CatalogEntriesService {
     const maxBytes = maxUploadBytes();
 
     if (size !== null && size > maxBytes) {
-      await this.deleteImageAssets(key);
+      await this.deleteImageAssets(organizationId, key);
       throw new BadRequestException(
         `La imagen supera el máximo de ${Math.round(maxBytes / 1024 / 1024)} MB`,
       );
     }
   }
 
-  /** Borra todos los objetos de una imagen (o el objeto suelto si es antigua). */
-  private async deleteImageAssets(key: string | null): Promise<void> {
+  /** Borra todos los objetos de una imagen y libera su espacio en la cuota. */
+  private async deleteImageAssets(
+    organizationId: string | null,
+    key: string | null,
+  ): Promise<void> {
     if (!key) return;
 
-    for (const objectKey of imageObjectKeys(key)) {
-      await deleteR2Object(objectKey);
-    }
+    await this.storage.releaseImage(organizationId, key);
   }
 
   /**
@@ -340,7 +350,7 @@ export class CatalogEntriesService {
         },
       });
 
-      await this.deleteImageAssets(previousKey);
+      await this.deleteImageAssets(organizationId, previousKey);
       return;
     }
 
@@ -349,7 +359,7 @@ export class CatalogEntriesService {
       imageKey,
     );
 
-    await this.assertObjectsExist(imageKey);
+    await this.assertObjectsExist(organizationId, imageKey);
 
     // Si la principal estrena imagen y el artículo no tiene base, se copia a
     // la entrada. Después cada lado es independiente.
@@ -358,6 +368,7 @@ export class CatalogEntriesService {
 
     if (variant.isPrimary && !entry.imageKey) {
       baseKey = await this.copyImageToFolder(
+        organizationId,
         imageKey,
         assets,
         catalogFolder(organizationId, entryId),
@@ -387,7 +398,7 @@ export class CatalogEntriesService {
       });
     }
 
-    await this.deleteImageAssets(previousKey);
+    await this.deleteImageAssets(organizationId, previousKey);
   }
 
   /**
@@ -407,12 +418,15 @@ export class CatalogEntriesService {
       },
       select: {
         imageKey: true,
+        organizationId: true,
         _count: { select: { items: true, recipes: true } },
       },
     });
 
     if (!entry) return;
     if (entry._count.items > 0 || entry._count.recipes > 0) return;
+
+    const ownerId = organizationId ?? entry.organizationId;
 
     try {
       const removed = await this.prisma.catalogEntry.deleteMany({
@@ -430,6 +444,8 @@ export class CatalogEntriesService {
       return;
     }
 
-    if (entry.imageKey) await this.deleteImageAssets(entry.imageKey);
+    if (entry.imageKey) {
+      await this.deleteImageAssets(ownerId, entry.imageKey);
+    }
   }
 }

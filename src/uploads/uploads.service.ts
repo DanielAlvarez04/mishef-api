@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { ImageJobStatus, ImageJobTarget } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
 import { FinalizeImageDto } from './dto/finalize-image.dto';
 import { PresignImageDto } from './dto/presign-image.dto';
 import { ImageJobsService } from './image-jobs.service';
@@ -43,6 +44,7 @@ export class UploadsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly jobs: ImageJobsService,
+    private readonly storage: StorageService,
   ) {}
 
   /**
@@ -62,6 +64,7 @@ export class UploadsService {
     dto: PresignImageDto,
   ): Promise<PresignImageResult> {
     const maxBytes = this.assertCanPresign(organizationId, dto);
+    await this.storage.assertWithinLimit(organizationId, dto.size);
 
     const exists = await this.countEntity(module, entityId, organizationId!);
 
@@ -89,6 +92,7 @@ export class UploadsService {
     dto: PresignImageDto,
   ): Promise<PresignImageResult> {
     const maxBytes = this.assertCanPresign(organizationId, dto);
+    await this.storage.assertWithinLimit(organizationId, dto.size);
 
     const exists = await this.prisma.catalogEntry.count({
       where: { id: catalogEntryId, organizationId },

@@ -26,6 +26,7 @@ import { AnalyticsModule } from './analytics/analytics.module';
 import { AttendanceModule } from './attendance/attendance.module';
 import { WasteModule } from './waste/waste.module';
 import { PublicModule } from './public/public.module';
+import { StorageModule } from './storage/storage.module';
 
 @Module({
   imports: [
@@ -57,6 +58,7 @@ import { PublicModule } from './public/public.module';
     AttendanceModule,
     WasteModule,
     PublicModule,
+    StorageModule,
     HealthModule,
   ],
   controllers: [],

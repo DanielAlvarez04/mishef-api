@@ -58,6 +58,7 @@ function build() {
     prisma as unknown as PrismaService,
     quantities,
     catalogEntries,
+    { releaseImage: jest.fn() } as never,
   );
 
   return { service, prisma };

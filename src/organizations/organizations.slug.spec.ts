@@ -34,6 +34,7 @@ function build() {
   const service = new OrganizationsService(
     prisma as unknown as PrismaService,
     hostnames as never,
+    { usage: jest.fn() } as never,
   );
 
   return { service, prisma };

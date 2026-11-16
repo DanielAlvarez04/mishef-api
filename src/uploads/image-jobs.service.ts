@@ -3,11 +3,13 @@ import {
   Injectable,
   NotFoundException,
   OnModuleInit,
+  PayloadTooLargeException,
 } from '@nestjs/common';
 import { ImageJobStatus, ImageJobTarget, Prisma } from '@prisma/client';
 
 import { CatalogEntriesService } from '../catalog/catalog-entries.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
 import { imageFallbackUrl } from './image-assets';
 import { storeOptimizedImage } from './image-storage';
 import {
@@ -33,6 +35,7 @@ export class ImageJobsService implements OnModuleInit {
   constructor(
     private readonly prisma: PrismaService,
     private readonly catalogEntries: CatalogEntriesService,
+    private readonly storage: StorageService,
   ) {}
 
   async onModuleInit() {
@@ -171,6 +174,18 @@ export class ImageJobsService implements OnModuleInit {
 
       const stored = await storeOptimizedImage(job.folder, buffer);
 
+      // Cuota exacta: las variantes ya están escritas, así que se comprueba su
+      // tamaño real. Si no cabe, se borran sin sumarlas al contador.
+      try {
+        await this.storage.assertWithinLimit(job.organizationId, stored.bytes);
+      } catch (error) {
+        await this.storage.releaseImage(null, stored.key);
+        throw error;
+      }
+
+      // Se suman solo las variantes guardadas (el original se borra).
+      await this.storage.add(job.organizationId, stored.bytes);
+
       if (job.target === ImageJobTarget.VARIANT) {
         if (!job.itemId) {
           throw new BadRequestException(
@@ -212,7 +227,8 @@ export class ImageJobsService implements OnModuleInit {
     } catch (error) {
       const message =
         error instanceof BadRequestException ||
-        error instanceof NotFoundException
+        error instanceof NotFoundException ||
+        error instanceof PayloadTooLargeException
           ? error.message
           : 'No se pudo optimizar la imagen';
 

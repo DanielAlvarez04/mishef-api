@@ -217,6 +217,8 @@ model Organization {
   customDomainEnabled Boolean @default(false)
   /// Cuántas veces el negocio cambió su dirección (máximo 1).
   slugChanges Int @default(0)
+  /// Bytes ocupados en R2 (imágenes optimizadas y fotos de merma).
+  storageBytes BigInt @default(0)
   slugAliases SlugAlias[]
   taxRate   Decimal  @default(0.16) @db.Decimal(5, 4) // IVA por defecto del negocio (0.16 = 16 %)
   /// Código ISO 4217 de la moneda del negocio (ver `src/common/currency.ts`).
