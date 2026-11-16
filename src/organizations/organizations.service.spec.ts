@@ -22,9 +22,18 @@ function createMocks() {
     },
   };
 
-  const service = new OrganizationsService(prisma as unknown as PrismaService);
+  const hostnames = {
+    enabled: false,
+    create: jest.fn().mockResolvedValue(null),
+    remove: jest.fn().mockResolvedValue(undefined),
+  };
 
-  return { service, prisma };
+  const service = new OrganizationsService(
+    prisma as unknown as PrismaService,
+    hostnames as never,
+  );
+
+  return { service, prisma, hostnames };
 }
 
 describe('OrganizationsService', () => {
@@ -99,7 +108,7 @@ describe('OrganizationsService', () => {
     expect(result.status).toBe('pending');
     expect(result.cname).toEqual({
       name: 'app.micafeteria.com',
-      value: 'cafe-central.mishef.co',
+      value: 'saas.mishef.co',
     });
     expect(result.txt.name).toBe('_mishef.app.micafeteria.com');
     expect(result.txt.value).toMatch(/^mishef-verify=[0-9a-f]{32}$/);
@@ -176,7 +185,7 @@ describe('OrganizationsService', () => {
     prisma.organization.update.mockResolvedValue({});
 
     txtMock.mockResolvedValue([['mishef-verify=abc']]);
-    cnameMock.mockResolvedValue(['cafe-central.mishef.co.']);
+    cnameMock.mockResolvedValue(['saas.mishef.co.']);
 
     const result = await service.verifyDomain('org-1');
 
@@ -198,7 +207,7 @@ describe('OrganizationsService', () => {
     });
 
     txtMock.mockRejectedValue(new Error('ENOTFOUND'));
-    cnameMock.mockResolvedValue(['cafe-central.mishef.co.']);
+    cnameMock.mockResolvedValue(['saas.mishef.co.']);
 
     const result = await service.verifyDomain('org-1');
 

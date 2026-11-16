@@ -22,10 +22,14 @@ import {
   normalizeSlug,
 } from '../common/slug';
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
+import { CloudflareHostnamesService } from './cloudflare-hostnames.service';
 
 @Injectable()
 export class OrganizationsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly hostnames: CloudflareHostnamesService,
+  ) {}
 
   async current(organizationId: string | null) {
     if (!organizationId) {
@@ -186,6 +190,13 @@ export class OrganizationsService {
     return `_mishef.${domain}`;
   }
 
+  /** Hostname público del fallback origin de Cloudflare for SaaS. */
+  private get saasOrigin(): string {
+    return (process.env.SAAS_FALLBACK_ORIGIN ?? 'saas.mishef.co')
+      .trim()
+      .toLowerCase();
+  }
+
   private get tenantBaseDomain(): string {
     return (process.env.TENANT_DOMAIN ?? 'mishef.co').trim().toLowerCase();
   }
@@ -201,7 +212,7 @@ export class OrganizationsService {
       status: verifiedAt ? ('verified' as const) : ('pending' as const),
       verifiedAt: verifiedAt?.toISOString() ?? null,
       /** Registro CNAME que apunta al subdominio del negocio. */
-      cname: { name: domain, value: `${slug}.${this.tenantBaseDomain}` },
+      cname: { name: domain, value: this.saasOrigin },
       /** Registro TXT que demuestra el control del dominio. */
       txt: { name: this.domainTxtName(domain), value: token },
     };
@@ -300,7 +311,7 @@ export class OrganizationsService {
       throw new BadRequestException('Primero conecta un dominio');
     }
 
-    const expectedCname = `${organization.slug}.${this.tenantBaseDomain}`;
+    const expectedCname = this.saasOrigin;
     let txt = false;
     let cname = false;
 
@@ -327,14 +338,22 @@ export class OrganizationsService {
     if (txt && cname) {
       const verifiedAt = new Date();
 
+      // Cloudflare for SaaS: al verificar, se registra el hostname para que el
+      // certificado del dominio del cliente se emita solo.
+      const providerId = await this.hostnames.create(organization.domain);
+
       await this.prisma.organization.update({
         where: { id: organizationId },
-        data: { domainVerifiedAt: verifiedAt },
+        data: {
+          domainVerifiedAt: verifiedAt,
+          ...(providerId ? { domainProviderId: providerId } : {}),
+        },
       });
 
       return {
         verified: true as const,
         checks: { txt: true, cname: true },
+        provider: providerId ? ('cloudflare' as const) : null,
         ...this.domainInstructions(
           organization.slug,
           organization.domain,
@@ -362,9 +381,23 @@ export class OrganizationsService {
       throw new NotFoundException('Organización no encontrada');
     }
 
+    const current = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { domainProviderId: true },
+    });
+
+    if (current?.domainProviderId) {
+      await this.hostnames.remove(current.domainProviderId);
+    }
+
     await this.prisma.organization.update({
       where: { id: organizationId },
-      data: { domain: null, domainToken: null, domainVerifiedAt: null },
+      data: {
+        domain: null,
+        domainToken: null,
+        domainVerifiedAt: null,
+        domainProviderId: null,
+      },
     });
 
     return { ok: true };
