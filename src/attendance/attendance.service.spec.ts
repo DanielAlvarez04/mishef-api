@@ -40,6 +40,17 @@ describe('AttendanceService — checador y propinas', () => {
     ).rejects.toBeInstanceOf(ConflictException);
   });
 
+  it('rechaza un segundo turno el mismo día', async () => {
+    const { service, prisma } = build();
+    prisma.shift.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 's1' });
+
+    await expect(
+      service.clockIn('org1', 'u1', null),
+    ).rejects.toBeInstanceOf(ConflictException);
+  });
+
   it('rechaza marcar salida sin turno abierto', async () => {
     const { service, prisma } = build();
     prisma.shift.findFirst.mockResolvedValue(null);
@@ -202,81 +213,5 @@ describe('AttendanceService — checador y propinas', () => {
     expect(end.getDate()).toBe(17);
     expect(end.getHours()).toBe(23);
     expect(end.getMinutes()).toBe(59);
-  });
-
-  it('corrige la salida olvidada de un turno', async () => {
-    const { service, prisma } = build();
-    const startedAt = new Date('2026-11-17T10:00:00.000Z');
-    const endedAt = new Date('2026-11-17T18:00:00.000Z');
-
-    prisma.shift.findFirst
-      .mockResolvedValueOnce({
-        id: 's1',
-        userId: 'u1',
-        startedAt,
-        endedAt: null,
-        note: null,
-        branchId: null,
-      })
-      .mockResolvedValueOnce(null);
-    prisma.shift.update.mockResolvedValue({
-      id: 's1',
-      startedAt,
-      endedAt,
-      note: null,
-      branchId: null,
-      user: { id: 'u1', name: 'Ana', username: null },
-    });
-
-    const result = await service.update('org1', 'admin', 's1', {
-      endedAt: endedAt.toISOString(),
-    });
-
-    expect(result.endedAt).toEqual(endedAt);
-    expect(prisma.shift.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: 's1' },
-        data: { endedAt },
-      }),
-    );
-    expect(prisma.auditLog.create).toHaveBeenCalled();
-  });
-
-  it('rechaza una salida anterior a la entrada', async () => {
-    const { service, prisma } = build();
-    prisma.shift.findFirst.mockResolvedValue({
-      id: 's1',
-      userId: 'u1',
-      startedAt: new Date('2026-11-17T10:00:00.000Z'),
-      endedAt: null,
-      note: null,
-      branchId: null,
-    });
-
-    await expect(
-      service.update('org1', 'admin', 's1', {
-        endedAt: '2026-11-17T09:00:00.000Z',
-      }),
-    ).rejects.toBeInstanceOf(BadRequestException);
-  });
-
-  it('rechaza un turno que se cruza con otro del mismo usuario', async () => {
-    const { service, prisma } = build();
-    prisma.shift.findFirst
-      .mockResolvedValueOnce({
-        id: 's1',
-        userId: 'u1',
-        startedAt: new Date('2026-11-17T10:00:00.000Z'),
-        endedAt: null,
-        note: null,
-        branchId: null,
-      })
-      .mockResolvedValueOnce({ id: 's2' });
-
-    await expect(
-      service.update('org1', 'admin', 's1', {
-        endedAt: '2026-11-17T18:00:00.000Z',
-      }),
-    ).rejects.toBeInstanceOf(ConflictException);
   });
 });

@@ -264,6 +264,18 @@ model Organization {
   /// Priorizar la cola de cocina por urgencia en lugar de llegada.
   kitchenSuggestOrder Boolean @default(true)
 
+  // Asistencia
+  /// Aplicar tolerancias al registrar checadas (si es false, se guarda la hora exacta).
+  attendanceApplyTolerance Boolean @default(true)
+  /// Minutos de gracia para una entrada tardía.
+  attendanceLateGraceMinutes Int @default(10)
+  /// Minutos de gracia para la comida/descanso.
+  attendanceLunchGraceMinutes Int @default(5)
+  /// Minutos de gracia para una salida anticipada.
+  attendanceEarlyLeaveGraceMinutes Int @default(15)
+  /// Duración de comida por defecto cuando el horario no la define.
+  attendanceDefaultBreakMinutes Int @default(60)
+
   memberships          Membership[]
   branches             Branch[]
   orders               Order[]
@@ -292,6 +304,10 @@ model Organization {
   imageJobs     ImageJob[]
   invitations   Invitation[]
   shifts        Shift[]
+  shiftTemplates ShiftTemplate[]
+  schedules     Schedule[]
+  attendanceEvents AttendanceEvent[]
+  attendanceAdjustments AttendanceAdjustment[]
 }
 
 model User {
@@ -327,6 +343,13 @@ model User {
   posPairingsCreated     PosPairing[]            @relation("PosPairingCreatedBy")
   posDisplaysCreated     PosDisplay[]            @relation("PosDisplayCreatedBy")
   shifts                 Shift[]
+  shiftsRecorded         Shift[]                 @relation("ShiftRecordedBy")
+  shiftsReviewed         Shift[]                 @relation("ShiftReviewedBy")
+  attendanceEventsRecorded AttendanceEvent[]    @relation("AttendanceEventRecordedBy")
+  attendanceAdjustments  AttendanceAdjustment[]  @relation("AttendanceAdjustmentCreatedBy")
+  attendanceAdjustmentsReceived AttendanceAdjustment[] @relation("AttendanceAdjustmentUser")
+  attendanceEvents       AttendanceEvent[]
+  scheduleEntries        ScheduleEntry[]
   wastes                 Waste[]
 
   @@index([isActive])
@@ -344,6 +367,8 @@ model Membership {
   pinUpdatedAt   DateTime?
   pinAttempts    Int      @default(0)
   pinLockedUntil DateTime?
+  /// Puede operar el modo checador y registrar checadas de otros con su PIN.
+  attendanceKioskEnabled Boolean @default(false)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -367,6 +392,10 @@ model Branch {
   isActive       Boolean  @default(true)
   /// Porcentaje de propina sugerido en el POS (0 = sin sugerencia).
   defaultTipPercent Int   @default(0)
+  /// Coordenadas del local para la geocerca del checador.
+  latitude Decimal? @db.Decimal(10, 7)
+  longitude Decimal? @db.Decimal(10, 7)
+  geofenceRadiusMeters Int @default(150)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -386,6 +415,9 @@ model Branch {
   posPairings          PosPairing[]
   posDisplays          PosDisplay[]
   shifts               Shift[]
+  schedules            Schedule[]
+  attendanceEvents     AttendanceEvent[]
+  attendanceAdjustments AttendanceAdjustment[]
 
   @@unique([organizationId, name])
   @@index([organizationId, isActive])
@@ -1741,20 +1773,208 @@ model Shift {
   organizationId String
   branchId       String?
   userId         String
+  /// Hora real de entrada (nunca se reescribe; el log está en AttendanceEvent).
   startedAt      DateTime  @default(now())
+  /// Hora real de salida.
   endedAt        DateTime?
+  /// Hora efectiva para nómina, ajustada por las tolerancias vigentes.
+  effectiveStartedAt DateTime?
+  effectiveEndedAt   DateTime?
+  /// Horario publicado que se usó para calcular las tolerancias.
+  scheduleEntryId  String?
+  scheduledStartedAt DateTime?
+  scheduledEndedAt   DateTime?
   note           String?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  /// Quién operó el checador; `null` = el propio empleado desde su cuenta.
+  recordedById   String?
+  source         AttendanceSource @default(WEB)
+  /// Resultado de la geocerca al momento de la checada.
+  withinGeofence Boolean?
+  /// Checada fuera de zona/horario que un ADMIN debe autorizar.
+  needsReview    Boolean  @default(false)
+  reviewedById   String?
+  reviewedAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
   user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recordedBy   User?        @relation("ShiftRecordedBy", fields: [recordedById], references: [id], onDelete: SetNull)
+  reviewedBy   User?        @relation("ShiftReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
+  scheduleEntry ScheduleEntry? @relation(fields: [scheduleEntryId], references: [id], onDelete: SetNull)
+  breaks       ShiftBreak[]
+  adjustments  AttendanceAdjustment[]
+  events       AttendanceEvent[]
 
   @@index([organizationId, startedAt])
   @@index([userId, startedAt])
   @@index([userId, endedAt])
+  @@index([scheduleEntryId])
 }
+
+enum ShiftBreakType {
+  LUNCH
+  REST
+  OTHER
+}
+
+enum AttendanceSource {
+  WEB
+  KIOSK
+  ADMIN
+  OFFLINE
+}
+
+enum AttendanceEventType {
+  CLOCK_IN
+  LUNCH_START
+  LUNCH_END
+  BREAK_START
+  BREAK_END
+  CLOCK_OUT
+  ADJUSTMENT
+  REVIEW
+}
+
+/// Descanso o comida dentro de un turno.
+model ShiftBreak {
+  id               String         @id @default(cuid())
+  shiftId          String
+  type             ShiftBreakType
+  startedAt        DateTime
+  endedAt          DateTime?
+  /// Minutos que se descuentan de la jornada después de la tolerancia.
+  effectiveMinutes Int?
+  note             String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  shift Shift @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+
+  @@index([shiftId, startedAt])
+}
+
+/// Minutos positivos agregados por un ADMIN (nunca se restan).
+model AttendanceAdjustment {
+  id             String   @id @default(cuid())
+  organizationId String
+  branchId       String?
+  shiftId        String
+  /// Empleado al que se le ajustan las horas.
+  userId         String
+  minutes        Int
+  reason         String
+  createdById    String
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  shift        Shift        @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  user         User         @relation("AttendanceAdjustmentUser", fields: [userId], references: [id], onDelete: Cascade)
+  createdBy    User         @relation("AttendanceAdjustmentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([shiftId, createdAt])
+  @@index([organizationId, createdAt])
+}
+
+/// Log inmutable de checadas, descansos, ajustes y autorizaciones.
+model AttendanceEvent {
+  id             String              @id @default(cuid())
+  organizationId String
+  branchId       String?
+  shiftId        String?
+  /// Empleado al que corresponde la checada.
+  userId         String
+  type           AttendanceEventType
+  occurredAt     DateTime
+  recordedById   String?
+  source         AttendanceSource    @default(WEB)
+  withinGeofence Boolean?
+  latitude       Decimal?            @db.Decimal(10, 7)
+  longitude      Decimal?            @db.Decimal(10, 7)
+  note           String?
+  metadata       Json?
+  /// Evita duplicar una checada reintentada desde el kiosko/offline.
+  idempotencyKey String?             @unique
+  createdAt      DateTime            @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  shift        Shift?       @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recordedBy   User?        @relation("AttendanceEventRecordedBy", fields: [recordedById], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, occurredAt])
+  @@index([shiftId, occurredAt])
+  @@index([userId, occurredAt])
+}
+
+enum ScheduleStatus {
+  DRAFT
+  PUBLISHED
+}
+
+/// Horario semanal de una sucursal.
+model Schedule {
+  id             String         @id @default(cuid())
+  organizationId String
+  branchId       String?
+  /// Lunes de la semana, a medianoche local.
+  weekStart      DateTime       @db.Date
+  status         ScheduleStatus @default(DRAFT)
+  publishedAt    DateTime?
+  publishedById  String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?         @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  entries      ScheduleEntry[]
+
+  @@unique([organizationId, branchId, weekStart])
+  @@index([organizationId, weekStart])
+}
+
+/// Un turno asignado a una persona en un día. Solo uno por día.
+model ScheduleEntry {
+  id           String   @id @default(cuid())
+  scheduleId   String
+  userId       String
+  date         DateTime @db.Date
+  startTime    String // "09:00"
+  endTime      String // "18:00"; si es menor que startTime cruza medianoche
+  breakMinutes Int      @default(60)
+  note         String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  schedule Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  shifts   Shift[]
+
+  @@unique([scheduleId, userId, date])
+  @@index([userId, date])
+}
+
+/// Plantilla reutilizable de horario.
+model ShiftTemplate {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  startTime      String
+  endTime        String
+  breakMinutes   Int      @default(60)
+  color          String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, name])
+}
+
 /// Motivo de la merma registrada.
 enum WasteReason {
   EXPIRED
