@@ -36,7 +36,8 @@ RUN ./node_modules/.bin/prisma generate && npm run build
 FROM node:22-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production \
-    PORT=3001
+    PORT=3001 \
+    TZ=America/Mexico_City
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends openssl ca-certificates \

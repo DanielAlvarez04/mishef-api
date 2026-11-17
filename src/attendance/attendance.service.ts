@@ -4,7 +4,6 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import {
   AttendanceEventType,
@@ -61,6 +60,38 @@ const shiftInclude = {
   adjustments: { orderBy: { createdAt: 'asc' as const } },
   scheduleEntry: true,
 } satisfies Prisma.ShiftInclude;
+
+interface ScheduleCandidate {
+  branchId: string | null;
+  status: ScheduleStatus;
+}
+
+/**
+ * Elige el horario de la semana.
+ *
+ * Se prefiere el de la sucursal (publicado y, si no, borrador) y después el de
+ * la organización. El respaldo de borrador permite que el checador funcione
+ * aunque el administrador todavía no haya pulsado "Publicar".
+ */
+function pickSchedule<T extends ScheduleCandidate>(
+  schedules: T[],
+  branchId: string | null,
+): T | null {
+  const published = schedules.filter(
+    (row) => row.status === ScheduleStatus.PUBLISHED,
+  );
+  const drafts = schedules.filter(
+    (row) => row.status !== ScheduleStatus.PUBLISHED,
+  );
+
+  return (
+    published.find((row) => row.branchId === branchId) ??
+    drafts.find((row) => row.branchId === branchId) ??
+    published.find((row) => row.branchId === null) ??
+    drafts.find((row) => row.branchId === null) ??
+    null
+  );
+}
 
 type ShiftWithDetails = Prisma.ShiftGetPayload<{
   include: typeof shiftInclude;
@@ -209,7 +240,6 @@ export class AttendanceService {
       where: {
         organizationId,
         weekStart,
-        status: ScheduleStatus.PUBLISHED,
         ...(branchId
           ? { OR: [{ branchId }, { branchId: null }] }
           : { branchId: null }),
@@ -221,10 +251,7 @@ export class AttendanceService {
       },
     });
 
-    const schedule =
-      schedules.find((row) => row.branchId === branchId) ??
-      schedules.find((row) => row.branchId === null) ??
-      null;
+    const schedule = pickSchedule(schedules, branchId);
 
     return schedule?.entries[0] ?? null;
   }
@@ -695,7 +722,6 @@ export class AttendanceService {
       where: {
         organizationId,
         weekStart,
-        status: ScheduleStatus.PUBLISHED,
         ...(branchId
           ? { OR: [{ branchId }, { branchId: null }] }
           : { branchId: null }),
@@ -710,10 +736,7 @@ export class AttendanceService {
       },
     });
 
-    const schedule =
-      schedules.find((row) => row.branchId === branchId) ??
-      schedules.find((row) => row.branchId === null) ??
-      null;
+    const schedule = pickSchedule(schedules, branchId);
     const entries = schedule?.entries ?? [];
     const userIds = entries.map((entry) => entry.userId);
 
@@ -723,7 +746,10 @@ export class AttendanceService {
             where: {
               organizationId,
               userId: { in: userIds },
-              startedAt: { gte: today, lt: tomorrow },
+              OR: [
+                { startedAt: { gte: today, lt: tomorrow } },
+                { endedAt: null },
+              ],
             },
             include: { breaks: true },
           })
@@ -731,42 +757,65 @@ export class AttendanceService {
       userIds.length
         ? this.prisma.membership.findMany({
             where: { organizationId, userId: { in: userIds }, isActive: true },
-            select: { userId: true, roles: true },
+            select: {
+              userId: true,
+              roles: true,
+              pinHash: true,
+              pinLockedUntil: true,
+            },
           })
         : [],
     ]);
 
     const shiftByUser = new Map(shifts.map((shift) => [shift.userId, shift]));
-    const roleByUser = new Map(
-      memberships.map((membership) => [membership.userId, membership.roles]),
+
+    // Si quedó un turno abierto de otro día, debe poder cerrarse desde el
+    // checador; tiene prioridad sobre el turno ya cerrado de hoy.
+    for (const shift of shifts) {
+      const current = shiftByUser.get(shift.userId);
+      if (!shift.endedAt && current?.endedAt) {
+        shiftByUser.set(shift.userId, shift);
+      }
+    }
+
+    const membershipByUser = new Map(
+      memberships.map((membership) => [membership.userId, membership]),
     );
+    const now = new Date();
 
     return {
       date: dateKey(today),
       branchId,
       settings: await this.getSettings(organizationId),
-      employees: entries.map((entry) => {
-        const shift = shiftByUser.get(entry.userId);
-        const openBreak = shift?.breaks.find((row) => !row.endedAt);
+      employees: entries
+        .filter((entry) => membershipByUser.has(entry.userId))
+        .map((entry) => {
+          const membership = membershipByUser.get(entry.userId)!;
+          const shift = shiftByUser.get(entry.userId);
+          const openBreak = shift?.breaks.find((row) => !row.endedAt);
 
-        return {
-          id: entry.userId,
-          name: entry.user.name,
-          username: entry.user.username,
-          roles: roleByUser.get(entry.userId) ?? [],
-          scheduledStart: entry.startTime,
-          scheduledEnd: entry.endTime,
-          breakMinutes: entry.breakMinutes,
-          status: shift
-            ? openBreak
-              ? 'ON_BREAK'
-              : shift.endedAt
-                ? 'DONE'
-                : 'WORKING'
-            : 'OFF',
-          shiftId: shift?.id ?? null,
-        };
-      }),
+          return {
+            id: entry.userId,
+            name: entry.user.name,
+            username: entry.user.username,
+            roles: membership.roles,
+            scheduledStart: entry.startTime,
+            scheduledEnd: entry.endTime,
+            breakMinutes: entry.breakMinutes,
+            hasPin: Boolean(membership.pinHash),
+            pinLocked: Boolean(
+              membership.pinLockedUntil && membership.pinLockedUntil > now,
+            ),
+            status: shift
+              ? openBreak
+                ? 'ON_BREAK'
+                : shift.endedAt
+                  ? 'DONE'
+                  : 'WORKING'
+              : 'OFF',
+            shiftId: shift?.id ?? null,
+          };
+        }),
     };
   }
 
@@ -796,12 +845,14 @@ export class AttendanceService {
     });
 
     if (!membership) {
-      throw new UnauthorizedException('Credenciales inválidas');
+      throw new BadRequestException(
+        'No encontramos una cuenta activa para ese empleado',
+      );
     }
 
     if (!membership.pinHash) {
       throw new BadRequestException(
-        'Esta cuenta no tiene PIN configurado. Configúralo desde Ajustes.',
+        'Esta cuenta no tiene PIN configurado. Configúralo desde Usuarios o en Ajustes.',
       );
     }
 
@@ -827,7 +878,7 @@ export class AttendanceService {
         },
       });
 
-      throw new UnauthorizedException(
+      throw new BadRequestException(
         locked
           ? 'PIN bloqueado por intentos fallidos. Intenta en unos minutos.'
           : 'PIN incorrecto',
@@ -1513,10 +1564,7 @@ export class AttendanceService {
       });
 
       const target = existing
-        ? await tx.schedule.update({
-            where: { id: existing.id },
-            data: { status: ScheduleStatus.DRAFT },
-          })
+        ? existing
         : await tx.schedule.create({
             data: { organizationId, branchId, weekStart },
           });
