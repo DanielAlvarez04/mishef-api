@@ -272,7 +272,7 @@ export class AttendanceController {
     );
   }
 
-  @ApiOperation({ summary: 'Empleados asignados hoy para el checador' })
+  @ApiOperation({ summary: 'Cuentas activas para el checador' })
   @RequirePermissions('attendance:clock')
   @Get('kiosk')
   kiosk(

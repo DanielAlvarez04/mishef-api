@@ -718,29 +718,38 @@ export class AttendanceService {
     const today = startOfDay(new Date());
     const tomorrow = addDays(today, 1);
     const weekStart = startOfWeek(today);
-    const schedules = await this.prisma.schedule.findMany({
+
+    const memberships = await this.prisma.membership.findMany({
       where: {
         organizationId,
-        weekStart,
-        ...(branchId
-          ? { OR: [{ branchId }, { branchId: null }] }
-          : { branchId: null }),
+        isActive: true,
+        user: { isActive: true },
       },
-      include: {
-        entries: {
-          where: { date: today, user: { isActive: true } },
-          include: {
-            user: { select: { id: true, name: true, username: true } },
-          },
-        },
+      select: {
+        userId: true,
+        roles: true,
+        pinHash: true,
+        pinLockedUntil: true,
+        user: { select: { id: true, name: true, username: true } },
       },
+      orderBy: { user: { name: 'asc' } },
     });
 
-    const schedule = pickSchedule(schedules, branchId);
-    const entries = schedule?.entries ?? [];
-    const userIds = entries.map((entry) => entry.userId);
+    const userIds = memberships.map((membership) => membership.userId);
 
-    const [shifts, memberships] = await Promise.all([
+    const [schedules, shifts] = await Promise.all([
+      this.prisma.schedule.findMany({
+        where: {
+          organizationId,
+          weekStart,
+          ...(branchId
+            ? { OR: [{ branchId }, { branchId: null }] }
+            : { branchId: null }),
+        },
+        include: {
+          entries: { where: { date: today } },
+        },
+      }),
       userIds.length
         ? this.prisma.shift.findMany({
             where: {
@@ -754,18 +763,12 @@ export class AttendanceService {
             include: { breaks: true },
           })
         : [],
-      userIds.length
-        ? this.prisma.membership.findMany({
-            where: { organizationId, userId: { in: userIds }, isActive: true },
-            select: {
-              userId: true,
-              roles: true,
-              pinHash: true,
-              pinLockedUntil: true,
-            },
-          })
-        : [],
     ]);
+
+    const schedule = pickSchedule(schedules, branchId);
+    const entryByUser = new Map(
+      (schedule?.entries ?? []).map((entry) => [entry.userId, entry]),
+    );
 
     const shiftByUser = new Map(shifts.map((shift) => [shift.userId, shift]));
 
@@ -778,44 +781,53 @@ export class AttendanceService {
       }
     }
 
-    const membershipByUser = new Map(
-      memberships.map((membership) => [membership.userId, membership]),
-    );
     const now = new Date();
+
+    const employees = memberships.map((membership) => {
+      const entry = entryByUser.get(membership.userId);
+      const shift = shiftByUser.get(membership.userId);
+      const openBreak = shift?.breaks.find((row) => !row.endedAt);
+
+      return {
+        id: membership.userId,
+        name: membership.user.name,
+        username: membership.user.username,
+        roles: membership.roles,
+        scheduledStart: entry?.startTime ?? null,
+        scheduledEnd: entry?.endTime ?? null,
+        breakMinutes: entry?.breakMinutes ?? null,
+        hasPin: Boolean(membership.pinHash),
+        pinLocked: Boolean(
+          membership.pinLockedUntil && membership.pinLockedUntil > now,
+        ),
+        status: shift
+          ? openBreak
+            ? 'ON_BREAK'
+            : shift.endedAt
+              ? 'DONE'
+              : 'WORKING'
+          : 'OFF',
+        shiftId: shift?.id ?? null,
+      };
+    });
+
+    // Primero quienes tienen horario hoy; después el resto por nombre.
+    employees.sort((a, b) => {
+      const bySchedule = Number(!a.scheduledStart) - Number(!b.scheduledStart);
+
+      if (bySchedule !== 0) return bySchedule;
+
+      return (a.name ?? a.username ?? '').localeCompare(
+        b.name ?? b.username ?? '',
+        'es',
+      );
+    });
 
     return {
       date: dateKey(today),
       branchId,
       settings: await this.getSettings(organizationId),
-      employees: entries
-        .filter((entry) => membershipByUser.has(entry.userId))
-        .map((entry) => {
-          const membership = membershipByUser.get(entry.userId)!;
-          const shift = shiftByUser.get(entry.userId);
-          const openBreak = shift?.breaks.find((row) => !row.endedAt);
-
-          return {
-            id: entry.userId,
-            name: entry.user.name,
-            username: entry.user.username,
-            roles: membership.roles,
-            scheduledStart: entry.startTime,
-            scheduledEnd: entry.endTime,
-            breakMinutes: entry.breakMinutes,
-            hasPin: Boolean(membership.pinHash),
-            pinLocked: Boolean(
-              membership.pinLockedUntil && membership.pinLockedUntil > now,
-            ),
-            status: shift
-              ? openBreak
-                ? 'ON_BREAK'
-                : shift.endedAt
-                  ? 'DONE'
-                  : 'WORKING'
-              : 'OFF',
-            shiftId: shift?.id ?? null,
-          };
-        }),
+      employees,
     };
   }
 
@@ -889,20 +901,6 @@ export class AttendanceService {
       where: { id: membership.id },
       data: { pinAttempts: 0, pinLockedUntil: null },
     });
-
-    const today = startOfDay(new Date());
-    const entry = await this.scheduleEntryFor(
-      organizationId,
-      branchId,
-      dto.userId,
-      today,
-    );
-
-    if (!entry) {
-      throw new BadRequestException(
-        'Ese usuario no tiene un turno asignado hoy',
-      );
-    }
 
     const options: PunchOptions = {
       recordedById: operatorId,
