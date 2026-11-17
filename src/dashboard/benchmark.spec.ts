@@ -1,7 +1,12 @@
 import { PrismaService } from '../prisma/prisma.service';
+import { distanceKm } from '../common/benchmark';
 import { DashboardService } from './dashboard.service';
 
-function build(orgIds: string[]) {
+function build(
+  orgIds: string[],
+  current: Record<string, unknown> = { businessType: 'cafeteria' },
+  nearby?: Array<{ id: string; latitude: number; longitude: number }>,
+) {
   const revenue: Record<string, number> = {
     o1: 1000,
     o2: 2000,
@@ -13,10 +18,12 @@ function build(orgIds: string[]) {
 
   const prisma: Record<string, any> = {
     organization: {
-      findUnique: jest.fn().mockResolvedValue({ businessType: 'cafeteria' }),
+      findUnique: jest.fn().mockResolvedValue(current),
       findMany: jest
         .fn()
-        .mockResolvedValue(orgIds.map((id) => ({ id }))),
+        .mockResolvedValue(
+          nearby ?? orgIds.map((id) => ({ id })),
+        ),
     },
     payment: {
       aggregate: jest.fn().mockImplementation(({ where }) =>
@@ -81,5 +88,72 @@ describe('DashboardService — benchmark', () => {
 
     expect(result.available).toBe(false);
     expect(prisma.organization.findMany).not.toHaveBeenCalled();
+  });
+
+  it('usa la cohorte local de 50 km cuando hay suficientes negocios', async () => {
+    const { service, prisma } = build(
+      [],
+      { businessType: 'cafeteria', latitude: 19.4326, longitude: -99.1332 },
+      [
+        { id: 'o1', latitude: 19.4326, longitude: -99.1332 },
+        { id: 'o2', latitude: 19.433, longitude: -99.134 },
+        { id: 'o3', latitude: 19.44, longitude: -99.14 },
+        { id: 'o4', latitude: 19.45, longitude: -99.15 },
+        { id: 'o5', latitude: 19.46, longitude: -99.16 },
+      ],
+    );
+
+    const result = await service.benchmark('o1', 30);
+
+    expect(result.available).toBe(true);
+    expect(result.cohort).toMatchObject({
+      scope: 'local',
+      radiusKm: 50,
+      organizations: 5,
+    });
+    expect(prisma.organization.findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('cae al grupo nacional si la zona no llega al mínimo', async () => {
+    const { service, prisma } = build(
+      [],
+      { businessType: 'cafeteria', latitude: 19.4326, longitude: -99.1332 },
+      [
+        { id: 'o1', latitude: 19.4326, longitude: -99.1332 },
+        { id: 'o2', latitude: 19.433, longitude: -99.134 },
+      ],
+    );
+    prisma.organization.findMany.mockResolvedValueOnce([
+      { id: 'o1', latitude: 19.4326, longitude: -99.1332 },
+      { id: 'o2', latitude: 19.433, longitude: -99.134 },
+    ]);
+    prisma.organization.findMany.mockResolvedValueOnce([
+      { id: 'o1' },
+      { id: 'o2' },
+      { id: 'o3' },
+      { id: 'o4' },
+      { id: 'o5' },
+      { id: 'o6' },
+    ]);
+
+    const result = await service.benchmark('o1', 30);
+
+    expect(result.available).toBe(true);
+    expect(result.cohort).toMatchObject({
+      scope: 'national',
+      radiusKm: null,
+      localCandidates: 2,
+    });
+    expect(prisma.organization.findMany).toHaveBeenCalledTimes(2);
+  });
+
+  it('calcula distancias reales entre coordenadas', () => {
+    const cdmx = { latitude: 19.4326, longitude: -99.1332 };
+    const gdl = { latitude: 20.6597, longitude: -103.3496 };
+
+    const km = distanceKm(cdmx, gdl);
+
+    expect(km).toBeGreaterThan(400);
+    expect(km).toBeLessThan(550);
   });
 });

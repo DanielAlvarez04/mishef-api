@@ -8,7 +8,37 @@
 /** Mínimo de negocios con datos para publicar percentiles. */
 export const MIN_COHORT = 5;
 
+/** Radio por defecto del benchmark local, en kilómetros. */
+export const LOCAL_BENCHMARK_RADIUS_KM = 50;
+
 export type BetterWhen = 'higher' | 'lower';
+
+export interface GeoPoint {
+  latitude: number;
+  longitude: number;
+}
+
+/**
+ * Distancia en kilómetros entre dos coordenadas (Haversine).
+ *
+ * Se usa para decidir si dos negocios están en la misma zona. No se guarda ni
+ * se expone la ubicación de la otra organización: solo se compara la distancia.
+ */
+export function distanceKm(a: GeoPoint, b: GeoPoint): number {
+  const earthRadiusKm = 6371.0088;
+  const toRad = (value: number) => (value * Math.PI) / 180;
+  const dLat = toRad(b.latitude - a.latitude);
+  const dLng = toRad(b.longitude - a.longitude);
+  const lat1 = toRad(a.latitude);
+  const lat2 = toRad(b.latitude);
+
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+
+  return 2 * earthRadiusKm * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
 
 /** Percentil con interpolación lineal sobre una lista ya ordenada. */
 export function percentile(sorted: number[], p: number): number | null {

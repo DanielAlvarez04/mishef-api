@@ -689,6 +689,9 @@ export class ItemsService {
     if (dto.isActive !== undefined && dto.isActive !== item.isActive) {
       data.isActive = dto.isActive;
     }
+    if (dto.isSoldOut !== undefined && dto.isSoldOut !== item.isSoldOut) {
+      data.isSoldOut = dto.isSoldOut;
+    }
     if (dto.sortOrder !== undefined && dto.sortOrder !== item.sortOrder) {
       data.sortOrder = dto.sortOrder;
     }

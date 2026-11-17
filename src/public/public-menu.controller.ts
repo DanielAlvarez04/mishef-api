@@ -9,6 +9,7 @@ interface MenuItemView {
   description: string | null;
   price: number;
   imageUrl: string | null;
+  isSoldOut: boolean;
 }
 
 /**
@@ -47,6 +48,7 @@ export class PublicMenuController {
                 description: true,
                 price: true,
                 isActive: true,
+                isSoldOut: true,
                 catalogEntry: { select: { imageKey: true } },
               },
             },
@@ -81,6 +83,7 @@ export class PublicMenuController {
               imageUrl: row.item.catalogEntry?.imageKey
                 ? publicUrlForKey(row.item.catalogEntry.imageKey)
                 : null,
+              isSoldOut: row.item.isSoldOut,
             });
 
             groups.set(group, list);

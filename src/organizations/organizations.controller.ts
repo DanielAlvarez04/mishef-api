@@ -40,6 +40,13 @@ export class OrganizationsController {
     return this.organizations.domainAvailable(domain ?? '');
   }
 
+  @ApiOperation({ summary: 'Buscar direcciones para ubicar el negocio' })
+  @RequirePermissions('organization:manage')
+  @Get('location-search')
+  searchLocation(@Query('q') query?: string) {
+    return this.organizations.searchLocation(query ?? '');
+  }
+
   @ApiOperation({ summary: 'Renombrar la organización (solo ADMIN)' })
   @RequirePermissions('organization:manage')
   @Patch('current')

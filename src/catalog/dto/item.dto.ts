@@ -392,6 +392,11 @@ export class UpdateItemDto {
   @IsBoolean()
   isActive?: boolean;
 
+  /** El menú público lo muestra como agotado. */
+  @IsOptional()
+  @IsBoolean()
+  isSoldOut?: boolean;
+
   @IsOptional()
   @IsInt()
   @Min(0)

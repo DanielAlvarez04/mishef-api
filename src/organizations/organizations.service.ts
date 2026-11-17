@@ -25,6 +25,21 @@ import { UpdateOrganizationDto } from './dto/update-organization.dto';
 import { CloudflareHostnamesService } from './cloudflare-hostnames.service';
 import { StorageService } from '../storage/storage.service';
 
+/** Resultado de una búsqueda de dirección (Nominatim/OpenStreetMap). */
+export interface LocationSearchResult {
+  label: string;
+  latitude: number;
+  longitude: number;
+  type: string | null;
+}
+
+const LOCATION_CACHE_TTL_MS = 5 * 60 * 1000;
+const locationCache = new Map<
+  string,
+  { expires: number; data: LocationSearchResult[] }
+>();
+let lastNominatimRequest = 0;
+
 @Injectable()
 export class OrganizationsService {
   constructor(
@@ -72,9 +87,85 @@ export class OrganizationsService {
     };
   }
 
+  /**
+   * Busca direcciones reales con OpenStreetMap (Nominatim).
+   *
+   * Se usa para que el dueño elija su local en un mapa en vez de teclear
+   * coordenadas. Se limita a México, se cachea 5 minutos y se respeta el
+   * límite de 1 petición por segundo de Nominatim. Si el servicio falla, la
+   * búsqueda devuelve una lista vacía: nunca bloquea el guardado manual.
+   */
+  async searchLocation(rawQuery: string): Promise<LocationSearchResult[]> {
+    const query = (rawQuery ?? '').trim().slice(0, 120);
+
+    if (query.length < 3) return [];
+
+    const cacheKey = query.toLowerCase();
+    const cached = locationCache.get(cacheKey);
+
+    if (cached && cached.expires > Date.now()) {
+      return cached.data;
+    }
+
+    const wait = Math.max(0, 1000 - (Date.now() - lastNominatimRequest));
+    if (wait > 0) {
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+    lastNominatimRequest = Date.now();
+
+    const url = new URL('https://nominatim.openstreetmap.org/search');
+    url.searchParams.set('format', 'jsonv2');
+    url.searchParams.set('q', query);
+    url.searchParams.set('limit', '5');
+    url.searchParams.set('countrycodes', 'mx');
+    url.searchParams.set('addressdetails', '1');
+
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mishef/1.0 (https://mishef.co)',
+          'Accept-Language': 'es',
+        },
+        signal: AbortSignal.timeout(8000),
+      });
+
+      if (!response.ok) return [];
+
+      const rows = (await response.json()) as Array<{
+        display_name?: string;
+        lat?: string;
+        lon?: string;
+        type?: string;
+      }>;
+
+      const data = rows
+        .map((row) => ({
+          label: row.display_name?.trim() ?? '',
+          latitude: Number(row.lat),
+          longitude: Number(row.lon),
+          type: row.type ?? null,
+        }))
+        .filter(
+          (row) =>
+            row.label.length > 0 &&
+            Number.isFinite(row.latitude) &&
+            Number.isFinite(row.longitude),
+        );
+
+      if (locationCache.size > 200) locationCache.clear();
+      locationCache.set(cacheKey, {
+        expires: Date.now() + LOCATION_CACHE_TTL_MS,
+        data,
+      });
+
+      return data;
+    } catch {
+      return [];
+    }
+  }
+
   /** Comprueba si un dominio puede usarlo la organización (es único global). */
-  async domainAvailable(rawDomain: string) {
-    const domain = normalizeDomain(rawDomain ?? '');
+  async domainAvailable(rawDomain: string) {    const domain = normalizeDomain(rawDomain ?? '');
 
     if (!isValidDomain(domain)) {
       return { domain, available: false, reason: 'invalid' as const };

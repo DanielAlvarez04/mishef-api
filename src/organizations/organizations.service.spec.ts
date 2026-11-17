@@ -288,6 +288,49 @@ describe('OrganizationsService', () => {
     });
   });
 
+  it('busca direcciones reales en OpenStreetMap', async () => {
+    const { service } = createMocks();
+    const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => [
+        {
+          display_name: 'Av. Reforma 123, Cuauhtémoc, CDMX',
+          lat: '19.4326077',
+          lon: '-99.1332080',
+          type: 'house',
+        },
+      ],
+    } as Response);
+
+    try {
+      const result = await service.searchLocation('Reforma 123');
+
+      expect(result).toEqual([
+        {
+          label: 'Av. Reforma 123, Cuauhtémoc, CDMX',
+          latitude: 19.4326077,
+          longitude: -99.133208,
+          type: 'house',
+        },
+      ]);
+      expect(fetchMock).toHaveBeenCalled();
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  it('no consulta OpenStreetMap con una búsqueda demasiado corta', async () => {
+    const { service } = createMocks();
+    const fetchMock = jest.spyOn(globalThis, 'fetch');
+
+    try {
+      await expect(service.searchLocation('ab')).resolves.toEqual([]);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
   it('indica la disponibilidad de una dirección de negocio', async () => {
     const { service, prisma } = createMocks();
     prisma.organization.findUnique.mockResolvedValueOnce(null);

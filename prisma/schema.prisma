@@ -534,6 +534,8 @@ model Item {
   price          Decimal  @db.Decimal(12, 2) // Precio final con IVA incluido
   taxRate        Decimal? @db.Decimal(5, 4) // Tasa aplicable; null = no configurada (no se asume ninguna)
   isActive       Boolean  @default(true)
+  /// Marcado manual desde el catálogo: el menú público lo muestra como agotado.
+  isSoldOut      Boolean  @default(false)
   /// La receta dejó de publicarse como artículo: se oculta del catálogo de
   /// artículos (aunque esté inactivo) y se conserva para volver a publicarla.
   isArchived     Boolean  @default(false)

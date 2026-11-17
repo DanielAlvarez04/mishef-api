@@ -13,7 +13,12 @@ import { PrismaService } from '../prisma/prisma.service';
 import { fromCanonicalQuantity } from '../common/units';
 import { rolesHavePermission } from '../common/permissions';
 import { computeFoodCost } from '../common/food-cost';
-import { MIN_COHORT, buildBenchmarkMetric } from '../common/benchmark';
+import {
+  LOCAL_BENCHMARK_RADIUS_KM,
+  MIN_COHORT,
+  buildBenchmarkMetric,
+  distanceKm,
+} from '../common/benchmark';
 
 const ACTIVE_ROUNDS = [
   OrderRoundStatus.PENDING,
@@ -594,7 +599,11 @@ export class DashboardService {
 
     const current = await this.prisma.organization.findUnique({
       where: { id: organizationId },
-      select: { businessType: true },
+      select: {
+        businessType: true,
+        latitude: true,
+        longitude: true,
+      },
     });
 
     if (!current) {
@@ -607,22 +616,94 @@ export class DashboardService {
       };
     }
 
-    const organizations = await this.prisma.organization.findMany({
-      where: {
-        isActive: true,
-        ...(current.businessType
-          ? { businessType: current.businessType }
-          : {}),
-      },
-      select: { id: true },
-      take: 200,
-    });
+    const baseWhere = {
+      isActive: true,
+      ...(current.businessType
+        ? { businessType: current.businessType }
+        : {}),
+    };
 
-    const rows = await Promise.all(
-      organizations.map((organization) =>
-        this.organizationBenchmark(organization.id, from, to, periodDays),
-      ),
-    );
+    const myLocation =
+      current.latitude !== null && current.longitude !== null
+        ? {
+            latitude: Number(current.latitude),
+            longitude: Number(current.longitude),
+          }
+        : null;
+
+    let scope: 'local' | 'national' = 'national';
+    let radiusKm: number | null = null;
+    let organizations: { id: string }[] = [];
+    let rows: Awaited<ReturnType<DashboardService['organizationBenchmark']>>[] = [];
+    let localCandidates = 0;
+
+    // Primero se intenta la cohorte de la zona. Si no hay suficientes negocios
+    // cercanos con ventas, se cae al grupo nacional del mismo giro.
+    if (myLocation) {
+      const latDelta = LOCAL_BENCHMARK_RADIUS_KM / 110.574;
+      const lngDelta =
+        LOCAL_BENCHMARK_RADIUS_KM /
+        (111.32 * Math.max(0.2, Math.cos((myLocation.latitude * Math.PI) / 180)));
+
+      const nearby = await this.prisma.organization.findMany({
+        where: {
+          ...baseWhere,
+          latitude: {
+            not: null,
+            gte: myLocation.latitude - latDelta,
+            lte: myLocation.latitude + latDelta,
+          },
+          longitude: {
+            not: null,
+            gte: myLocation.longitude - lngDelta,
+            lte: myLocation.longitude + lngDelta,
+          },
+        },
+        select: { id: true, latitude: true, longitude: true },
+        take: 500,
+      });
+
+      const withinRadius = nearby.filter(
+        (organization) =>
+          organization.latitude !== null &&
+          organization.longitude !== null &&
+          distanceKm(myLocation, {
+            latitude: Number(organization.latitude),
+            longitude: Number(organization.longitude),
+          }) <= LOCAL_BENCHMARK_RADIUS_KM,
+      );
+
+      localCandidates = withinRadius.length;
+
+      if (withinRadius.length >= MIN_COHORT) {
+        const localRows = await Promise.all(
+          withinRadius.map((organization) =>
+            this.organizationBenchmark(organization.id, from, to, periodDays),
+          ),
+        );
+
+        if (localRows.filter((row) => row.orders > 0).length >= MIN_COHORT) {
+          scope = 'local';
+          radiusKm = LOCAL_BENCHMARK_RADIUS_KM;
+          organizations = withinRadius;
+          rows = localRows;
+        }
+      }
+    }
+
+    if (rows.length === 0) {
+      organizations = await this.prisma.organization.findMany({
+        where: baseWhere,
+        select: { id: true },
+        take: 200,
+      });
+
+      rows = await Promise.all(
+        organizations.map((organization) =>
+          this.organizationBenchmark(organization.id, from, to, periodDays),
+        ),
+      );
+    }
 
     const valid = rows.filter((row) => row.orders > 0);
     const mine = valid.find((row) => row.organizationId === organizationId);
@@ -635,6 +716,10 @@ export class DashboardService {
       businessType: current.businessType,
       organizations: valid.length,
       minimum: MIN_COHORT,
+      scope,
+      radiusKm,
+      localCandidates,
+      myLocation,
     };
 
     if (valid.length < MIN_COHORT) {
