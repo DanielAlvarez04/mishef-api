@@ -12,6 +12,9 @@ npm-debug.log*
 tmp-*.mjs
 check-data.ts
 typecheck_errors.txt
-scripts
+# Scripts de mantenimiento que sí van en la imagen
+scripts/*
+!scripts/storage-recount.mjs
+!scripts/purge-analytics.mjs
 Dockerfile
 .dockerignore
