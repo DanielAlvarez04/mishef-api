@@ -1428,6 +1428,8 @@ model CashSession {
   expectedCash   Decimal?          @db.Decimal(12, 2)
   difference     Decimal?          @db.Decimal(12, 2)
   notes          String?
+  /// Clave de idempotencia del cierre (reintentos offline).
+  closeIdempotencyKey String?      @unique
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
 

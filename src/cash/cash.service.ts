@@ -135,8 +135,18 @@ export class CashService {
     dto: CloseCashSessionDto,
   ) {
     const session = await this.findSession(organizationId, sessionId);
+    const idempotencyKey = dto.idempotencyKey?.trim() || null;
 
     if (session.status !== CashSessionStatus.OPEN) {
+      // Reintento del mismo cierre (red perdida después de que el servidor
+      // cerró): devuelve el turno ya cerrado en vez de fallar.
+      if (
+        idempotencyKey &&
+        session.closeIdempotencyKey === idempotencyKey
+      ) {
+        return this.detailData(session);
+      }
+
       throw new BadRequestException('La caja ya está cerrada');
     }
 
@@ -144,47 +154,66 @@ export class CashService {
     const counted = new Prisma.Decimal(dto.countedCash).toDecimalPlaces(2);
     const difference = counted.minus(expected).toDecimalPlaces(2);
 
-    const updated = await this.prisma.$transaction(async (tx) => {
-      const claimed = await tx.cashSession.updateMany({
-        where: { id: sessionId, status: CashSessionStatus.OPEN },
-        data: {
-          status: CashSessionStatus.CLOSED,
-          closedById: userId,
-          closedAt: new Date(),
-          countedCash: counted,
-          expectedCash: expected,
-          difference,
-          notes: dto.notes?.trim() || null,
-        },
+    try {
+      const updated = await this.prisma.$transaction(async (tx) => {
+        const claimed = await tx.cashSession.updateMany({
+          where: { id: sessionId, status: CashSessionStatus.OPEN },
+          data: {
+            status: CashSessionStatus.CLOSED,
+            closedById: userId,
+            closedAt: new Date(),
+            countedCash: counted,
+            expectedCash: expected,
+            difference,
+            notes: dto.notes?.trim() || null,
+            closeIdempotencyKey: idempotencyKey,
+          },
+        });
+
+        if (claimed.count === 0) {
+          throw new ConflictException('La caja ya cambió de estado');
+        }
+
+        await tx.auditLog.create({
+          data: {
+            organizationId: session.organizationId,
+            userId,
+            action: 'cash.closed',
+            entity: 'CashSession',
+            entityId: sessionId,
+            newValues: {
+              expectedCash: expected.toFixed(2),
+              countedCash: counted.toFixed(2),
+              difference: difference.toFixed(2),
+              notes: dto.notes?.trim() || null,
+              idempotencyKey,
+            },
+          },
+        });
+
+        return tx.cashSession.findUniqueOrThrow({
+          where: { id: sessionId },
+          include: sessionInclude,
+        });
       });
 
-      if (claimed.count === 0) {
-        throw new ConflictException('La caja ya cambió de estado');
+      return this.detailData(updated);
+    } catch (error) {
+      // Otra petición pudo cerrar la caja entre la lectura y el update. Si
+      // fue el mismo cierre idempotente, el resultado ya es el correcto.
+      if (idempotencyKey && organizationId) {
+        const latest = await this.findSession(organizationId, sessionId);
+
+        if (
+          latest.status === CashSessionStatus.CLOSED &&
+          latest.closeIdempotencyKey === idempotencyKey
+        ) {
+          return this.detailData(latest);
+        }
       }
 
-      await tx.auditLog.create({
-        data: {
-          organizationId: session.organizationId,
-          userId,
-          action: 'cash.closed',
-          entity: 'CashSession',
-          entityId: sessionId,
-          newValues: {
-            expectedCash: expected.toFixed(2),
-            countedCash: counted.toFixed(2),
-            difference: difference.toFixed(2),
-            notes: dto.notes?.trim() || null,
-          },
-        },
-      });
-
-      return tx.cashSession.findUniqueOrThrow({
-        where: { id: sessionId },
-        include: sessionInclude,
-      });
-    });
-
-    return this.detailData(updated);
+      throw error;
+    }
   }
 
   async addMovement(

@@ -29,6 +29,12 @@ export class CloseCashSessionDto {
   @IsString()
   @MaxLength(500)
   notes?: string;
+
+  /** Clave del cliente para reintentar el cierre sin duplicarlo. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  idempotencyKey?: string;
 }
 
 /** Retiro, ingreso o gasto de efectivo del turno. */
