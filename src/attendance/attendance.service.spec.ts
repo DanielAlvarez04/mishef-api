@@ -16,7 +16,11 @@ function build() {
     },
     payment: { findMany: jest.fn().mockResolvedValue([]) },
     membership: { findMany: jest.fn().mockResolvedValue([]) },
+    auditLog: { create: jest.fn().mockResolvedValue({}) },
+    $transaction: jest.fn(),
   };
+
+  prisma.$transaction.mockImplementation((fn: any) => fn(prisma));
 
   const service = new AttendanceService(prisma as unknown as PrismaService);
 
@@ -157,5 +161,122 @@ describe('AttendanceService — checador y propinas', () => {
 
     expect(result.pool).toBe(0);
     expect(result.participants).toEqual([]);
+  });
+
+  it('un turno abierto solo cuenta hasta ahora, no hasta el fin del periodo', async () => {
+    const { service, prisma } = build();
+    prisma.payment.findMany.mockResolvedValue([{ tipAmount: 100 }]);
+    prisma.shift.findMany.mockResolvedValue([
+      {
+        userId: 'u1',
+        startedAt: new Date(Date.now() - 10 * 60 * 60 * 1000),
+        endedAt: null,
+      },
+    ]);
+    prisma.membership.findMany.mockResolvedValue([
+      { userId: 'u1', roles: ['WAITER'], user: { name: 'Ana' } },
+    ]);
+
+    const result = await service.tipsDistribution(
+      'org1',
+      null,
+      '2020-01-01',
+      '2099-12-31',
+    );
+
+    expect(result.participants[0]?.hours).toBeGreaterThanOrEqual(9.9);
+    expect(result.participants[0]?.hours).toBeLessThanOrEqual(10.1);
+  });
+
+  it('incluye el día final completo en el rango de turnos', async () => {
+    const { service, prisma } = build();
+    prisma.shift.findMany.mockResolvedValue([]);
+
+    await service.list('org1', null, '2026-11-10', '2026-11-17');
+
+    const where = prisma.shift.findMany.mock.calls[0][0].where;
+    const end = where.startedAt.lte as Date;
+
+    expect(end.getFullYear()).toBe(2026);
+    expect(end.getMonth()).toBe(10);
+    expect(end.getDate()).toBe(17);
+    expect(end.getHours()).toBe(23);
+    expect(end.getMinutes()).toBe(59);
+  });
+
+  it('corrige la salida olvidada de un turno', async () => {
+    const { service, prisma } = build();
+    const startedAt = new Date('2026-11-17T10:00:00.000Z');
+    const endedAt = new Date('2026-11-17T18:00:00.000Z');
+
+    prisma.shift.findFirst
+      .mockResolvedValueOnce({
+        id: 's1',
+        userId: 'u1',
+        startedAt,
+        endedAt: null,
+        note: null,
+        branchId: null,
+      })
+      .mockResolvedValueOnce(null);
+    prisma.shift.update.mockResolvedValue({
+      id: 's1',
+      startedAt,
+      endedAt,
+      note: null,
+      branchId: null,
+      user: { id: 'u1', name: 'Ana', username: null },
+    });
+
+    const result = await service.update('org1', 'admin', 's1', {
+      endedAt: endedAt.toISOString(),
+    });
+
+    expect(result.endedAt).toEqual(endedAt);
+    expect(prisma.shift.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 's1' },
+        data: { endedAt },
+      }),
+    );
+    expect(prisma.auditLog.create).toHaveBeenCalled();
+  });
+
+  it('rechaza una salida anterior a la entrada', async () => {
+    const { service, prisma } = build();
+    prisma.shift.findFirst.mockResolvedValue({
+      id: 's1',
+      userId: 'u1',
+      startedAt: new Date('2026-11-17T10:00:00.000Z'),
+      endedAt: null,
+      note: null,
+      branchId: null,
+    });
+
+    await expect(
+      service.update('org1', 'admin', 's1', {
+        endedAt: '2026-11-17T09:00:00.000Z',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rechaza un turno que se cruza con otro del mismo usuario', async () => {
+    const { service, prisma } = build();
+    prisma.shift.findFirst
+      .mockResolvedValueOnce({
+        id: 's1',
+        userId: 'u1',
+        startedAt: new Date('2026-11-17T10:00:00.000Z'),
+        endedAt: null,
+        note: null,
+        branchId: null,
+      })
+      .mockResolvedValueOnce({ id: 's2' });
+
+    await expect(
+      service.update('org1', 'admin', 's1', {
+        endedAt: '2026-11-17T18:00:00.000Z',
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
   });
 });

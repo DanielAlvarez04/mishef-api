@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { PaymentStatus, Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { UpdateShiftDto } from './dto/attendance.dto';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -20,7 +21,13 @@ const DEFAULT_WEIGHTS: Record<Role, number> = {
 
 function parseDate(raw: string | undefined, endOfDay = false): Date | null {
   if (!raw) return null;
-  const date = new Date(raw);
+
+  // `YYYY-MM-DD` se interpreta como día local del negocio. Si se parsea como
+  // UTC, `setHours(23:59)` cae en la fecha local anterior y el último día del
+  // rango queda fuera.
+  const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(raw.trim());
+  const date = new Date(isDateOnly ? `${raw.trim()}T00:00:00` : raw);
+
   if (Number.isNaN(date.getTime())) return null;
   if (endOfDay) date.setHours(23, 59, 59, 999);
   return date;
@@ -129,13 +136,157 @@ export class AttendanceService {
     });
   }
 
+  /**
+   * Corrige un turno existente (entrada, salida o nota).
+   *
+   * Solo ADMIN. No permite que dos turnos del mismo usuario se crucen ni que
+   * queden dos turnos abiertos a la vez: las horas de propinas deben ser
+   * confiables.
+   */
+  async update(
+    organizationId: string | null,
+    actorUserId: string,
+    shiftId: string,
+    dto: UpdateShiftDto,
+  ) {
+    if (!organizationId) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    const shift = await this.prisma.shift.findFirst({
+      where: { id: shiftId, organizationId },
+      select: {
+        id: true,
+        userId: true,
+        startedAt: true,
+        endedAt: true,
+        note: true,
+        branchId: true,
+      },
+    });
+
+    if (!shift) {
+      throw new NotFoundException('Turno no encontrado');
+    }
+
+    const startedAt =
+      dto.startedAt !== undefined ? new Date(dto.startedAt) : shift.startedAt;
+
+    if (Number.isNaN(startedAt.getTime())) {
+      throw new BadRequestException('La entrada no es una fecha válida');
+    }
+
+    const endedAt =
+      dto.endedAt === undefined
+        ? shift.endedAt
+        : dto.endedAt === null
+          ? null
+          : new Date(dto.endedAt);
+
+    if (endedAt && Number.isNaN(endedAt.getTime())) {
+      throw new BadRequestException('La salida no es una fecha válida');
+    }
+
+    if (endedAt && endedAt.getTime() <= startedAt.getTime()) {
+      throw new BadRequestException(
+        'La salida debe ser posterior a la entrada',
+      );
+    }
+
+    const effectiveEnd = endedAt ?? new Date();
+
+    const overlap = await this.prisma.shift.findFirst({
+      where: {
+        organizationId,
+        userId: shift.userId,
+        id: { not: shift.id },
+        startedAt: { lt: effectiveEnd },
+        OR: [{ endedAt: null }, { endedAt: { gt: startedAt } }],
+      },
+      select: { id: true },
+    });
+
+    if (overlap) {
+      throw new ConflictException(
+        'El turno se cruza con otro turno del mismo usuario',
+      );
+    }
+
+    const data: {
+      startedAt?: Date;
+      endedAt?: Date | null;
+      note?: string | null;
+    } = {};
+
+    if (startedAt.getTime() !== shift.startedAt.getTime()) {
+      data.startedAt = startedAt;
+    }
+
+    const currentEnd = shift.endedAt?.getTime() ?? null;
+    const nextEnd = endedAt?.getTime() ?? null;
+
+    if (currentEnd !== nextEnd) {
+      data.endedAt = endedAt;
+    }
+
+    if (dto.note !== undefined) {
+      const note = dto.note?.trim() || null;
+
+      if (note !== shift.note) {
+        data.note = note;
+      }
+    }
+
+    if (Object.keys(data).length === 0) {
+      return shift;
+    }
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.shift.update({
+        where: { id: shift.id },
+        data,
+        select: {
+          id: true,
+          startedAt: true,
+          endedAt: true,
+          note: true,
+          branchId: true,
+          user: { select: { id: true, name: true, username: true } },
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          organizationId,
+          userId: actorUserId,
+          action: 'attendance.shift_updated',
+          entity: 'Shift',
+          entityId: shift.id,
+          oldValues: {
+            startedAt: shift.startedAt.toISOString(),
+            endedAt: shift.endedAt?.toISOString() ?? null,
+            note: shift.note,
+          },
+          newValues: {
+            startedAt: result.startedAt.toISOString(),
+            endedAt: result.endedAt?.toISOString() ?? null,
+            note: result.note,
+          },
+        },
+      });
+
+      return result;
+    });
+
+    return updated;
+  }
+
   async list(
     organizationId: string | null,
     branchId: string | null,
     from?: string,
     to?: string,
-  ) {
-    if (!organizationId) return { shifts: [], hours: 0 };
+  ) {    if (!organizationId) return { shifts: [], hours: 0 };
 
     const start = parseDate(from);
     const end = parseDate(to, true);
@@ -242,9 +393,15 @@ export class AttendanceService {
     );
 
     const hoursOf = new Map<string, number>();
+    const now = Date.now();
 
     for (const shift of shifts) {
-      const shiftEnd = shift.endedAt ?? end;
+      // Un turno abierto solo cuenta hasta ahora, no hasta el final del
+      // periodo: si el periodo termina el día 30, no se le regalan días
+      // futuros al reparto de propinas.
+      const shiftEnd = shift.endedAt
+        ? shift.endedAt
+        : new Date(Math.min(now, end.getTime()));
       const overlap =
         Math.min(shiftEnd.getTime(), end.getTime()) -
         Math.max(shift.startedAt.getTime(), start.getTime());

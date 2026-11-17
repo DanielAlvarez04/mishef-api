@@ -3,6 +3,8 @@ import {
   Controller,
   Get,
   HttpCode,
+  Param,
+  Patch,
   Post,
   Query,
   UseGuards,
@@ -16,7 +18,7 @@ import { CurrentBranch } from '../common/decorators/current-branch.decorator';
 import { RequirePermissions } from '../common/decorators/require-permissions.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { AttendanceService } from './attendance.service';
-import { ClockInDto } from './dto/attendance.dto';
+import { ClockInDto, UpdateShiftDto } from './dto/attendance.dto';
 
 @ApiTags('attendance')
 @Controller('attendance')
@@ -66,6 +68,17 @@ export class AttendanceController {
     @Query('to') to?: string,
   ) {
     return this.attendance.list(user.organizationId, branchId, from, to);
+  }
+
+  @ApiOperation({ summary: 'Corregir un turno (solo ADMIN)' })
+  @RequirePermissions('attendance:manage')
+  @Patch(':id')
+  update(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Body() dto: UpdateShiftDto,
+  ) {
+    return this.attendance.update(user.organizationId, user.sub, id, dto);
   }
 
   @ApiOperation({ summary: 'Reparto de propinas por horas y rol' })

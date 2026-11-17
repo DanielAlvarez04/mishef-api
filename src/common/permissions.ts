@@ -43,6 +43,8 @@ export const PERMISSIONS = {
   ],
   /** Ver turnos del equipo y reparto de propinas. */
   'attendance:read': ['ADMIN', 'CASHIER'],
+  /** Corregir turnos (entrada/salida olvidada). */
+  'attendance:manage': ['ADMIN'],
 } as const satisfies Record<string, readonly Role[]>;
 
 export type Permission = keyof typeof PERMISSIONS;
