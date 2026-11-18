@@ -1,19 +1,27 @@
-import 'dotenv/config';
+// Crea o actualiza la cuenta interna de la plataforma (`z.mishef.co`).
+//
+// Uso:
+//   PLATFORM_ADMIN_EMAIL=dalvarez@mishef.co \
+//   PLATFORM_ADMIN_PASSWORD='...' \
+//   node scripts/create-platform-admin.mjs
+//
+// Si se omite `PLATFORM_ADMIN_PASSWORD` se conserva la contraseña actual: sirve
+// para reaplicar permisos o reparar la cuenta sin cambiarla.
+//
+// La contraseña solo se usa en memoria; no se guarda en el repositorio.
+//
+// Requisitos:
+//   - DATABASE_URL en `api/.env` (o en el entorno del contenedor).
+//   - Los planes creados con `scripts/seed-plans.mjs` para asignar Legacy.
+//   - Ejecutar desde `api/`.
 
-import { hash } from 'argon2';
+import { config } from 'dotenv';
+import argon2 from 'argon2';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 
-/**
- * Crea o actualiza la cuenta interna de la plataforma.
- *
- * Uso:
- *   PLATFORM_ADMIN_EMAIL=dalvarez@mishef.co \
- *   PLATFORM_ADMIN_PASSWORD='...' \
- *   npx ts-node scripts/create-platform-admin.ts
- *
- * La contraseña solo se usa en memoria; no se guarda en el repositorio.
- */
+config();
+
 async function main() {
   const email = process.env.PLATFORM_ADMIN_EMAIL?.trim().toLowerCase();
   const password = process.env.PLATFORM_ADMIN_PASSWORD;
@@ -50,7 +58,7 @@ async function main() {
     });
 
     const existing = await prisma.user.findUnique({ where: { email } });
-    const passwordHash = password ? await hash(password) : undefined;
+    const passwordHash = password ? await argon2.hash(password) : undefined;
 
     const user = existing
       ? await prisma.user.update({
@@ -121,6 +129,10 @@ async function main() {
           payerEmail: email,
         },
       });
+    } else {
+      console.warn(
+        'Aviso: no existe el plan "legacy". Ejecuta scripts/seed-plans.mjs y vuelve a correr este script.',
+      );
     }
 
     console.log(
@@ -135,6 +147,7 @@ async function main() {
           twoFactorEnabled: user.twoFactorEnabled,
           emailVerified: user.emailVerified,
           passwordUpdated: Boolean(passwordHash),
+          legacyPlanAssigned: Boolean(legacy),
         },
         null,
         2,

@@ -16,6 +16,7 @@
     "recipe:scopes": "node scripts/migrate-recipe-scopes.mjs",
     "analytics:purge": "node scripts/purge-analytics.mjs",
     "storage:recount": "node scripts/storage-recount.mjs",
+    "plans:seed": "node scripts/seed-plans.mjs",
     "images:optimize": "ts-node --transpile-only scripts/optimize-existing-images.ts",
     "images:seed": "ts-node --transpile-only scripts/upload-food-images.ts",
     "test": "jest",
