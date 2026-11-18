@@ -302,6 +302,7 @@ model Organization {
   mercadoPagoConnection MercadoPagoConnection?
   mercadoPagoTerminals  MercadoPagoTerminal[]
   subscription         OrganizationSubscription?
+  fiscalProfile        FiscalProfile?
 
   cashSessions  CashSession[]
   cashMovements CashMovement[]
@@ -585,6 +586,27 @@ model MediaAsset {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@index([organizationId, entityType, entityId])
+}
+
+/// Datos fiscales del negocio para CFDI.
+///
+/// Fase 0: solo captura y validación. No hay timbrado ni CSD todavía; el
+/// emisor y el PAC se definen en `docs/facturacion-cfdi.md`.
+model FiscalProfile {
+  id             String   @id @default(cuid())
+  organizationId String   @unique
+  rfc            String
+  legalName      String
+  /// Clave del catálogo SAT (601, 603, 605…).
+  taxRegime      String
+  zipCode        String   @db.VarChar(5)
+  /// Uso del CFDI; `G03` (gastos en general) por defecto.
+  cfdiUse        String   @default("G03")
+  email          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 }
 
 /// Artículo del catálogo (lo que se vende en el POS).

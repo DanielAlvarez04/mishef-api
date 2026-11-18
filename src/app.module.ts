@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+﻿import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
@@ -29,6 +29,7 @@ import { PublicModule } from './public/public.module';
 import { StorageModule } from './storage/storage.module';
 import { BillingModule } from './billing/billing.module';
 import { BillingAccessInterceptor } from './billing/billing-access.interceptor';
+import { FiscalModule } from './fiscal/fiscal.module';
 import { MediaModule } from './media/media.module';
 
 @Module({
@@ -64,6 +65,7 @@ import { MediaModule } from './media/media.module';
     StorageModule,
     BillingModule,
     MediaModule,
+    FiscalModule,
     HealthModule,
   ],
   controllers: [],
