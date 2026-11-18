@@ -2255,3 +2255,13 @@ model SlugAlias {
 
   @@index([organizationId])
 }
+
+/// Tokens visuales globales editados desde `/styles`.
+///
+/// Fila única (`default`). Guarda colores, radios y bordes de botones, chips y
+/// tabs; la app los inyecta como CSS en el layout.
+model DesignTokens {
+  id        String   @id @default("default")
+  tokens    Json
+  updatedAt DateTime @updatedAt
+}

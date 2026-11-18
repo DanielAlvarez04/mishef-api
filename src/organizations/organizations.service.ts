@@ -749,37 +749,45 @@ export class OrganizationsService {
     }
 
     if (dto.brandColor !== undefined) {
-      const brandColor = dto.brandColor.trim().toLowerCase();
+      const brandColor = dto.brandColor?.trim().toLowerCase() || null;
       if (brandColor !== (current.brandColor ?? null)) {
         data.brandColor = brandColor;
       }
     }
 
     if (dto.logoUrl !== undefined) {
-      const logoUrl = dto.logoUrl.trim();
+      const logoUrl = dto.logoUrl?.trim() || null;
       if (logoUrl !== (current.logoUrl ?? null)) {
-        data.logoUrl = logoUrl || null;
+        data.logoUrl = logoUrl;
       }
     }
 
     if (dto.address !== undefined) {
-      const address = dto.address.trim();
+      const address = dto.address?.trim() || null;
       if (address !== (current.address ?? null)) {
-        data.address = address || null;
+        data.address = address;
       }
     }
 
     if (dto.latitude !== undefined) {
-      const latitude = new Prisma.Decimal(dto.latitude);
-      if (!sameDecimal(latitude, current.latitude)) {
-        data.latitude = latitude;
+      if (dto.latitude === null) {
+        if (current.latitude !== null) data.latitude = null;
+      } else {
+        const latitude = new Prisma.Decimal(dto.latitude);
+        if (!sameDecimal(latitude, current.latitude)) {
+          data.latitude = latitude;
+        }
       }
     }
 
     if (dto.longitude !== undefined) {
-      const longitude = new Prisma.Decimal(dto.longitude);
-      if (!sameDecimal(longitude, current.longitude)) {
-        data.longitude = longitude;
+      if (dto.longitude === null) {
+        if (current.longitude !== null) data.longitude = null;
+      } else {
+        const longitude = new Prisma.Decimal(dto.longitude);
+        if (!sameDecimal(longitude, current.longitude)) {
+          data.longitude = longitude;
+        }
       }
     }
 

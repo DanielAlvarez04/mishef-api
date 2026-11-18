@@ -83,10 +83,16 @@ export class BranchesService {
         },
       });
 
-      // La intención del onboarding y la realidad de la base quedan alineadas.
+      // La primera sucursal no significa "tengo varias": el flag se activa
+      // recién con la segunda. La intención del onboarding y la realidad de la
+      // base quedan alineadas.
+      const branchCount = await tx.branch.count({
+        where: { organizationId: orgId },
+      });
+
       await tx.organization.update({
         where: { id: orgId },
-        data: { hasBranches: true },
+        data: { hasBranches: branchCount > 1 },
       });
 
       return created;

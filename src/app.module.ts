@@ -31,6 +31,7 @@ import { BillingModule } from './billing/billing.module';
 import { BillingAccessInterceptor } from './billing/billing-access.interceptor';
 import { FiscalModule } from './fiscal/fiscal.module';
 import { MediaModule } from './media/media.module';
+import { DesignModule } from './design/design.module';
 
 @Module({
   imports: [
@@ -66,6 +67,7 @@ import { MediaModule } from './media/media.module';
     BillingModule,
     MediaModule,
     FiscalModule,
+    DesignModule,
     HealthModule,
   ],
   controllers: [],
