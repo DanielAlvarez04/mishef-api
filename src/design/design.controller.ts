@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Post,
   Put,
   UseGuards,
 } from '@nestjs/common';
@@ -18,18 +19,25 @@ import { UpdateDesignTokensDto } from './dto/design-tokens.dto';
 export class DesignController {
   constructor(private readonly design: DesignService) {}
 
-  @ApiOperation({ summary: 'Tokens visuales globales' })
+  @ApiOperation({ summary: 'Tokens aplicados y borrador' })
   @UseGuards(JwtAuthGuard)
   @Get()
   get() {
     return this.design.get();
   }
 
-  @ApiOperation({ summary: 'Guardar tokens visuales globales' })
+  @ApiOperation({ summary: 'Guardar borrador de estilos' })
   @UseGuards(JwtAuthGuard, PlatformAdminGuard)
-  @Put()
-  save(@Body() dto: UpdateDesignTokensDto) {
-    return this.design.save(dto.tokens);
+  @Put('draft')
+  saveDraft(@Body() dto: UpdateDesignTokensDto) {
+    return this.design.saveDraft(dto.tokens);
+  }
+
+  @ApiOperation({ summary: 'Aplicar estilos a toda la app' })
+  @UseGuards(JwtAuthGuard, PlatformAdminGuard)
+  @Post('apply')
+  apply(@Body() dto: UpdateDesignTokensDto) {
+    return this.design.apply(dto.tokens);
   }
 
   @ApiOperation({ summary: 'Restablecer los estilos de la app' })

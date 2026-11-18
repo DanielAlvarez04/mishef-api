@@ -2262,6 +2262,9 @@ model SlugAlias {
 /// tabs; la app los inyecta como CSS en el layout.
 model DesignTokens {
   id        String   @id @default("default")
-  tokens    Json
+  /// Tokens aplicados a la app (los inyecta el layout).
+  tokens    Json?
+  /// Borrador editable desde /styles; no afecta a la app.
+  draft     Json?
   updatedAt DateTime @updatedAt
 }
