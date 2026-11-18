@@ -1,4 +1,4 @@
-node_modules
+﻿node_modules
 dist
 coverage
 .git
@@ -16,5 +16,7 @@ typecheck_errors.txt
 scripts/*
 !scripts/storage-recount.mjs
 !scripts/purge-analytics.mjs
+!scripts/create-platform-admin.mjs
+!scripts/seed-plans.mjs
 Dockerfile
 .dockerignore
