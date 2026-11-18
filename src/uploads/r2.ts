@@ -216,7 +216,7 @@ export const UPLOAD_URL_EXPIRES_IN = 300;
  */
 export function presignPutUrl(
   key: string,
-  contentType: ImageContentType,
+  contentType: string,
   cacheControl?: string,
 ) {
   return getSignedUrl(

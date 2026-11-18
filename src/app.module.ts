@@ -29,6 +29,7 @@ import { PublicModule } from './public/public.module';
 import { StorageModule } from './storage/storage.module';
 import { BillingModule } from './billing/billing.module';
 import { BillingAccessInterceptor } from './billing/billing-access.interceptor';
+import { MediaModule } from './media/media.module';
 
 @Module({
   imports: [
@@ -62,6 +63,7 @@ import { BillingAccessInterceptor } from './billing/billing-access.interceptor';
     PublicModule,
     StorageModule,
     BillingModule,
+    MediaModule,
     HealthModule,
   ],
   controllers: [],

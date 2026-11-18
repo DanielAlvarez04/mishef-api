@@ -297,6 +297,7 @@ model Organization {
   ingredientLocations  IngredientLocation[]
   optionGroups         OptionGroup[]
   menus                Menu[]
+  mediaAssets          MediaAsset[]
 
   mercadoPagoConnection MercadoPagoConnection?
   mercadoPagoTerminals  MercadoPagoTerminal[]
@@ -558,6 +559,32 @@ model CatalogEntry {
   recipes      Recipe[]
 
   @@index([organizationId])
+}
+
+enum MediaKind {
+  IMAGE
+  VIDEO
+}
+
+/// Galería adicional por entidad (artículos, recetas, insumos y menús).
+model MediaAsset {
+  id             String    @id @default(cuid())
+  organizationId String
+  /// ITEM | RECIPE | INGREDIENT | MENU
+  entityType     String
+  entityId       String
+  kind           MediaKind
+  key            String    @unique
+  url            String
+  name           String?
+  mimeType       String?
+  sizeBytes      BigInt?
+  sortOrder      Int       @default(0)
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, entityType, entityId])
 }
 
 /// Artículo del catálogo (lo que se vende en el POS).
