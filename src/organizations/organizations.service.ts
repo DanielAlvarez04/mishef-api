@@ -73,6 +73,7 @@ export class OrganizationsService {
       taxRate: organization.taxRate?.toString() ?? '0.16',
       currency: organization.currency ?? 'MXN',
       brandColor: organization.brandColor ?? null,
+      theme: organization.theme ?? 'default',
       logoUrl: organization.logoUrl ?? null,
       address: organization.address ?? null,
       latitude: organization.latitude?.toString() ?? null,
@@ -711,6 +712,7 @@ export class OrganizationsService {
       taxRate?: Prisma.Decimal;
       currency?: string;
       brandColor?: string | null;
+      theme?: string;
       logoUrl?: string | null;
       address?: string | null;
       latitude?: Prisma.Decimal | null;
@@ -753,6 +755,10 @@ export class OrganizationsService {
       if (brandColor !== (current.brandColor ?? null)) {
         data.brandColor = brandColor;
       }
+    }
+
+    if (dto.theme !== undefined && dto.theme !== current.theme) {
+      data.theme = dto.theme;
     }
 
     if (dto.logoUrl !== undefined) {
@@ -852,6 +858,7 @@ export class OrganizationsService {
       taxRate: organization.taxRate?.toString() ?? '0.16',
       currency: organization.currency ?? 'MXN',
       brandColor: organization.brandColor ?? null,
+      theme: organization.theme ?? 'default',
       logoUrl: organization.logoUrl ?? null,
       address: organization.address ?? null,
       latitude: organization.latitude?.toString() ?? null,

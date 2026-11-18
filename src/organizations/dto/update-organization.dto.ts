@@ -27,6 +27,14 @@ export class UpdateOrganizationDto {
   })
   brandColor?: string | null;
 
+  /** Tema visual del panel (`default`, `sky`, …). */
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-z0-9-]{1,32}$/, {
+    message: 'El tema no es válido',
+  })
+  theme?: string;
+
   /** URL pública del logo (normalmente en R2). `null` la borra. */
   @IsOptional()
   @IsString()

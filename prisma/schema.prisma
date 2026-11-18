@@ -227,6 +227,8 @@ model Organization {
   currency  String   @default("MXN")
   /// Color primario de la marca en formato `#rrggbb`. `null` = tema por defecto.
   brandColor String?
+  /// Tema visual del panel (clases `data-theme` / `theme-*` en globals.css).
+  theme      String   @default("default")
   /// URL pública del logo (R2). `null` = icono genérico.
   logoUrl   String?
   /// Dirección escrita del negocio (para el ticket y el menú público).
@@ -2256,15 +2258,3 @@ model SlugAlias {
   @@index([organizationId])
 }
 
-/// Tokens visuales globales editados desde `/styles`.
-///
-/// Fila única (`default`). Guarda colores, radios y bordes de botones, chips y
-/// tabs; la app los inyecta como CSS en el layout.
-model DesignTokens {
-  id        String   @id @default("default")
-  /// Tokens aplicados a la app (los inyecta el layout).
-  tokens    Json?
-  /// Borrador editable desde /styles; no afecta a la app.
-  draft     Json?
-  updatedAt DateTime @updatedAt
-}
