@@ -59,6 +59,45 @@ export class ImportIngredientRowDto {
 
 const DECIMAL_PATTERN = /^-?\d{1,9}(\.\d{1,6})?$/;
 
+export class IngredientPosPresentationDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(80)
+  name!: string;
+
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  price!: number;
+}
+
+export class IngredientPosDto {
+  /** Nombre del artículo en el POS; si falta se usa el del insumo. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  name?: string;
+
+  @IsString()
+  @IsNotEmpty()
+  categoryId!: string;
+
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  price!: number;
+
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 4 })
+  @Min(0)
+  taxRate?: number;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @ValidateNested({ each: true })
+  @Type(() => IngredientPosPresentationDto)
+  presentations?: IngredientPosPresentationDto[];
+}
+
 export class CreateIngredientDto {
   @IsString()
   @MinLength(2)
@@ -102,6 +141,12 @@ export class CreateIngredientDto {
   @IsNumber({ maxDecimalPlaces: 4 })
   @Min(0)
   currentStock?: number;
+
+  /** Publica el insumo como artículo vendible en el POS. */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => IngredientPosDto)
+  pos?: IngredientPosDto;
 }
 
 export class CreateIngredientsBulkDto {

@@ -9,6 +9,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -27,6 +28,7 @@ import {
   CreateIngredientDto,
   CreateIngredientsBulkDto,
   DeleteIngredientsDto,
+  IngredientPosDto,
   SyncCoreItemsDto,
   UpdateCoreIngredientCategoriesDto,
   UpdateIngredientDto,
@@ -123,6 +125,26 @@ export class InventoryController {
     @Body() dto: UpdateIngredientDto,
   ) {
     return this.inventory.updateIngredient(user.organizationId, id, dto);
+  }
+
+  @ApiOperation({ summary: 'Datos del artículo POS vinculado al insumo' })
+  @Get('ingredients/:id/pos')
+  getIngredientPos(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+  ) {
+    return this.inventory.getIngredientPos(user.organizationId, id);
+  }
+
+  @ApiOperation({ summary: 'Publicar o editar el artículo POS del insumo' })
+  @RequirePermissions('inventory:manage')
+  @Put('ingredients/:id/pos')
+  saveIngredientPos(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Body() dto: IngredientPosDto,
+  ) {
+    return this.inventory.saveIngredientPos(user.organizationId, id, dto);
   }
 
   @ApiOperation({ summary: 'Sincronizar insumos core con el inventario' })

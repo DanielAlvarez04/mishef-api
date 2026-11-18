@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  CategoryKind,
   InventoryMovementType,
   Prisma,
   UnitCode,
@@ -30,6 +31,7 @@ import {
   CreateEquivalenceDto,
   CreateIngredientDto,
   ImportIngredientRowDto,
+  IngredientPosDto,
   UpdateIngredientDto,
 } from './dto/inventory.dto';
 
@@ -265,6 +267,22 @@ export class InventoryService {
         });
       }
 
+      if (dto.pos) {
+        if (!organizationId) {
+          throw new BadRequestException(
+            'Organization required to publish an ingredient as an item',
+          );
+        }
+
+        await this.createSoldItem(
+          tx,
+          organizationId,
+          created,
+          displayUnit,
+          dto.pos,
+        );
+      }
+
       return tx.ingredient.findUniqueOrThrow({ where: { id: created.id } });
     });
 
@@ -277,6 +295,149 @@ export class InventoryService {
    * Cada ingrediente conserva su propio movimiento de stock inicial. Se valida
    * la lista completa antes de crear nada para no dejar altas a medias.
    */
+  async getIngredientPos(organizationId: string | null, id: string) {
+    const ingredient = await this.prisma.ingredient.findFirst({
+      where: { id, organizationId },
+      include: {
+        soldItem: {
+          include: {
+            variants: { orderBy: { sortOrder: 'asc' } },
+          },
+        },
+      },
+    });
+
+    if (!ingredient) throw new NotFoundException('Insumo no encontrado');
+    if (!ingredient.soldItem) return null;
+
+    const { soldItem } = ingredient;
+    const basePrice = Number(soldItem.price);
+
+    return {
+      itemId: soldItem.id,
+      name: soldItem.name,
+      categoryId: soldItem.categoryId,
+      price: basePrice,
+      taxRate: soldItem.taxRate === null ? null : Number(soldItem.taxRate),
+      presentations: soldItem.variants.map((variant) => ({
+        name: variant.name,
+        price: basePrice + Number(variant.priceAdjust),
+      })),
+    };
+  }
+
+  async saveIngredientPos(
+    organizationId: string | null,
+    id: string,
+    pos: IngredientPosDto,
+  ) {
+    if (!organizationId) {
+      throw new BadRequestException(
+        'Organization required to publish an ingredient as an item',
+      );
+    }
+
+    const ingredient = await this.prisma.ingredient.findFirst({
+      where: { id, organizationId },
+      include: {
+        soldItem: { include: { variants: true } },
+      },
+    });
+
+    if (!ingredient) throw new NotFoundException('Insumo no encontrado');
+
+    if (!ingredient.soldItemId) {
+      return this.prisma.$transaction(async (tx) => {
+        const itemId = await this.createSoldItem(
+          tx,
+          organizationId,
+          ingredient,
+          ingredient.displayUnit,
+          pos,
+        );
+
+        return { itemId };
+      });
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const category = await tx.category.findFirst({
+        where: {
+          id: pos.categoryId,
+          kind: CategoryKind.ARTICLE,
+          OR: [{ organizationId }, { organizationId: null }],
+        },
+        select: { id: true },
+      });
+
+      if (!category) {
+        throw new NotFoundException('Categoría de artículo no encontrada');
+      }
+
+      const name = pos.name?.trim() || ingredient.name;
+      const basePrice = new Prisma.Decimal(pos.price);
+      const itemId = ingredient.soldItemId!;
+
+      await tx.item.update({
+        where: { id: itemId },
+        data: {
+          name,
+          price: basePrice,
+          categoryId: category.id,
+          taxRate:
+            pos.taxRate !== undefined ? new Prisma.Decimal(pos.taxRate) : null,
+        },
+      });
+
+      const recipe = await tx.recipe.findFirst({ where: { itemId } });
+
+      if (recipe) {
+        await tx.recipe.update({
+          where: { id: recipe.id },
+          data: { name },
+        });
+
+        await tx.recipeIngredient.updateMany({
+          where: { recipeId: recipe.id, ingredientId: ingredient.id },
+          data: { quantity: toCanonicalQuantity(1, ingredient.displayUnit) },
+        });
+      }
+
+      const currentVariants = ingredient.soldItem?.variants ?? [];
+
+      if (currentVariants.length > 0) {
+        const used = await tx.orderItem.count({
+          where: { itemVariantId: { in: currentVariants.map((v) => v.id) } },
+        });
+
+        if (used > 0) {
+          throw new BadRequestException(
+            'No se pueden cambiar las presentaciones: ya tienen ventas asociadas',
+          );
+        }
+
+        await tx.itemVariant.deleteMany({ where: { itemId } });
+      }
+
+      const presentations = pos.presentations ?? [];
+
+      if (presentations.length > 0) {
+        await tx.itemVariant.createMany({
+          data: presentations.map((presentation, index) => ({
+            itemId,
+            name: presentation.name.trim(),
+            priceAdjust: new Prisma.Decimal(presentation.price).minus(basePrice),
+            isPrimary: index === 0,
+            sortOrder: index,
+          })),
+        });
+      }
+
+      return { itemId };
+    });
+  }
+
+
   async createIngredients(
     organizationId: string | null,
     userId: string,
@@ -1791,6 +1952,80 @@ export class InventoryService {
     if (existing) {
       throw new ConflictException('Ya existe un ingrediente con ese nombre');
     }
+  }
+
+  private async createSoldItem(
+    tx: Prisma.TransactionClient,
+    organizationId: string,
+    ingredient: { id: string; name: string; displayUnit: UnitCode },
+    displayUnit: UnitCode,
+    pos: IngredientPosDto,
+  ): Promise<string> {
+    const category = await tx.category.findFirst({
+      where: {
+        id: pos.categoryId,
+        kind: CategoryKind.ARTICLE,
+        OR: [{ organizationId }, { organizationId: null }],
+      },
+      select: { id: true },
+    });
+
+    if (!category) {
+      throw new NotFoundException('Categoría de artículo no encontrada');
+    }
+
+    const name = pos.name?.trim() || ingredient.name;
+    const basePrice = new Prisma.Decimal(pos.price);
+
+    const item = await tx.item.create({
+      data: {
+        organizationId,
+        categoryId: category.id,
+        name,
+        price: basePrice,
+        taxRate:
+          pos.taxRate !== undefined ? new Prisma.Decimal(pos.taxRate) : null,
+      },
+    });
+
+    // Vender el insumo descuenta una unidad visible de su stock.
+    await tx.recipe.create({
+      data: {
+        organizationId,
+        itemId: item.id,
+        name,
+        ingredients: {
+          create: [
+            {
+              ingredientId: ingredient.id,
+              quantity: toCanonicalQuantity(1, displayUnit),
+              sortOrder: 0,
+            },
+          ],
+        },
+      },
+    });
+
+    const presentations = pos.presentations ?? [];
+
+    if (presentations.length > 0) {
+      await tx.itemVariant.createMany({
+        data: presentations.map((presentation, index) => ({
+          itemId: item.id,
+          name: presentation.name.trim(),
+          priceAdjust: new Prisma.Decimal(presentation.price).minus(basePrice),
+          isPrimary: index === 0,
+          sortOrder: index,
+        })),
+      });
+    }
+
+    await tx.ingredient.update({
+      where: { id: ingredient.id },
+      data: { soldItemId: item.id },
+    });
+
+    return item.id;
   }
 
   private withFlags<T extends { currentStock: Prisma.Decimal; minStock: Prisma.Decimal }>(

@@ -640,6 +640,7 @@ model Item {
   organization           Organization?             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   category               Category?                 @relation(fields: [categoryId], references: [id])
   catalogEntry           CatalogEntry?             @relation(fields: [catalogEntryId], references: [id], onDelete: SetNull)
+  soldIngredient         Ingredient?               @relation("IngredientSoldItem")
   variants               ItemVariant[]
   extras                 ItemExtra[]
   recipes                Recipe[]
@@ -952,6 +953,8 @@ model Ingredient {
   maxStock       Decimal? @db.Decimal(12, 4) // Existencia máxima (opcional)
   unitCost       Decimal? @db.Decimal(12, 6) // Costo por unidad canónica
   isActive       Boolean  @default(true)
+  /// Artículo del POS que se vende a partir de este insumo (si aplica).
+  soldItemId     String?  @unique
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -961,6 +964,7 @@ model Ingredient {
   organization           Organization?               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   category               IngredientCategory?         @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   location               IngredientLocation?         @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  soldItem               Item?                       @relation("IngredientSoldItem", fields: [soldItemId], references: [id], onDelete: SetNull)
   recipeIngredients      RecipeIngredient[]
   ingredientOptions      RecipeIngredientOption[]
   orderChoices           OrderItemIngredientChoice[]
