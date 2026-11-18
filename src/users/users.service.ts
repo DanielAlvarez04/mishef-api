@@ -59,6 +59,78 @@ export class UsersService {
   }
 
   /**
+   * Usuarios de todos los negocios, para el panel de plataforma.
+   *
+   * Una fila por membresía: un mismo correo puede pertenecer a más de un
+   * negocio. El filtro por organización y la búsqueda se resuelven en la base
+   * para no traer toda la tabla cuando hay muchos negocios.
+   */
+  async listPlatformUsers(query: {
+    search?: string;
+    organizationId?: string;
+  }) {
+    const search = query.search?.trim();
+
+    const memberships = await this.prisma.membership.findMany({
+      where: {
+        ...(query.organizationId
+          ? { organizationId: query.organizationId }
+          : {}),
+        ...(search
+          ? {
+              OR: [
+                { user: { name: { contains: search, mode: 'insensitive' } } },
+                { user: { email: { contains: search, mode: 'insensitive' } } },
+                {
+                  user: { username: { contains: search, mode: 'insensitive' } },
+                },
+                {
+                  organization: {
+                    name: { contains: search, mode: 'insensitive' },
+                  },
+                },
+              ],
+            }
+          : {}),
+      },
+      include: {
+        user: {
+          select: { ...userSelect, isPlatformAdmin: true },
+        },
+        branch: { select: { id: true, name: true } },
+        organization: { select: { id: true, name: true, slug: true } },
+      },
+      orderBy: [{ organization: { name: 'asc' } }, { createdAt: 'asc' }],
+      take: 1000,
+    });
+
+    return memberships.flatMap((membership) => {
+      const organization = membership.organization;
+
+      if (!organization) return [];
+
+      return [
+        {
+          id: membership.user.id,
+          email: membership.user.email,
+          username: membership.user.username,
+          name: membership.user.name,
+          isActive: membership.isActive && membership.user.isActive,
+          emailVerified: membership.user.emailVerified,
+          twoFactorEnabled: membership.user.twoFactorEnabled,
+          isPlatformAdmin: membership.user.isPlatformAdmin,
+          roles: membership.roles,
+          branchName: membership.branch?.name ?? null,
+          organizationId: organization.id,
+          organizationName: organization.name,
+          organizationSlug: organization.slug,
+          createdAt: membership.createdAt,
+        },
+      ];
+    });
+  }
+
+  /**
    * Comprueba si un nombre de usuario se puede usar.
    *
    * Devuelve `reason: 'invalid'` cuando no cumple el formato, para que el
