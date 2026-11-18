@@ -44,13 +44,8 @@ async function bootstrap() {
     }),
   );
 
-  const webOrigins = [
-    process.env.WEB_ORIGIN || 'http://localhost:3000',
-    process.env.PLATFORM_WEB_ORIGIN,
-  ].filter((value): value is string => Boolean(value));
-
   app.enableCors({
-    origin: webOrigins,
+    origin: process.env.WEB_ORIGIN || 'http://localhost:3000',
     credentials: true,
   });
 

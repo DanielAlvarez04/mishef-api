@@ -48,12 +48,11 @@ export class OriginGuard implements CanActivate {
 
   private allowedOrigins(): string[] {
     const webOrigin = this.config.get<string>('WEB_ORIGIN');
-    const platformOrigin = this.config.get<string>('PLATFORM_WEB_ORIGIN');
     const apiOrigin =
       this.config.get<string>('API_PUBLIC_ORIGIN') ??
       `http://localhost:${this.config.get<string>('PORT') ?? '3001'}`;
 
-    return [webOrigin, platformOrigin, apiOrigin]
+    return [webOrigin, apiOrigin]
       .filter((value): value is string => Boolean(value))
       .map((value) => value.replace(/\/$/, ''));
   }

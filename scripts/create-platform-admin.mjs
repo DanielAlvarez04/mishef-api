@@ -1,4 +1,4 @@
-// Crea o actualiza la cuenta interna de la plataforma (`z.mishef.co`).
+// Crea o actualiza la cuenta interna de la plataforma (`/platform`).
 //
 // Uso:
 //   PLATFORM_ADMIN_EMAIL=dalvarez@mishef.co \

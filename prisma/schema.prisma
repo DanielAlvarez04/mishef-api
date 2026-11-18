@@ -327,7 +327,7 @@ model User {
   isActive         Boolean   @default(true)
   emailVerified    Boolean   @default(false)
   twoFactorEnabled Boolean   @default(false)
-  /// Acceso al panel interno de la plataforma (z.mishef.co / /plans).
+  /// Acceso al panel de plataforma (`/platform`, `/plans`, `/subscriptions`).
   isPlatformAdmin  Boolean   @default(false)
   onboardedAt      DateTime? // null hasta completar el onboarding
   createdAt        DateTime  @default(now())
