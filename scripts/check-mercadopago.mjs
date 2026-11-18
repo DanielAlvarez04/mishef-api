@@ -84,6 +84,7 @@ async function checkBillingToken() {
     }
 
     const user = await response.json();
+    const tags = Array.isArray(user.tags) ? user.tags : [];
 
     return {
       checked: true,
@@ -91,7 +92,7 @@ async function checkBillingToken() {
       userId: user.id,
       nickname: user.nickname,
       siteId: user.site_id,
-      testMode: token.startsWith('TEST-'),
+      testMode: token.startsWith('TEST-') || tags.includes('test_user'),
     };
   } catch (error) {
     return {
