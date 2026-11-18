@@ -24,6 +24,8 @@ const ACTIVE_ORDER_STATUSES = ['created', 'at_terminal', 'action_required'];
 
 export interface PointConfig {
   enabled: boolean;
+  /** La cuenta está conectada y puede generar links de Checkout Pro. */
+  linkEnabled: boolean;
   terminals: Array<{
     id: string;
     name: string | null;
@@ -62,7 +64,7 @@ export class MercadoPagoPointService {
       connection.status !== 'ACTIVE' ||
       connection.expiresAt.getTime() <= Date.now()
     ) {
-      return { enabled: false, terminals: [] };
+      return { enabled: false, linkEnabled: false, terminals: [] };
     }
 
     const terminals = await this.prisma.mercadoPagoTerminal.findMany({
@@ -76,6 +78,7 @@ export class MercadoPagoPointService {
 
     return {
       enabled: usable.length > 0,
+      linkEnabled: true,
       terminals: usable.map((terminal) => ({
         id: terminal.id,
         name: terminal.name,

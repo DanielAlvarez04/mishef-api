@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Optional,
   UnauthorizedException,
   ConflictException,
   Logger,
@@ -24,6 +25,7 @@ import { isValidUsername, normalizeUsername } from '../common/usernames';
 import { MailService } from '../mail/mail.service';
 import type { GoogleProfile } from './google-oauth.service';
 import { InventoryService } from '../inventory/inventory.service';
+import { BillingService } from '../billing/billing.service';
 import {
   passwordChangedEmail,
   passwordResetEmail,
@@ -43,6 +45,8 @@ export interface JwtUser {
    * petición. `null` = puede operar en cualquier sucursal de la organización.
    */
   branchId?: string | null;
+  /** Acceso al panel interno de la plataforma. */
+  isPlatformAdmin?: boolean;
 }
 
 export interface RefreshPayload {
@@ -156,6 +160,7 @@ export class AuthService {
     private config: ConfigService,
     private readonly mail: MailService,
     private readonly inventory?: InventoryService,
+    @Optional() private readonly billing?: BillingService,
   ) {}
 
   // --------------------------------------------------------------------------
@@ -407,6 +412,7 @@ export class AuthService {
     const displayName = profile.name?.trim() || email.split('@')[0];
     const organizationName =
       sanitizeBusinessName(businessName) ?? `Negocio de ${displayName}`;
+    let organizationId: string | null = null;
 
     try {
       const created = await this.prisma.$transaction(async (tx) => {
@@ -418,6 +424,7 @@ export class AuthService {
             practiceUntil: new Date(Date.now() + PRACTICE_WINDOW_MS),
           },
         });
+        organizationId = organization.id;
 
         const user = await tx.user.create({
           data: {
@@ -441,6 +448,7 @@ export class AuthService {
 
       const session = await this.issueSessionForUser(created.id, meta);
       if (this.inventory) await this.inventory.ensureCoreDefaults();
+      if (organizationId) await this.billing?.startTrial(organizationId);
 
       return { kind: 'session', created: true, ...session };
     } catch (error) {
@@ -712,6 +720,7 @@ export class AuthService {
       twoFactorEnabled: user.twoFactorEnabled,
       onboarded: Boolean(user.onboardedAt),
       googleLinked: Boolean(user.googleId),
+      isPlatformAdmin: user.isPlatformAdmin,
       roles: membership?.roles ?? [],
       organizationId: membership?.organizationId,
       organization,
@@ -805,6 +814,7 @@ export class AuthService {
       sanitizeBusinessName(dto.organizationName) ??
       sanitizeBusinessName(dto.name) ??
       `Negocio de ${email.split('@')[0]}`;
+    let organizationId: string | null = null;
 
     // Dirección elegida por el negocio. Se valida y reserva aquí para no
     // descubrir la colisión a mitad de la transacción.
@@ -839,6 +849,7 @@ export class AuthService {
           practiceUntil: new Date(Date.now() + PRACTICE_WINDOW_MS),
         },
       });
+      organizationId = organization.id;
 
       const created = await tx.user.create({
         data: {
@@ -859,6 +870,7 @@ export class AuthService {
       return created;
     });
     if (this.inventory) await this.inventory.ensureCoreDefaults();
+    if (organizationId) await this.billing?.startTrial(organizationId);
     await this.sendVerificationEmail(user.id, user.email);
 
     return this.issueSessionForUser(user.id, meta);

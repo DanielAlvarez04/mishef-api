@@ -93,6 +93,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       organizationId: membership.organizationId,
       sid: session.id,
       branchId: membership.branchId,
+      isPlatformAdmin: session.user.isPlatformAdmin,
     };
   }
 }

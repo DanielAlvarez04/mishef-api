@@ -36,20 +36,23 @@ export function validateEnv(
     );
   }
 
-  // Mercado Pago es opcional: si se configura cualquier variable del bloque,
-  // deben estar todas para que la integración funcione de punta a punta.
-  const mercadoPagoKeys = [
+  // Mercado Pago es opcional: la app de marketplace se considera configurada
+  // cuando están sus tres datos de OAuth. La clave de cifrado puede existir
+  // aunque la app todavía no tenga credenciales productivas.
+  const mercadoPagoOAuthKeys = [
     'MP_CLIENT_ID',
     'MP_CLIENT_SECRET',
     'MP_REDIRECT_URI',
-    'MP_WEBHOOK_SECRET',
-    'MP_TOKEN_ENCRYPTION_KEY',
   ] as const;
 
-  const hasMercadoPago = mercadoPagoKeys.some((key) => Boolean(config[key]));
+  const hasMercadoPago = mercadoPagoOAuthKeys.some((key) => Boolean(config[key]));
 
   if (hasMercadoPago) {
-    for (const key of mercadoPagoKeys) {
+    for (const key of [
+      ...mercadoPagoOAuthKeys,
+      'MP_WEBHOOK_SECRET',
+      'MP_TOKEN_ENCRYPTION_KEY',
+    ] as const) {
       const value = config[key];
 
       if (typeof value !== 'string' || value.trim().length === 0) {
@@ -58,7 +61,9 @@ export function validateEnv(
         );
       }
     }
+  }
 
+  if (config.MP_TOKEN_ENCRYPTION_KEY) {
     const encryptionKey = Buffer.from(
       String(config.MP_TOKEN_ENCRYPTION_KEY),
       'base64',

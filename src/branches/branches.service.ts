@@ -3,15 +3,20 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { BillingService } from '../billing/billing.service';
 import { isEmptyPatch } from '../common/patch';
 import { BRANCH_LIMITS } from './branch-limits';
 import { CreateBranchDto, UpdateBranchDto } from './dto/branch.dto';
 
 @Injectable()
 export class BranchesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly billing?: BillingService,
+  ) {}
 
   async list(organizationId: string | null, userId: string | null = null) {
     if (!organizationId) {
@@ -87,6 +92,8 @@ export class BranchesService {
       return created;
     });
 
+    await this.refreshBilling(orgId);
+
     return this.serialize(branch);
   }
 
@@ -155,6 +162,8 @@ export class BranchesService {
       data,
     });
 
+    await this.refreshBilling(orgId);
+
     return this.serialize(updated);
   }
 
@@ -168,7 +177,20 @@ export class BranchesService {
       data: { isActive: false },
     });
 
+    await this.refreshBilling(orgId);
+
     return this.serialize(updated);
+  }
+
+  /** Ajusta el cobro por sucursal sin tumbar la operación si MP falla. */
+  private async refreshBilling(organizationId: string): Promise<void> {
+    if (!this.billing) return;
+
+    try {
+      await this.billing.refreshQuantity(organizationId);
+    } catch {
+      // El siguiente cobro se reconcilia desde Facturación.
+    }
   }
 
   private requireOrganization(organizationId: string | null): string {
@@ -191,17 +213,30 @@ export class BranchesService {
   }
 
   private async assertWithinLimit(organizationId: string, exceptId?: string) {
-    const active = await this.prisma.branch.count({
-      where: {
-        organizationId,
-        isActive: true,
-        ...(exceptId ? { id: { not: exceptId } } : {}),
-      },
-    });
+    if (!this.prisma.organizationSubscription) {
+      return;
+    }
 
-    if (active >= BRANCH_LIMITS.maxActiveBranches) {
+    const [active, subscription] = await Promise.all([
+      this.prisma.branch.count({
+        where: {
+          organizationId,
+          isActive: true,
+          ...(exceptId ? { id: { not: exceptId } } : {}),
+        },
+      }),
+      this.prisma.organizationSubscription.findUnique({
+        where: { organizationId },
+        include: { plan: true },
+      }),
+    ]);
+
+    const max =
+      subscription?.plan.maxBranches ?? BRANCH_LIMITS.maxActiveBranches;
+
+    if (max !== null && active >= max) {
       throw new BadRequestException(
-        `Puedes tener hasta ${BRANCH_LIMITS.maxActiveBranches} sucursales activas. Desactiva una para crear otra.`,
+        `Tu plan permite hasta ${max} sucursal(es) activa(s). Desactiva una o cambia de plan para crear otra.`,
       );
     }
   }

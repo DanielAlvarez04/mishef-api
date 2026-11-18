@@ -9,6 +9,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 
 import { PrismaService } from '../prisma/prisma.service';
 import { MercadoPagoClient } from './mercadopago.client';
+import { MercadoPagoLinkService } from './mercadopago-link.service';
 import { MercadoPagoPointService } from './mercadopago-point.service';
 import { MercadoPagoTokenService } from './mercadopago-token.service';
 import { MercadoPagoApiError } from './mercadopago.types';
@@ -29,6 +30,7 @@ interface WebhookRequest {
 interface WebhookBody {
   action?: string;
   type?: string;
+  user_id?: string | number;
   data?: { id?: string | number };
 }
 
@@ -49,6 +51,7 @@ export class MercadoPagoWebhookService {
     private readonly client: MercadoPagoClient,
     private readonly tokens: MercadoPagoTokenService,
     private readonly point: MercadoPagoPointService,
+    private readonly links: MercadoPagoLinkService,
   ) {}
 
   async handle(request: WebhookRequest) {
@@ -78,7 +81,11 @@ export class MercadoPagoWebhookService {
       return { ok: true, ignored: 'missing_data_id' };
     }
 
-    if (topic !== 'orders') {
+    if (
+      topic !== 'orders' &&
+      topic !== 'order' &&
+      topic !== 'payment'
+    ) {
       return { ok: true, ignored: `topic_${topic}` };
     }
 
@@ -94,6 +101,12 @@ export class MercadoPagoWebhookService {
     }
 
     try {
+      if (topic === 'payment') {
+        await this.handleLinkPayment(body, dataId);
+        await this.markEvent(event.id, null);
+        return { ok: true };
+      }
+
       const payment = await this.prisma.payment.findFirst({
         where: { providerOrderId: dataId, provider: 'MERCADO_PAGO' },
         select: { id: true, organizationId: true, provider: true },
@@ -144,6 +157,80 @@ export class MercadoPagoWebhookService {
       );
 
       return { ok: false, error: (error as Error).message };
+    }
+  }
+
+  private async handleLinkPayment(
+    body: WebhookBody,
+    providerPaymentId: string,
+  ): Promise<void> {
+    const userId = body.user_id !== undefined ? String(body.user_id) : undefined;
+
+    if (!userId) {
+      // Algunas notificaciones no traen user_id; si el pago ya se conoce,
+      // se puede resolver por providerPaymentId.
+      const known = await this.prisma.payment.findFirst({
+        where: { providerPaymentId },
+        select: { organizationId: true, id: true },
+      });
+
+      if (!known?.organizationId) return;
+
+      const token = await this.tokens.getAccessToken(known.organizationId);
+      const providerPayment = await this.client.getPayment(
+        token,
+        providerPaymentId,
+      );
+
+      await this.links.reconcilePayment(
+        known.organizationId,
+        known.id,
+        providerPayment,
+      );
+      return;
+    }
+
+    const connections = await this.prisma.mercadoPagoConnection.findMany({
+      where: { mpUserId: userId, status: 'ACTIVE' },
+      select: { organizationId: true },
+      take: 10,
+    });
+
+    for (const connection of connections) {
+      try {
+        const accessToken = await this.tokens.getAccessToken(
+          connection.organizationId,
+        );
+        const providerPayment = await this.client.getPayment(
+          accessToken,
+          providerPaymentId,
+        );
+
+        if (!providerPayment.external_reference) continue;
+
+        const payment = await this.prisma.payment.findFirst({
+          where: {
+            id: providerPayment.external_reference,
+            organizationId: connection.organizationId,
+          },
+          select: { id: true },
+        });
+
+        if (!payment) continue;
+
+        await this.links.reconcilePayment(
+          connection.organizationId,
+          payment.id,
+          providerPayment,
+        );
+        return;
+      } catch (error) {
+        this.logger.warn(
+          `No se pudo conciliar el pago ${providerPaymentId}: ${
+            (error as Error).message
+          }`,
+        );
+      }
     }
   }
 

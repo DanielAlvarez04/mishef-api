@@ -169,6 +169,10 @@ export class RecipesService {
       throw new BadRequestException('El nombre de la receta es obligatorio');
     }
 
+    if (!dto.itemId) {
+      await this.items.assertItemLimit(organizationId);
+    }
+
     if (dto.categoryId) {
       await this.assertCategory(organizationId, dto.categoryId);
     }

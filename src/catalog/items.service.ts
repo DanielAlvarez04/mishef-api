@@ -425,8 +425,31 @@ export class ItemsService {
     };
   }
 
+  /** Límite de artículos del plan (artículos y recetas comparten el catálogo). */
+  async assertItemLimit(organizationId: string | null) {
+    if (!organizationId) return;
+    if (!this.prisma.organizationSubscription) return;
+
+    const [subscription, count] = await Promise.all([
+      this.prisma.organizationSubscription.findUnique({
+        where: { organizationId },
+        include: { plan: true },
+      }),
+      this.prisma.item.count({ where: { organizationId } }),
+    ]);
+
+    const max = subscription?.plan.maxInventoryItems;
+
+    if (max !== null && max !== undefined && count >= max) {
+      throw new BadRequestException(
+        `Tu plan permite hasta ${max} artículos de inventario. Cambia de plan para agregar más.`,
+      );
+    }
+  }
+
   async create(organizationId: string | null, dto: CreateItemDto) {
     invalidateGlobalMenu(organizationId);
+    await this.assertItemLimit(organizationId);
     const name = dto.name.trim();
 
     const category = dto.categoryId

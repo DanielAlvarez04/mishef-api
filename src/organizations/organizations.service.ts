@@ -365,6 +365,7 @@ export class OrganizationsService {
         domainToken: true,
         domainVerifiedAt: true,
         customDomainEnabled: true,
+        subscription: { include: { plan: true } },
       },
     });
 
@@ -372,7 +373,10 @@ export class OrganizationsService {
       throw new NotFoundException('Organización no encontrada');
     }
 
-    if (!current.customDomainEnabled) {
+    if (
+      !current.customDomainEnabled &&
+      !current.subscription?.plan.customDomain
+    ) {
       throw new ForbiddenException(
         'Tu plan no incluye dominio propio. Actualiza el plan para conectarlo.',
       );

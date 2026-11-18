@@ -32,7 +32,10 @@ export class StorageService {
     const [organization, branches] = await Promise.all([
       this.prisma.organization.findUnique({
         where: { id: organizationId },
-        select: { storageBytes: true },
+        select: {
+          storageBytes: true,
+          subscription: { include: { plan: true } },
+        },
       }),
       this.prisma.branch.count({
         where: { organizationId, isActive: true },
@@ -44,16 +47,24 @@ export class StorageService {
     }
 
     const units = Math.max(1, branches);
-    const limit = units * STORAGE_LIMIT_PER_BRANCH;
+    const perBranch = STORAGE_LIMIT_PER_BRANCH;
+    const plan = organization.subscription?.plan;
+    const limit =
+      plan !== undefined
+        ? plan.maxStorageBytes === null
+          ? null
+          : Number(plan.maxStorageBytes)
+        : units * perBranch;
     const used = Number(organization.storageBytes ?? 0n);
 
     return {
       used,
       limit,
       branches: units,
-      remaining: Math.max(0, limit - used),
-      percent: limit > 0 ? Math.min(100, (used / limit) * 100) : 0,
-      perBranch: STORAGE_LIMIT_PER_BRANCH,
+      remaining: limit === null ? null : Math.max(0, limit - used),
+      percent:
+        limit === null ? null : limit > 0 ? Math.min(100, (used / limit) * 100) : 0,
+      perBranch,
     };
   }
 
@@ -67,6 +78,8 @@ export class StorageService {
     }
 
     const { used, limit } = await this.usage(organizationId);
+
+    if (limit === null) return;
 
     if (used + Math.max(0, incomingBytes) > limit) {
       throw new PayloadTooLargeException(

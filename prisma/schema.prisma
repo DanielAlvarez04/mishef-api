@@ -49,6 +49,8 @@ enum PaymentMethod {
   TRANSFER
   /// Cobro enviado a una terminal Mercado Pago Point.
   MERCADO_PAGO_POINT
+  /// Link de pago hospedado por Mercado Pago (Checkout Pro).
+  MERCADO_PAGO_LINK
 }
 
 enum PaymentStatus {
@@ -276,6 +278,9 @@ model Organization {
   /// Duración de comida por defecto cuando el horario no la define.
   attendanceDefaultBreakMinutes Int @default(60)
 
+  /// Correo para facturación de la suscripción de la plataforma.
+  billingEmail String?
+
   memberships          Membership[]
   branches             Branch[]
   orders               Order[]
@@ -295,6 +300,7 @@ model Organization {
 
   mercadoPagoConnection MercadoPagoConnection?
   mercadoPagoTerminals  MercadoPagoTerminal[]
+  subscription         OrganizationSubscription?
 
   cashSessions  CashSession[]
   cashMovements CashMovement[]
@@ -320,6 +326,8 @@ model User {
   isActive         Boolean   @default(true)
   emailVerified    Boolean   @default(false)
   twoFactorEnabled Boolean   @default(false)
+  /// Acceso al panel interno de la plataforma (z.mishef.co / /plans).
+  isPlatformAdmin  Boolean   @default(false)
   onboardedAt      DateTime? // null hasta completar el onboarding
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
@@ -1405,9 +1413,11 @@ model Payment {
   /// Parte de la cuenta a la que se aplica el pago, si está dividida.
   splitId        String?
 
-  // Integración con proveedores de pago (Mercado Pago Point).
+  // Integración con proveedores de pago (Mercado Pago Point / link).
   provider             String?
   providerOrderId      String?   @unique
+  providerPreferenceId String?   @unique
+  providerCheckoutUrl  String?
   providerPaymentId    String?
   providerStatus       String?
   providerStatusDetail String?
@@ -1637,6 +1647,174 @@ model MercadoPagoWebhookEvent {
   receivedAt      DateTime  @default(now())
 
   @@index([providerOrderId])
+  @@index([receivedAt])
+}
+
+// ============================================================================
+// Suscripciones de la plataforma (planes que pagan los negocios a Mishef)
+// ============================================================================
+
+enum BillingInterval {
+  MONTH
+  YEAR
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  PAUSED
+  CANCELED
+  EXPIRED
+}
+
+enum SubscriptionProvider {
+  MERCADO_PAGO
+  MANUAL
+}
+
+enum PlanChangeStatus {
+  PENDING
+  PAID
+  CANCELED
+}
+
+/// Plan comercial de Mishef. Los precios son editables desde /plans.
+model Plan {
+  id           String  @id @default(cuid())
+  code         String  @unique
+  name         String
+  description  String?
+  priceMonthly Decimal @db.Decimal(10, 2)
+  priceYearly  Decimal @db.Decimal(10, 2)
+  currency     String  @default("MXN")
+  /// El precio se multiplica por la cantidad de sucursales activas.
+  perBranch    Boolean @default(false)
+  trialDays    Int     @default(14)
+
+  maxBranches        Int?
+  maxUsersPerBranch  Int?
+  maxImagesPerItem   Int     @default(1)
+  maxVideosPerItem   Int     @default(0)
+  maxStorageBytes    BigInt?
+  maxInventoryItems  Int?
+  customDomain       Boolean @default(false)
+
+  isActive  Boolean @default(true)
+  isPublic  Boolean @default(true)
+  sortOrder Int     @default(0)
+  features  Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subscriptions OrganizationSubscription[]
+  changesFrom   PlanChange[]             @relation("PlanChangeFrom")
+  changesTo     PlanChange[]             @relation("PlanChangeTo")
+}
+
+/// Suscripción de un negocio a un plan de Mishef.
+model OrganizationSubscription {
+  id             String               @id @default(cuid())
+  organizationId String               @unique
+  planId         String
+  status         SubscriptionStatus   @default(TRIALING)
+  provider       SubscriptionProvider @default(MERCADO_PAGO)
+  interval       BillingInterval      @default(MONTH)
+  /// Sucursales activas al contratar (planes por sucursal).
+  quantity       Int                  @default(1)
+  /// Precio unitario del plan al contratar (mensual o anual).
+  unitAmount     Decimal              @db.Decimal(10, 2)
+  currency       String               @default("MXN")
+
+  providerPreapprovalId String? @unique
+  payerEmail            String?
+
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  trialEndsAt        DateTime?
+  graceEndsAt        DateTime?
+  canceledAt         DateTime?
+  pausedAt           DateTime?
+  lastSyncedAt       DateTime?
+
+  /// Saldo a favor en centavos para la siguiente renovación.
+  creditBalanceCents Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  plan         Plan         @relation(fields: [planId], references: [id], onDelete: Restrict)
+  payments     SubscriptionPayment[]
+  changes      PlanChange[]
+
+  @@index([planId, status])
+  @@index([status, currentPeriodEnd])
+}
+
+/// Cambio de plan con prorrateo (upgrade).
+model PlanChange {
+  id             String           @id @default(cuid())
+  subscriptionId String
+  fromPlanId     String
+  toPlanId       String
+  interval       BillingInterval
+  quantity       Int
+  /// Valor de los días restantes del plan anterior, en centavos.
+  creditCents    Int
+  /// Diferencia a cobrar en el primer cargo, en centavos.
+  amountDueCents Int
+  status         PlanChangeStatus @default(PENDING)
+  previousPreapprovalId String?
+  providerPreapprovalId String?
+  effectiveAt    DateTime?
+  appliedAt      DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  subscription OrganizationSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  fromPlan     Plan                     @relation("PlanChangeFrom", fields: [fromPlanId], references: [id], onDelete: Restrict)
+  toPlan       Plan                     @relation("PlanChangeTo", fields: [toPlanId], references: [id], onDelete: Restrict)
+
+  @@index([subscriptionId, status])
+}
+
+/// Pago individual de una suscripción (cobro recurrente o prorrateo).
+model SubscriptionPayment {
+  id                String   @id @default(cuid())
+  subscriptionId    String
+  organizationId    String
+  kind              String   @default("SUBSCRIPTION")
+  status            String
+  amountCents       Int
+  currency          String   @default("MXN")
+  providerPaymentId String?  @unique
+  periodStart       DateTime?
+  periodEnd         DateTime?
+  paidAt            DateTime?
+  raw               Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  subscription OrganizationSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+  @@index([subscriptionId, createdAt])
+}
+
+/// Notificación del webhook de suscripciones (app de billing).
+model BillingWebhookEvent {
+  id         String    @id @default(cuid())
+  requestId  String?   @unique
+  topic      String
+  providerId String?
+  payload    Json
+  processedAt DateTime?
+  error      String?
+  receivedAt DateTime  @default(now())
+
+  @@index([providerId])
   @@index([receivedAt])
 }
 

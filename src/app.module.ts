@@ -27,6 +27,8 @@ import { AttendanceModule } from './attendance/attendance.module';
 import { WasteModule } from './waste/waste.module';
 import { PublicModule } from './public/public.module';
 import { StorageModule } from './storage/storage.module';
+import { BillingModule } from './billing/billing.module';
+import { BillingAccessInterceptor } from './billing/billing-access.interceptor';
 
 @Module({
   imports: [
@@ -59,6 +61,7 @@ import { StorageModule } from './storage/storage.module';
     WasteModule,
     PublicModule,
     StorageModule,
+    BillingModule,
     HealthModule,
   ],
   controllers: [],
@@ -74,6 +77,10 @@ import { StorageModule } from './storage/storage.module';
     {
       provide: APP_INTERCEPTOR,
       useClass: BranchContextInterceptor,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: BillingAccessInterceptor,
     },
   ],
 })

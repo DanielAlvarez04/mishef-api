@@ -226,6 +226,8 @@ export class InvitationsService {
         throw new ConflictException('Ya perteneces a este equipo');
       }
 
+      await this.assertUserLimit(invitation.organizationId);
+
       await this.prisma.$transaction([
         this.prisma.membership.create({
           data: {
@@ -255,6 +257,8 @@ export class InvitationsService {
     }
 
     const passwordHash = await hash(dto.password);
+
+    await this.assertUserLimit(invitation.organizationId);
 
     await this.prisma.$transaction(async (tx) => {
       const user = await tx.user.create({
@@ -286,6 +290,32 @@ export class InvitationsService {
       organizationSlug: invitation.organization.slug,
       alreadyHadAccount: false,
     };
+  }
+
+  private async assertUserLimit(organizationId: string) {
+    if (!this.prisma.organizationSubscription) return;
+
+    const [subscription, users, branches] = await Promise.all([
+      this.prisma.organizationSubscription.findUnique({
+        where: { organizationId },
+        include: { plan: true },
+      }),
+      this.prisma.membership.count({
+        where: { organizationId, isActive: true, user: { isActive: true } },
+      }),
+      this.prisma.branch.count({ where: { organizationId, isActive: true } }),
+    ]);
+
+    const perBranch = subscription?.plan.maxUsersPerBranch;
+    if (perBranch === null || perBranch === undefined) return;
+
+    const limit = perBranch * Math.max(1, branches);
+
+    if (users >= limit) {
+      throw new BadRequestException(
+        `Tu plan permite hasta ${limit} usuario(s) activo(s). Cambia de plan para agregar más.`,
+      );
+    }
   }
 
   private async findValid(token: string) {

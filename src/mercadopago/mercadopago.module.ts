@@ -3,6 +3,8 @@ import { Module } from '@nestjs/common';
 import { PaymentsModule } from '../payments/payments.module';
 import { MercadoPagoClient } from './mercadopago.client';
 import { MercadoPagoController } from './mercadopago.controller';
+import { MercadoPagoLinkController } from './mercadopago-link.controller';
+import { MercadoPagoLinkService } from './mercadopago-link.service';
 import { MercadoPagoPointController } from './mercadopago-point.controller';
 import { MercadoPagoPointService } from './mercadopago-point.service';
 import { MercadoPagoService } from './mercadopago.service';
@@ -16,6 +18,7 @@ import { TokenCipher } from './token-cipher';
   controllers: [
     MercadoPagoController,
     MercadoPagoPointController,
+    MercadoPagoLinkController,
     MercadoPagoWebhookController,
   ],
   providers: [
@@ -24,6 +27,7 @@ import { TokenCipher } from './token-cipher';
     MercadoPagoTokenService,
     MercadoPagoService,
     MercadoPagoPointService,
+    MercadoPagoLinkService,
     MercadoPagoWebhookService,
   ],
   exports: [
@@ -32,6 +36,7 @@ import { TokenCipher } from './token-cipher';
     MercadoPagoTokenService,
     MercadoPagoService,
     MercadoPagoPointService,
+    MercadoPagoLinkService,
     MercadoPagoWebhookService,
   ],
 })

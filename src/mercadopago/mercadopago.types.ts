@@ -40,6 +40,30 @@ export interface MpTerminalsResponse {
   };
 }
 
+export interface MpPreference {
+  id: string;
+  init_point?: string;
+  sandbox_init_point?: string;
+  external_reference?: string;
+  expiration_date_to?: string;
+}
+
+export interface MpPayment {
+  id: number;
+  status: string;
+  status_detail?: string;
+  external_reference?: string;
+  transaction_amount?: number;
+  currency_id?: string;
+  date_approved?: string;
+  date_created?: string;
+  payment_method_id?: string;
+}
+
+export interface MpPaymentsSearch {
+  results?: MpPayment[];
+}
+
 export interface MpOrderPayment {
   id: string;
   amount: string;

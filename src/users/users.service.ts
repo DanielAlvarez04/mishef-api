@@ -176,6 +176,7 @@ export class UsersService {
     // Combinar nombre y apellido para guardar en el campo `name`
     const fullName = [dto.name?.trim(), dto.surname?.trim()].filter(Boolean).join(' ');
     const branchId = await this.resolveBranchId(organizationId, dto.branchId);
+    await this.assertUserLimit(organizationId);
 
     return this.prisma.$transaction(async (tx) => {
       const user = await tx.user.create({
@@ -212,13 +213,40 @@ export class UsersService {
     });
   }
 
+  /** Límite de usuarios activos según el plan y las sucursales. */
+  private async assertUserLimit(organizationId: string | null) {
+    if (!organizationId) return;
+    if (!this.prisma.organizationSubscription) return;
+
+    const [subscription, users, branches] = await Promise.all([
+      this.prisma.organizationSubscription.findUnique({
+        where: { organizationId },
+        include: { plan: true },
+      }),
+      this.prisma.membership.count({
+        where: { organizationId, isActive: true, user: { isActive: true } },
+      }),
+      this.prisma.branch.count({ where: { organizationId, isActive: true } }),
+    ]);
+
+    const perBranch = subscription?.plan.maxUsersPerBranch;
+    if (perBranch === null || perBranch === undefined) return;
+
+    const limit = perBranch * Math.max(1, branches);
+
+    if (users >= limit) {
+      throw new BadRequestException(
+        `Tu plan permite hasta ${limit} usuario(s) activo(s). Cambia de plan para agregar más.`,
+      );
+    }
+  }
+
   async update(
     organizationId: string | null,
     userId: string,
     dto: UpdateUserDto,
     actorId: string,
-  ) {
-    if (!organizationId) {
+  ) {    if (!organizationId) {
       throw new NotFoundException('Usuario no encontrado en la organización');
     }
     const membership = await this.prisma.membership.findUnique({

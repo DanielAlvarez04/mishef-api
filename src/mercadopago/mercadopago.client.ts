@@ -9,6 +9,9 @@ import {
   MercadoPagoApiError,
   MercadoPagoApiErrorBody,
   MpOrder,
+  MpPayment,
+  MpPaymentsSearch,
+  MpPreference,
   MpTerminal,
   MpTerminalsResponse,
   MpTokenResponse,
@@ -167,6 +170,41 @@ export class MercadoPagoClient {
       accessToken,
       body: order,
       idempotencyKey,
+    });
+  }
+
+  /** Preferencia de Checkout Pro para un link de pago. */
+  createPreference(
+    accessToken: string,
+    preference: unknown,
+    idempotencyKey: string,
+  ): Promise<MpPreference> {
+    return this.request<MpPreference>('/checkout/preferences', {
+      method: 'POST',
+      accessToken,
+      body: preference,
+      idempotencyKey,
+    });
+  }
+
+  getPayment(accessToken: string, paymentId: string): Promise<MpPayment> {
+    return this.request<MpPayment>(
+      `/v1/payments/${encodeURIComponent(paymentId)}`,
+      { accessToken },
+    );
+  }
+
+  searchPayments(
+    accessToken: string,
+    externalReference: string,
+  ): Promise<MpPaymentsSearch> {
+    return this.request<MpPaymentsSearch>('/v1/payments/search', {
+      accessToken,
+      query: {
+        external_reference: externalReference,
+        sort: 'date_created',
+        criteria: 'desc',
+      },
     });
   }
 
