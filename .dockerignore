@@ -18,5 +18,6 @@ scripts/*
 !scripts/purge-analytics.mjs
 !scripts/create-platform-admin.mjs
 !scripts/seed-plans.mjs
+!scripts/check-mercadopago.mjs
 Dockerfile
 .dockerignore
