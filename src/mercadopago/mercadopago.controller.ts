@@ -19,6 +19,7 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Response, Request } from 'express';
 import {
+  createHash,
   createHmac,
   randomBytes,
   timingSafeEqual,
@@ -68,7 +69,11 @@ export class MercadoPagoController {
 
     const organizationId = this.organizationId(user);
     const state = randomBytes(24).toString('base64url');
-    const verifier = randomBytes(32).toString('base64url');
+    const usePkce = this.mercadoPago.usesPkce;
+    const verifier = usePkce ? randomBytes(32).toString('base64url') : '';
+    const challenge = usePkce
+      ? createHash('sha256').update(verifier).digest('base64url')
+      : undefined;
 
     res.cookie(
       OAUTH_COOKIE,
@@ -81,7 +86,11 @@ export class MercadoPagoController {
       this.cookieOptions(),
     );
 
-    return res.redirect(this.mercadoPago.authorizationUrl(state));
+    this.logger.log(
+      `OAuth MP iniciado (org=${organizationId}, user=${user.sub}, pkce=${usePkce})`,
+    );
+
+    return res.redirect(this.mercadoPago.authorizationUrl(state, challenge));
   }
 
   @ApiOperation({ summary: 'Callback OAuth de Mercado Pago' })
@@ -110,8 +119,17 @@ export class MercadoPagoController {
         `${webOrigin}/settings?mp=${encodeURIComponent(reason)}`,
       );
 
-    if (error) return fail('cancelled');
+    if (error) {
+      this.logger.warn(
+        `OAuth MP cancelado por el usuario (org=${cookie?.organizationId ?? 'desconocida'}, error=${error})`,
+      );
+      return fail('cancelled');
+    }
+
     if (!code || !state || !cookie || state !== cookie.state) {
+      this.logger.warn(
+        `OAuth MP con state inválido (org=${cookie?.organizationId ?? 'desconocida'})`,
+      );
       return fail('state');
     }
 
@@ -120,7 +138,14 @@ export class MercadoPagoController {
         organizationId: cookie.organizationId,
         userId: cookie.userId,
         code,
+        codeVerifier: cookie.verifier || undefined,
       });
+
+      if (!result.ok) {
+        this.logger.warn(
+          `OAuth MP falló (org=${cookie.organizationId}, motivo=${result.reason})`,
+        );
+      }
 
       return result.ok
         ? res.redirect(`${webOrigin}/settings?mp=connected`)
@@ -129,7 +154,9 @@ export class MercadoPagoController {
           );
     } catch (cause) {
       this.logger.error(
-        `Error conectando Mercado Pago: ${(cause as Error).message}`,
+        `Error conectando Mercado Pago (org=${cookie.organizationId}): ${
+          (cause as Error).message
+        }`,
       );
       return fail('unexpected');
     }

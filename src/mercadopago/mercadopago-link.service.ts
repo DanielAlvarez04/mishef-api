@@ -3,6 +3,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PaymentMethod, PaymentStatus, Prisma } from '@prisma/client';
@@ -12,7 +13,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { MercadoPagoClient } from './mercadopago.client';
 import { MercadoPagoTokenService } from './mercadopago-token.service';
 import { CreatePointChargeDto } from './dto/create-point-charge.dto';
-import { MercadoPagoApiError, MpPayment } from './mercadopago.types';
+import {
+  MercadoPagoApiError,
+  MpPayment,
+  isAmbiguousProviderError,
+} from './mercadopago.types';
 
 const PROVIDER = 'MERCADO_PAGO';
 const LINK_TTL_MS = 30 * 60 * 1000;
@@ -141,10 +146,9 @@ export class MercadoPagoLinkService {
         payment.id,
       );
 
-      const checkoutUrl =
-        accessToken.startsWith('TEST-')
-          ? preference.sandbox_init_point ?? preference.init_point
-          : preference.init_point;
+      const checkoutUrl = this.client.isTestMode
+        ? preference.sandbox_init_point ?? preference.init_point
+        : preference.init_point;
 
       if (!checkoutUrl) {
         throw new BadRequestException(
@@ -166,6 +170,25 @@ export class MercadoPagoLinkService {
       });
     } catch (error) {
       const message = providerMessage(error);
+
+      // Timeout o 5xx: la preferencia pudo crearse. No se cancela el pago
+      // local; el reintento con la misma idempotency key devuelve la misma
+      // preferencia y el webhook la concilia.
+      if (isAmbiguousProviderError(error)) {
+        await this.prisma.payment.update({
+          where: { id: payment.id },
+          data: {
+            provider: PROVIDER,
+            providerStatus: 'create_unknown',
+            providerStatusDetail: message.slice(0, 200),
+            expiresAt,
+          },
+        });
+
+        throw new ServiceUnavailableException(
+          'No sabemos si Mercado Pago creó el link. Vuelve a intentarlo con el mismo cobro: si ya existe, se reutiliza.',
+        );
+      }
 
       await this.prisma.payment.update({
         where: { id: payment.id },
@@ -264,15 +287,73 @@ export class MercadoPagoLinkService {
           : undefined,
         providerStatus: providerPayment.status_detail ?? undefined,
       });
+
+      // Reembolso parcial: el cobro sigue confirmado por el resto, pero se
+      // deja auditoría la primera vez que se detecta.
+      const partial =
+        providerPayment.status_detail === 'partially_refunded' ||
+        (providerPayment.transaction_amount_refunded ?? 0) > 0;
+
+      if (
+        partial &&
+        payment.providerStatusDetail !== 'partially_refunded'
+      ) {
+        await this.prisma.auditLog.create({
+          data: {
+            organizationId,
+            userId: null,
+            action: 'payment.partial_refund',
+            entity: 'Payment',
+            entityId: payment.id,
+            newValues: {
+              source: 'mercado_pago_link',
+              providerStatus: providerPayment.status,
+              providerStatusDetail: providerPayment.status_detail ?? null,
+              refundedAmount: providerPayment.transaction_amount_refunded ?? null,
+            },
+          },
+        });
+      }
+
       return;
     }
 
-    if (['rejected', 'cancelled', 'refunded', 'charged_back'].includes(providerPayment.status)) {
-      if (providerPayment.status === 'refunded') {
-        await this.prisma.payment.updateMany({
+    if (
+      ['rejected', 'cancelled', 'refunded', 'charged_back'].includes(
+        providerPayment.status,
+      )
+    ) {
+      if (
+        providerPayment.status === 'refunded' ||
+        providerPayment.status === 'charged_back'
+      ) {
+        const updated = await this.prisma.payment.updateMany({
           where: { id: payment.id, status: PaymentStatus.CONFIRMED },
           data: { status: PaymentStatus.REFUNDED },
         });
+
+        if (updated.count > 0) {
+          await this.prisma.auditLog.create({
+            data: {
+              organizationId,
+              userId: null,
+              action:
+                providerPayment.status === 'charged_back'
+                  ? 'payment.chargeback'
+                  : 'payment.refunded',
+              entity: 'Payment',
+              entityId: payment.id,
+              newValues: {
+                source: 'mercado_pago_link',
+                providerStatus: providerPayment.status,
+                providerStatusDetail:
+                  providerPayment.status_detail ?? null,
+                refundedAmount: providerPayment.transaction_amount_refunded ?? null,
+              },
+            },
+          });
+        }
+
         return;
       }
 
@@ -311,8 +392,12 @@ export class MercadoPagoLinkService {
         orderId,
         status: PaymentStatus.PENDING,
         provider: PROVIDER,
-        providerPreferenceId: { not: null },
         expiresAt: { lt: new Date() },
+        OR: [
+          { providerPreferenceId: { not: null } },
+          // La preferencia pudo crearse aunque la respuesta se perdiera.
+          { providerStatus: 'create_unknown' },
+        ],
       },
       select: { id: true },
     });

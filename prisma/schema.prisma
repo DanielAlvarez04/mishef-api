@@ -1451,7 +1451,7 @@ model Payment {
   paidAt         DateTime?
   confirmedAt    DateTime?
   confirmedById  String?
-  idempotencyKey String?       @unique
+  idempotencyKey String?
 
   // Propinas y control de caja.
   tipAmount      Decimal  @default(0) @db.Decimal(12, 2)
@@ -1502,6 +1502,9 @@ model Payment {
   @@index([sessionId])
   @@index([tipRecipientId])
   @@index([splitId])
+  /// La idempotencia es por negocio: dos negocios pueden repetir la misma
+  /// clave sin colisionar. Postgres permite varios `NULL`.
+  @@unique([organizationId, idempotencyKey])
 }
 
 // ============================================================================

@@ -5,14 +5,18 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { createHmac, timingSafeEqual } from 'node:crypto';
 
+import { isRetryableStatus } from '../common/http-retry';
+import { verifyMercadoPagoSignature } from '../common/webhook-signature';
 import { PrismaService } from '../prisma/prisma.service';
 import { MercadoPagoClient } from './mercadopago.client';
 import { MercadoPagoLinkService } from './mercadopago-link.service';
 import { MercadoPagoPointService } from './mercadopago-point.service';
 import { MercadoPagoTokenService } from './mercadopago-token.service';
-import { MercadoPagoApiError } from './mercadopago.types';
+import {
+  MercadoPagoApiError,
+  MercadoPagoTransportError,
+} from './mercadopago.types';
 
 interface WebhookRequest {
   body: unknown;
@@ -34,13 +38,25 @@ interface WebhookBody {
   data?: { id?: string | number };
 }
 
+const HANDLED_TOPICS = new Set([
+  'orders',
+  'order',
+  'payment',
+  'mp-connect',
+  'mp_connect',
+]);
+
 /**
- * Procesa las notificaciones `orders` de Mercado Pago.
+ * Procesa las notificaciones de Mercado Pago.
  *
  * 1. Verifica la firma HMAC (`x-signature`).
- * 2. Deduplica por `x-request-id`.
+ * 2. Deduplica por `x-request-id`, pero reprocesa eventos que quedaron sin
+ *    `processedAt` (reintento legítimo de Mercado Pago).
  * 3. Resuelve el pago local por `providerOrderId` (sin JWT).
  * 4. Relee la order desde MP y aplica el estado (fuente de verdad).
+ *
+ * Los fallos transitorios se responden con 5xx para que Mercado Pago reintente;
+ * los definitivos se guardan con `error` y se responden 200.
  */
 @Injectable()
 export class MercadoPagoWebhookService {
@@ -70,37 +86,51 @@ export class MercadoPagoWebhookService {
       (body.data?.id !== undefined ? String(body.data.id) : undefined);
     const topic = first(request.query.type) ?? body.type ?? 'unknown';
 
-    this.verifySignature({
-      secret,
-      signature: first(request.headers.signature),
-      requestId: first(request.headers.requestId),
-      dataId,
-    });
-
+    // Sin `data.id` no se puede verificar la firma; no se acepta ningún
+    // cambio de estado en ese caso.
     if (!dataId) {
       return { ok: true, ignored: 'missing_data_id' };
     }
 
-    if (
-      topic !== 'orders' &&
-      topic !== 'order' &&
-      topic !== 'payment'
-    ) {
+    const signature = verifyMercadoPagoSignature({
+      secret,
+      signature: first(request.headers.signature),
+      requestId: first(request.headers.requestId),
+      dataId,
+      maxSkewSeconds: this.client.webhookMaxSkewSeconds,
+    });
+
+    if (!signature.valid) {
+      this.logger.warn(
+        `Firma de webhook inválida (${signature.reason}) para ${topic} ${dataId}`,
+      );
+      throw new UnauthorizedException('Firma de Mercado Pago inválida');
+    }
+
+    if (!HANDLED_TOPICS.has(topic)) {
       return { ok: true, ignored: `topic_${topic}` };
     }
 
-    const event = await this.registerEvent({
+    const registered = await this.registerEvent({
       requestId: first(request.headers.requestId),
       topic,
       providerOrderId: dataId,
       payload: body,
     });
 
-    if (!event) {
+    if (registered.duplicate) {
       return { ok: true, duplicated: true };
     }
 
+    const event = registered.event;
+
     try {
+      if (topic === 'mp-connect' || topic === 'mp_connect') {
+        const result = await this.handleConnectionEvent(body);
+        await this.markEvent(event.id, null);
+        return { ok: true, ...result };
+      }
+
       if (topic === 'payment') {
         await this.handleLinkPayment(body, dataId);
         await this.markEvent(event.id, null);
@@ -140,14 +170,16 @@ export class MercadoPagoWebhookService {
 
       return { ok: true };
     } catch (error) {
-      await this.markEvent(event.id, (error as Error).message);
+      await this.markEvent(
+        event.id,
+        (error as Error).message,
+        false,
+      );
 
-      // Errores transitorios: se devuelve 500 para que MP reintente.
-      if (
-        error instanceof ServiceUnavailableException ||
-        (error instanceof MercadoPagoApiError && error.status >= 500)
-      ) {
-        throw error;
+      if (this.isTransient(error)) {
+        throw new ServiceUnavailableException(
+          'Mercado Pago no pudo procesar la notificación en este momento',
+        );
       }
 
       this.logger.warn(
@@ -156,8 +188,63 @@ export class MercadoPagoWebhookService {
         }`,
       );
 
-      return { ok: false, error: (error as Error).message };
+      // Error definitivo: se marca como procesado para que MP no reintente
+      // indefinidamente algo que no va a cambiar.
+      await this.markEvent(event.id, (error as Error).message, true);
+
+      return { ok: false };
     }
+  }
+
+  /**
+   * `mp-connect` avisa cuando el negocio desvincula la aplicación desde
+   * Mercado Pago. Sin esto, la conexión local seguiría "ACTIVE" hasta que
+   * fallara el refresh del token.
+   */
+  private async handleConnectionEvent(body: WebhookBody) {
+    const action = body.action ?? '';
+    const deauthorized = /deauthoriz|unlink|remov|disconnect/i.test(action);
+
+    if (!deauthorized) {
+      return { ignored: 'mp_connect_action' };
+    }
+
+    const mpUserId =
+      body.user_id !== undefined ? String(body.user_id) : undefined;
+
+    if (!mpUserId) {
+      return { ignored: 'mp_connect_without_user' };
+    }
+
+    const connections = await this.prisma.mercadoPagoConnection.findMany({
+      where: { mpUserId },
+      select: { organizationId: true },
+    });
+
+    for (const connection of connections) {
+      await this.prisma.$transaction([
+        this.prisma.mercadoPagoConnection.update({
+          where: { organizationId: connection.organizationId },
+          data: { status: 'REVOKED' },
+        }),
+        this.prisma.mercadoPagoTerminal.updateMany({
+          where: { organizationId: connection.organizationId },
+          data: { isActive: false },
+        }),
+        this.prisma.auditLog.create({
+          data: {
+            organizationId: connection.organizationId,
+            userId: null,
+            action: 'mercadopago.disconnected',
+            entity: 'MercadoPagoConnection',
+            entityId: connection.organizationId,
+            newValues: { source: 'mp-connect', mpUserId, action },
+          },
+        }),
+      ]);
+    }
+
+    return { revoked: connections.length };
   }
 
   private async handleLinkPayment(
@@ -196,6 +283,8 @@ export class MercadoPagoWebhookService {
       take: 10,
     });
 
+    let transient: unknown = null;
+
     for (const connection of connections) {
       try {
         const accessToken = await this.tokens.getAccessToken(
@@ -225,63 +314,26 @@ export class MercadoPagoWebhookService {
         );
         return;
       } catch (error) {
-        this.logger.warn(
-          `No se pudo conciliar el pago ${providerPaymentId}: ${
-            (error as Error).message
-          }`,
-        );
+        if (this.isTransient(error)) {
+          transient = error;
+        } else {
+          this.logger.warn(
+            `No se pudo conciliar el pago ${providerPaymentId}: ${
+              (error as Error).message
+            }`,
+          );
+        }
       }
     }
+
+    if (transient) throw transient;
   }
 
-  private verifySignature(params: {
-    secret: string;
-    signature: string | undefined;
-    requestId: string | undefined;
-    dataId: string | undefined;
-  }): void {
-    const { secret, signature, requestId, dataId } = params;
-
-    if (!signature || !requestId || !dataId) {
-      throw new UnauthorizedException(
-        'Notificación de Mercado Pago sin firma completa',
-      );
-    }
-
-    const values = new Map(
-      signature
-        .split(',')
-        .map((part) => part.split('='))
-        .filter((pair): pair is [string, string] => pair.length === 2),
+  private isTransient(error: unknown): boolean {
+    return (
+      error instanceof MercadoPagoTransportError ||
+      (error instanceof MercadoPagoApiError && isRetryableStatus(error.status))
     );
-
-    const ts = values.get('ts');
-    const received = values.get('v1');
-
-    if (!ts || !received) {
-      throw new UnauthorizedException('Firma de Mercado Pago inválida');
-    }
-
-    // Algunos ejemplos oficiales normalizan `data.id` a minúsculas; se aceptan
-    // ambas variantes para no depender del caso exacto del id de la order.
-    const manifests = new Set([
-      `id:${dataId};request-id:${requestId};ts:${ts};`,
-      `id:${dataId.toLowerCase()};request-id:${requestId};ts:${ts};`,
-    ]);
-
-    const valid = [...manifests].some((candidate) => {
-      const expected = createHmac('sha256', secret)
-        .update(candidate)
-        .digest('hex');
-      const a = Buffer.from(expected);
-      const b = Buffer.from(received);
-
-      return a.length === b.length && timingSafeEqual(a, b);
-    });
-
-    if (!valid) {
-      throw new UnauthorizedException('Firma de Mercado Pago inválida');
-    }
   }
 
   private async registerEvent(params: {
@@ -289,32 +341,69 @@ export class MercadoPagoWebhookService {
     topic: string;
     providerOrderId: string;
     payload: WebhookBody;
-  }) {
+  }): Promise<{
+    event: { id: string; processedAt: Date | null };
+    duplicate: boolean;
+  }> {
+    if (params.requestId) {
+      const existing = await this.prisma.mercadoPagoWebhookEvent.findUnique({
+        where: { requestId: params.requestId },
+        select: { id: true, processedAt: true },
+      });
+
+      if (existing) {
+        // Un evento sin `processedAt` significa que el intento anterior falló
+        // de forma transitoria: se vuelve a procesar.
+        return { event: existing, duplicate: existing.processedAt !== null };
+      }
+    }
+
     try {
-      return await this.prisma.mercadoPagoWebhookEvent.create({
+      const created = await this.prisma.mercadoPagoWebhookEvent.create({
         data: {
           requestId: params.requestId ?? null,
           topic: params.topic,
           providerOrderId: params.providerOrderId,
           payload: params.payload as Prisma.InputJsonValue,
         },
+        select: { id: true, processedAt: true },
       });
+
+      return { event: created, duplicate: false };
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
+        error.code === 'P2002' &&
+        params.requestId
       ) {
-        return null;
+        const existing = await this.prisma.mercadoPagoWebhookEvent.findUnique({
+          where: { requestId: params.requestId },
+          select: { id: true, processedAt: true },
+        });
+
+        if (existing) {
+          return {
+            event: existing,
+            duplicate: existing.processedAt !== null,
+          };
+        }
       }
 
       throw error;
     }
   }
 
-  private async markEvent(id: string, error: string | null): Promise<void> {
+  private async markEvent(
+    id: string,
+    error: string | null,
+    processed = true,
+  ): Promise<void> {
     await this.prisma.mercadoPagoWebhookEvent.update({
       where: { id },
-      data: { processedAt: new Date(), error: error?.slice(0, 500) ?? null },
+      data: {
+        processedAt: processed ? new Date() : null,
+        error: error?.slice(0, 500) ?? null,
+      },
     });
   }
 }

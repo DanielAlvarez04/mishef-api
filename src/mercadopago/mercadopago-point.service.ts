@@ -3,6 +3,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -15,7 +16,11 @@ import { PaymentsService, type PaymentActor } from '../payments/payments.service
 import { PrismaService } from '../prisma/prisma.service';
 import { MercadoPagoClient } from './mercadopago.client';
 import { MercadoPagoTokenService } from './mercadopago-token.service';
-import { MercadoPagoApiError, MpOrder } from './mercadopago.types';
+import {
+  MercadoPagoApiError,
+  MpOrder,
+  isAmbiguousProviderError,
+} from './mercadopago.types';
 import { CreatePointChargeDto } from './dto/create-point-charge.dto';
 
 const PROVIDER = 'MERCADO_PAGO';
@@ -179,6 +184,28 @@ export class MercadoPagoPointService {
     } catch (error) {
       const message = providerMessage(error);
 
+      // Timeout o 5xx: Mercado Pago pudo haber enviado la order a la terminal.
+      // Se deja PENDING para que el reintento con la misma idempotency key la
+      // recupere y el webhook la concilie.
+      if (isAmbiguousProviderError(error)) {
+        await this.prisma.payment.update({
+          where: { id: payment.id },
+          data: {
+            provider: PROVIDER,
+            providerStatus: 'create_unknown',
+            providerStatusDetail: message.slice(0, 200),
+            terminalId: terminal.terminalId,
+            // Sin `expiresAt` el pago quedaría PENDING para siempre y
+            // reservaría saldo de la cuenta.
+            expiresAt: new Date(Date.now() + ORDER_TTL_MS),
+          },
+        });
+
+        throw new ServiceUnavailableException(
+          'No sabemos si el cobro llegó a la terminal. Revisa el dispositivo antes de reintentar: si no aparece, vuelve a enviarlo.',
+        );
+      }
+
       await this.prisma.payment.update({
         where: { id: payment.id },
         data: {
@@ -244,6 +271,8 @@ export class MercadoPagoPointService {
       );
     }
 
+    let providerHandled = false;
+
     if (payment.provider === PROVIDER && payment.providerOrderId) {
       const accessToken = await this.tokens.getAccessToken(organizationId);
 
@@ -269,6 +298,8 @@ export class MercadoPagoPointService {
             where: { id: payment.id },
           });
         }
+
+        providerHandled = true;
       } catch (error) {
         throw new BadRequestException(
           `No se pudo cancelar en la terminal: ${providerMessage(error)}`,
@@ -281,6 +312,7 @@ export class MercadoPagoPointService {
       actor,
       paymentId,
       { reason: 'Cancelado desde el punto de venta' },
+      { providerHandled },
     );
   }
 
@@ -298,6 +330,11 @@ export class MercadoPagoPointService {
     const status = order.status;
     const detail = order.status_detail ?? null;
 
+    const previous = await this.prisma.payment.findUnique({
+      where: { id: paymentId },
+      select: { providerStatusDetail: true },
+    });
+
     await this.prisma.payment.update({
       where: { id: paymentId },
       data: {
@@ -310,18 +347,41 @@ export class MercadoPagoPointService {
       },
     });
 
-    if (status === 'processed' && detail !== 'partially_refunded') {
+    if (status === 'processed') {
       await this.payments.confirmByProvider(organizationId, paymentId, {
         paidAt: providerPayment?.date_approved
           ? new Date(providerPayment.date_approved)
           : undefined,
         providerStatus: detail ?? undefined,
       });
+
+      // Un reembolso parcial no cambia el estado del cobro (sigue siendo
+      // dinero recibido), pero se audita para que quede rastro del ajuste.
+      if (
+        detail === 'partially_refunded' &&
+        previous?.providerStatusDetail !== 'partially_refunded'
+      ) {
+        await this.prisma.auditLog.create({
+          data: {
+            organizationId,
+            userId: null,
+            action: 'payment.partial_refund',
+            entity: 'Payment',
+            entityId: paymentId,
+            newValues: {
+              source: 'mercado_pago_point',
+              providerStatus: status,
+              providerStatusDetail: detail,
+            },
+          },
+        });
+      }
+
       return;
     }
 
-    if (status === 'refunded') {
-      await this.markRefunded(organizationId, paymentId);
+    if (status === 'refunded' || status === 'charged_back') {
+      await this.markRefunded(organizationId, paymentId, status, detail);
       return;
     }
 
@@ -411,9 +471,16 @@ export class MercadoPagoPointService {
   private async markRefunded(
     organizationId: string,
     paymentId: string,
-  ): Promise<void> {    const updated = await this.prisma.payment.updateMany({
+    providerStatus = 'refunded',
+    detail: string | null = null,
+  ): Promise<void> {
+    const updated = await this.prisma.payment.updateMany({
       where: { id: paymentId, status: PaymentStatus.CONFIRMED },
-      data: { status: PaymentStatus.REFUNDED },
+      data: {
+        status: PaymentStatus.REFUNDED,
+        providerStatus,
+        providerStatusDetail: detail,
+      },
     });
 
     if (updated.count > 0) {
@@ -421,10 +488,13 @@ export class MercadoPagoPointService {
         data: {
           organizationId,
           userId: null,
-          action: 'payment.refunded',
+          action:
+            providerStatus === 'charged_back'
+              ? 'payment.chargeback'
+              : 'payment.refunded',
           entity: 'Payment',
           entityId: paymentId,
-          newValues: { source: 'mercado_pago' },
+          newValues: { source: 'mercado_pago', providerStatus, detail },
         },
       });
     }

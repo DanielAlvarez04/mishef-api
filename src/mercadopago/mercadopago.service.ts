@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { MercadoPagoClient } from './mercadopago.client';
 import { MercadoPagoTokenService } from './mercadopago-token.service';
 import { UpdateMercadoPagoTerminalDto } from './dto/update-terminal.dto';
+import { MercadoPagoApiError } from './mercadopago.types';
 
 export interface MercadoPagoConnectionView {
   mpUserId: string;
@@ -58,6 +59,10 @@ export class MercadoPagoService {
 
   get configured(): boolean {
     return this.client.isConfigured;
+  }
+
+  get usesPkce(): boolean {
+    return this.client.usesPkce;
   }
 
   async getStatus(organizationId: string): Promise<MercadoPagoStatus> {
@@ -114,6 +119,7 @@ export class MercadoPagoService {
     organizationId: string;
     userId: string;
     code: string;
+    codeVerifier?: string;
   }): Promise<CallbackResult> {
     const membership = await this.prisma.membership.findFirst({
       where: {
@@ -131,25 +137,40 @@ export class MercadoPagoService {
 
     let tokens;
     try {
-      tokens = await this.client.exchangeCode(params.code);
-    } catch (error) {
-      this.logger.warn(
-        `Mercado Pago rechazó el código OAuth: ${(error as Error).message}`,
+      tokens = await this.client.exchangeCode(
+        params.code,
+        params.codeVerifier,
       );
-      return { ok: false, reason: 'exchange' };
+    } catch (error) {
+      const code =
+        error instanceof MercadoPagoApiError ? error.code : undefined;
+
+      this.logger.warn(
+        `Mercado Pago rechazó el código OAuth (org=${params.organizationId}, status=${
+          error instanceof MercadoPagoApiError ? error.status : 'red'
+        }, code=${code ?? 'n/a'}): ${(error as Error).message}`,
+      );
+
+      return {
+        ok: false,
+        reason: code ? `exchange_${code}` : 'exchange',
+      };
     }
 
     if (!tokens.access_token || !tokens.refresh_token) {
       return { ok: false, reason: 'exchange' };
     }
 
+    let mpUserId: string;
+
     try {
-      await this.client.getUser(tokens.access_token);
+      const account = await this.client.getUser(tokens.access_token);
+      mpUserId = String(account.id);
     } catch (error) {
       this.logger.warn(
-        `No se pudo leer la cuenta de Mercado Pago: ${
-          (error as Error).message
-        }`,
+        `No se pudo leer la cuenta de Mercado Pago (org=${
+          params.organizationId
+        }): ${(error as Error).message}`,
       );
       return { ok: false, reason: 'account' };
     }
@@ -158,6 +179,10 @@ export class MercadoPagoService {
       params.organizationId,
       params.userId,
       tokens,
+    );
+
+    this.logger.log(
+      `Mercado Pago conectado (org=${params.organizationId}, mpUserId=${mpUserId})`,
     );
 
     // La sincronización es best-effort: si MP falla, la conexión ya quedó

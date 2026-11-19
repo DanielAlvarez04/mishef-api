@@ -15,6 +15,7 @@
     "catalog:assets": "node scripts/migrate-catalog-assets.mjs",
     "recipe:scopes": "node scripts/migrate-recipe-scopes.mjs",
     "analytics:purge": "node scripts/purge-analytics.mjs",
+    "webhooks:prune": "node scripts/prune-webhook-payloads.mjs",
     "storage:recount": "node scripts/storage-recount.mjs",
     "plans:seed": "node scripts/seed-plans.mjs",
     "mp:check": "node scripts/check-mercadopago.mjs",

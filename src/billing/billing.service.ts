@@ -19,10 +19,16 @@ import {
   SubscriptionProvider,
   SubscriptionStatus,
 } from '@prisma/client';
-import { createHmac, timingSafeEqual } from 'node:crypto';
 
+import { verifyMercadoPagoSignature } from '../common/webhook-signature';
 import { PrismaService } from '../prisma/prisma.service';
-import { BillingClient, MpAuthorizedPayment, MpPreapproval } from './billing.client';
+import {
+  BillingClient,
+  BillingProviderError,
+  MpAuthorizedPayment,
+  MpPreapproval,
+  isTransientBillingError,
+} from './billing.client';
 import {
   addInterval,
   centsToAmount,
@@ -489,6 +495,48 @@ export class BillingService {
       );
     }
 
+    // Doble clic o reintento: se reutiliza el checkout pendiente en lugar de
+    // crear otra preapproval (que cobraría dos veces).
+    const reusable = await this.findReusableChange(
+      subscription.id,
+      targetPlan.id,
+      dto.interval,
+    );
+
+    if (reusable) {
+      const initPoint = await this.resumeChangeCheckout(reusable);
+
+      if (initPoint) {
+        const startAt = reusable.effectiveAt ?? new Date();
+
+        return {
+          initPoint,
+          preapprovalId: reusable.providerPreapprovalId!,
+          quote: {
+            creditCents: reusable.creditCents,
+            amountDueCents: reusable.amountDueCents,
+            carryOverCents: 0,
+            targetAmountCents: reusable.amountDueCents,
+            quantity: reusable.quantity,
+            daysRemaining: 0,
+            newPeriodStart: startAt,
+            newPeriodEnd: addInterval(startAt, reusable.interval),
+            currentPlan: toPlanView(subscription.plan),
+            targetPlan: toPlanView(targetPlan),
+            currentTotalCents: planAmountCents(
+              subscription.plan,
+              subscription.interval,
+              subscription.quantity,
+            ),
+          },
+        };
+      }
+    }
+
+    // Si había un cambio pendiente hacia otro plan, se cancela antes de crear
+    // el nuevo: no deben quedar dos preapprovals vivas.
+    await this.cancelPendingChanges(subscription.id);
+
     const activeBranches = await this.prisma.branch.count({
       where: { organizationId, isActive: true },
     });
@@ -530,6 +578,7 @@ export class BillingService {
       payerEmail: dto.payerEmail,
       startAt,
       metadata: { kind: 'subscribe', planChangeId: change.id },
+      idempotencyKey: change.id,
     });
 
     await this.prisma.$transaction([
@@ -597,6 +646,36 @@ export class BillingService {
       );
     }
 
+    const reusable = await this.findReusableChange(
+      subscription.id,
+      targetPlan.id,
+      dto.interval,
+    );
+
+    if (reusable) {
+      const initPoint = await this.resumeChangeCheckout(reusable);
+
+      if (initPoint) {
+        return {
+          initPoint,
+          preapprovalId: reusable.providerPreapprovalId,
+          quote,
+          applied: false,
+        };
+      }
+    }
+
+    const payerEmail =
+      subscription.payerEmail ?? (await this.billingEmail(organizationId));
+
+    if (!payerEmail) {
+      throw new BadRequestException(
+        'Agrega un correo de facturación antes de cambiar de plan.',
+      );
+    }
+
+    await this.cancelPendingChanges(subscription.id);
+
     const change = await this.prisma.planChange.create({
       data: {
         subscriptionId: subscription.id,
@@ -612,15 +691,6 @@ export class BillingService {
       },
     });
 
-    const payerEmail =
-      subscription.payerEmail ?? (await this.billingEmail(organizationId));
-
-    if (!payerEmail) {
-      throw new BadRequestException(
-        'Agrega un correo de facturación antes de cambiar de plan.',
-      );
-    }
-
     const preapproval = await this.createPreapproval({
       organizationId,
       plan: targetPlan,
@@ -629,6 +699,7 @@ export class BillingService {
       payerEmail,
       startAt: quote.newPeriodStart,
       metadata: { kind: 'change_plan', planChangeId: change.id },
+      idempotencyKey: change.id,
     });
 
     await this.prisma.planChange.update({
@@ -651,15 +722,27 @@ export class BillingService {
     });
 
     if (subscription.providerPreapprovalId) {
-      await this.client
-        .cancelPreapproval(subscription.providerPreapprovalId)
-        .catch((error) =>
-          this.logger.warn(
-            `No se pudo cancelar la suscripción en Mercado Pago: ${
-              (error as Error).message
-            }`,
-          ),
+      try {
+        await this.client.cancelPreapproval(
+          subscription.providerPreapprovalId,
         );
+      } catch (error) {
+        // 400/404: Mercado Pago ya no tiene una preapproval viva; se puede
+        // cerrar localmente. Un timeout o 5xx significa que podría seguir
+        // cobrando: se aborta para no dejarla activa "invisible".
+        if (
+          error instanceof BillingProviderError &&
+          (error.status === 400 || error.status === 404)
+        ) {
+          this.logger.warn(
+            `Mercado Pago ya no tenía la preapproval ${subscription.providerPreapprovalId}: ${error.message}`,
+          );
+        } else {
+          throw new ServiceUnavailableException(
+            'No se pudo cancelar el cobro automático en Mercado Pago. La suscripción no cambió; vuelve a intentarlo.',
+          );
+        }
+      }
     }
 
     await this.prisma.organizationSubscription.update({
@@ -841,14 +924,24 @@ export class BillingService {
       (body.data?.id !== undefined ? String(body.data.id) : undefined);
     const topic = first(request.query.type) ?? body.type ?? 'unknown';
 
-    this.verifySignature({
+    if (!dataId) return { ok: true, ignored: 'missing_data_id' };
+
+    const signature = verifyMercadoPagoSignature({
       secret,
       signature: first(request.headers.signature),
       requestId: first(request.headers.requestId),
       dataId,
+      maxSkewSeconds: this.client.webhookMaxSkewSeconds,
     });
 
-    if (!dataId) return { ok: true, ignored: 'missing_data_id' };
+    if (!signature.valid) {
+      this.logger.warn(
+        `Firma de webhook de suscripción inválida (${signature.reason}) para ${topic} ${dataId}`,
+      );
+      throw new UnauthorizedException(
+        'Firma de notificación de suscripción inválida',
+      );
+    }
 
     if (
       ![
@@ -860,14 +953,16 @@ export class BillingService {
       return { ok: true, ignored: `topic_${topic}` };
     }
 
-    const event = await this.registerEvent({
+    const registered = await this.registerEvent({
       requestId: first(request.headers.requestId),
       topic,
       providerId: dataId,
       payload: body,
     });
 
-    if (!event) return { ok: true, duplicated: true };
+    if (registered.duplicate) return { ok: true, duplicated: true };
+
+    const event = registered.event;
 
     try {
       if (topic === 'subscription_preapproval') {
@@ -884,9 +979,23 @@ export class BillingService {
       await this.markEvent(event.id, null);
       return { ok: true };
     } catch (error) {
-      await this.markEvent(event.id, (error as Error).message);
+      if (isTransientBillingError(error)) {
+        // Se deja `processedAt` vacío para que el reintento de Mercado Pago
+        // vuelva a procesar el evento; el 5xx es lo que dispara el reintento.
+        await this.markEvent(event.id, (error as Error).message, false);
 
-      if (error instanceof ServiceUnavailableException) throw error;
+        this.logger.warn(
+          `Webhook de suscripción transitorio (${dataId}), se reintentará: ${
+            (error as Error).message
+          }`,
+        );
+
+        throw new ServiceUnavailableException(
+          'Mercado Pago no pudo procesar la notificación en este momento',
+        );
+      }
+
+      await this.markEvent(event.id, (error as Error).message, true);
 
       this.logger.warn(
         `Webhook de suscripción procesado con error (${dataId}): ${
@@ -894,7 +1003,7 @@ export class BillingService {
         }`,
       );
 
-      return { ok: false, error: (error as Error).message };
+      return { ok: false };
     }
   }
 
@@ -1058,15 +1167,25 @@ export class BillingService {
     }
 
     if (providerChanged && subscription.providerPreapprovalId) {
-      await this.client
-        .cancelPreapproval(subscription.providerPreapprovalId)
-        .catch((error) =>
-          this.logger.warn(
-            `No se pudo cancelar la suscripción anterior: ${
-              (error as Error).message
-            }`,
-          ),
+      try {
+        await this.client.cancelPreapproval(
+          subscription.providerPreapprovalId,
         );
+      } catch (error) {
+        if (
+          error instanceof BillingProviderError &&
+          (error.status === 400 || error.status === 404)
+        ) {
+          this.logger.warn(
+            `Mercado Pago ya no tenía la preapproval ${subscription.providerPreapprovalId}: ${error.message}`,
+          );
+        } else {
+          throw new ServiceUnavailableException(
+            'No se pudo cancelar el cobro anterior en Mercado Pago. La suscripción no cambió; vuelve a intentarlo.',
+          );
+        }
+      }
+
       data.providerPreapprovalId = null;
       data.provider = SubscriptionProvider.MANUAL;
     }
@@ -1143,6 +1262,7 @@ export class BillingService {
     payerEmail: string;
     startAt: Date;
     metadata: Record<string, unknown>;
+    idempotencyKey: string;
   }) {
     if (!this.client.isConfigured) {
       throw new ServiceUnavailableException(
@@ -1160,21 +1280,141 @@ export class BillingService {
         ? params.startAt
         : new Date(Date.now() + 60_000);
 
-    return this.client.createPreapproval({
-      reason: `Mishef ${params.plan.name}`,
-      external_reference: params.organizationId,
-      payer_email: params.payerEmail,
-      back_url: backUrl,
-      status: 'pending',
-      metadata: params.metadata,
-      auto_recurring: {
-        frequency: params.interval === BillingInterval.YEAR ? 12 : 1,
-        frequency_type: 'months',
-        transaction_amount: centsToAmount(params.amountCents),
-        currency_id: params.plan.currency,
-        start_date: startAt.toISOString(),
+    return this.client.createPreapproval(
+      {
+        reason: `Mishef ${params.plan.name}`,
+        external_reference: params.organizationId,
+        payer_email: params.payerEmail,
+        back_url: backUrl,
+        status: 'pending',
+        metadata: params.metadata,
+        auto_recurring: {
+          frequency: params.interval === BillingInterval.YEAR ? 12 : 1,
+          frequency_type: 'months',
+          transaction_amount: centsToAmount(params.amountCents),
+          currency_id: params.plan.currency,
+          start_date: startAt.toISOString(),
+        },
       },
+      params.idempotencyKey,
+    );
+  }
+
+  /**
+   * Un cambio pendiente con el mismo plan e intervalo se reutiliza: el
+   * usuario vuelve al mismo checkout en lugar de generar otra preapproval.
+   */
+  private findReusableChange(
+    subscriptionId: string,
+    toPlanId: string,
+    interval: BillingInterval,
+  ): Promise<PlanChange | null> {
+    return this.prisma.planChange.findFirst({
+      where: {
+        subscriptionId,
+        toPlanId,
+        interval,
+        status: PlanChangeStatus.PENDING,
+        providerPreapprovalId: { not: null },
+      },
+      orderBy: { createdAt: 'desc' },
     });
+  }
+
+  /**
+   * Devuelve el link de pago del cambio pendiente, o `null` si Mercado Pago ya
+   * lo canceló/rechazó (en ese caso el cambio local se marca como cancelado).
+   */
+  private async resumeChangeCheckout(
+    change: PlanChange,
+  ): Promise<string | null> {
+    if (!change.providerPreapprovalId) return null;
+
+    let preapproval: MpPreapproval;
+
+    try {
+      preapproval = await this.client.getPreapproval(
+        change.providerPreapprovalId,
+      );
+    } catch (error) {
+      if (error instanceof BillingProviderError && error.status === 404) {
+        await this.prisma.planChange.update({
+          where: { id: change.id },
+          data: { status: PlanChangeStatus.CANCELED },
+        });
+        return null;
+      }
+
+      throw error;
+    }
+
+    if (
+      preapproval.status === 'pending' ||
+      preapproval.status === 'authorized'
+    ) {
+      return this.initPoint(preapproval);
+    }
+
+    if (
+      preapproval.status === 'canceled' ||
+      preapproval.status === 'cancelled' ||
+      preapproval.status === 'rejected'
+    ) {
+      await this.prisma.planChange.update({
+        where: { id: change.id },
+        data: { status: PlanChangeStatus.CANCELED },
+      });
+      return null;
+    }
+
+    return null;
+  }
+
+  /**
+   * Cancela en Mercado Pago los cambios pendientes que quedaron huérfanos
+   * antes de crear uno nuevo. Best-effort: si MP falla, se registra y se
+   * continúa para no bloquear al usuario.
+   */
+  private async cancelPendingChanges(subscriptionId: string): Promise<void> {
+    const pending = await this.prisma.planChange.findMany({
+      where: {
+        subscriptionId,
+        status: PlanChangeStatus.PENDING,
+      },
+      select: { id: true, providerPreapprovalId: true },
+    });
+
+    for (const change of pending) {
+      if (change.providerPreapprovalId) {
+        try {
+          await this.client.cancelPreapproval(change.providerPreapprovalId);
+        } catch (error) {
+          if (
+            error instanceof BillingProviderError &&
+            (error.status === 400 || error.status === 404)
+          ) {
+            this.logger.warn(
+              `Mercado Pago ya no tenía la preapproval ${change.providerPreapprovalId}: ${error.message}`,
+            );
+          } else {
+            // No se crea otro intento si el anterior podría seguir cobrando.
+            throw new ServiceUnavailableException(
+              'No se pudo cancelar un intento de pago anterior en Mercado Pago. Vuelve a intentarlo en unos segundos.',
+            );
+          }
+        }
+      }
+    }
+
+    if (pending.length > 0) {
+      await this.prisma.planChange.updateMany({
+        where: {
+          id: { in: pending.map((change) => change.id) },
+          status: PlanChangeStatus.PENDING,
+        },
+        data: { status: PlanChangeStatus.CANCELED },
+      });
+    }
   }
 
   private initPoint(preapproval: MpPreapproval): string {
@@ -1530,80 +1770,69 @@ export class BillingService {
     topic: string;
     providerId: string;
     payload: WebhookBody;
-  }) {
+  }): Promise<{
+    event: { id: string; processedAt: Date | null };
+    duplicate: boolean;
+  }> {
+    if (params.requestId) {
+      const existing = await this.prisma.billingWebhookEvent.findUnique({
+        where: { requestId: params.requestId },
+        select: { id: true, processedAt: true },
+      });
+
+      if (existing) {
+        // Sin `processedAt` el intento anterior fue transitorio: se reprocesa.
+        return { event: existing, duplicate: existing.processedAt !== null };
+      }
+    }
+
     try {
-      return await this.prisma.billingWebhookEvent.create({
+      const created = await this.prisma.billingWebhookEvent.create({
         data: {
           requestId: params.requestId ?? null,
           topic: params.topic,
           providerId: params.providerId,
           payload: params.payload as Prisma.InputJsonValue,
         },
+        select: { id: true, processedAt: true },
       });
+
+      return { event: created, duplicate: false };
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
+        error.code === 'P2002' &&
+        params.requestId
       ) {
-        return null;
+        const existing = await this.prisma.billingWebhookEvent.findUnique({
+          where: { requestId: params.requestId },
+          select: { id: true, processedAt: true },
+        });
+
+        if (existing) {
+          return {
+            event: existing,
+            duplicate: existing.processedAt !== null,
+          };
+        }
       }
+
       throw error;
     }
   }
 
-  private async markEvent(id: string, error: string | null) {
+  private async markEvent(
+    id: string,
+    error: string | null,
+    processed = true,
+  ): Promise<void> {
     await this.prisma.billingWebhookEvent.update({
       where: { id },
-      data: { processedAt: new Date(), error: error?.slice(0, 500) ?? null },
+      data: {
+        processedAt: processed ? new Date() : null,
+        error: error?.slice(0, 500) ?? null,
+      },
     });
-  }
-
-  private verifySignature(params: {
-    secret: string;
-    signature: string | undefined;
-    requestId: string | undefined;
-    dataId: string | undefined;
-  }) {
-    const { secret, signature, requestId, dataId } = params;
-
-    if (!signature || !requestId || !dataId) {
-      throw new UnauthorizedException(
-        'Notificación de suscripción sin firma completa',
-      );
-    }
-
-    const values = new Map(
-      signature
-        .split(',')
-        .map((part) => part.split('='))
-        .filter((pair): pair is [string, string] => pair.length === 2),
-    );
-
-    const ts = values.get('ts');
-    const received = values.get('v1');
-
-    if (!ts || !received) {
-      throw new UnauthorizedException('Firma de suscripción inválida');
-    }
-
-    const manifests = new Set([
-      `id:${dataId};request-id:${requestId};ts:${ts};`,
-      `id:${dataId.toLowerCase()};request-id:${requestId};ts:${ts};`,
-    ]);
-
-    const valid = [...manifests].some((candidate) => {
-      const expected = createHmac('sha256', secret)
-        .update(candidate)
-        .digest('hex');
-      const a = Buffer.from(expected);
-      const b = Buffer.from(received);
-
-      return a.length === b.length && timingSafeEqual(a, b);
-    });
-
-    if (!valid) {
-      throw new UnauthorizedException('Firma de suscripción inválida');
-    }
   }
 
   private async audit(

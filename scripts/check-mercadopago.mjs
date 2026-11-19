@@ -55,6 +55,11 @@ function encryptionKeyIsValid() {
   }
 }
 
+function environmentOf(name) {
+  const raw = value(name).toLowerCase();
+  return raw === 'test' ? 'test' : 'production';
+}
+
 async function checkBillingToken() {
   const token = value('MP_BILLING_ACCESS_TOKEN');
   if (!token) return { checked: false, reason: 'sin access token' };
@@ -84,7 +89,6 @@ async function checkBillingToken() {
     }
 
     const user = await response.json();
-    const tags = Array.isArray(user.tags) ? user.tags : [];
 
     return {
       checked: true,
@@ -92,7 +96,7 @@ async function checkBillingToken() {
       userId: user.id,
       nickname: user.nickname,
       siteId: user.site_id,
-      testMode: token.startsWith('TEST-') || tags.includes('test_user'),
+      testMode: environmentOf('MP_BILLING_ENVIRONMENT') === 'test',
     };
   } catch (error) {
     return {
@@ -144,7 +148,7 @@ async function checkMarketplaceCredentials() {
       checked: true,
       valid: Boolean(data.access_token),
       userId: data.user_id,
-      testMode: String(data.access_token ?? '').startsWith('TEST-'),
+      testMode: environmentOf('MP_ENVIRONMENT') === 'test',
     };
   } catch (error) {
     return {
@@ -174,6 +178,13 @@ async function main() {
     billing,
     missingMarketplace,
     missingBilling,
+    environment: {
+      marketplace: environmentOf('MP_ENVIRONMENT'),
+      billing: environmentOf('MP_BILLING_ENVIRONMENT'),
+      pkce: value('MP_OAUTH_PKCE') === 'true',
+      webhookMaxSkewSeconds:
+        Number(value('MP_WEBHOOK_MAX_SKEW_SECONDS') || 0) || 0,
+    },
     encryptionKey: {
       configured: Boolean(value('MP_TOKEN_ENCRYPTION_KEY')),
       valid: encryptionKeyIsValid(),

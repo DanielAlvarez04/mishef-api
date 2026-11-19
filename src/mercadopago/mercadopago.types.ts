@@ -48,12 +48,23 @@ export interface MpPreference {
   expiration_date_to?: string;
 }
 
+export interface MpRefund {
+  id?: number;
+  payment_id?: number;
+  amount?: number;
+  status?: string;
+  date_created?: string;
+  [key: string]: unknown;
+}
+
 export interface MpPayment {
   id: number;
   status: string;
   status_detail?: string;
   external_reference?: string;
   transaction_amount?: number;
+  transaction_amount_refunded?: number;
+  refunds?: MpRefund[];
   currency_id?: string;
   date_approved?: string;
   date_created?: string;
@@ -111,4 +122,43 @@ export class MercadoPagoApiError extends Error {
     super(message);
     this.name = 'MercadoPagoApiError';
   }
+}
+
+/**
+ * Fallo de red o timeout. No se sabe si Mercado Pago alcanzó a procesar la
+ * petición, así que quien llama no debe cancelar ni reintentar a ciegas: debe
+ * conservar la clave de idempotencia y conciliar después.
+ */
+export class MercadoPagoTransportError extends Error {
+  constructor(
+    message: string,
+    readonly path: string,
+  ) {
+    super(message);
+    this.name = 'MercadoPagoTransportError';
+  }
+}
+
+/**
+ * `true` cuando el resultado de la operación es desconocido (timeout, 5xx,
+ * 429 o 408). Nunca se debe asumir que el cobro no se creó.
+ */
+export function isAmbiguousProviderError(error: unknown): boolean {
+  if (error instanceof MercadoPagoTransportError) return true;
+
+  if (error instanceof MercadoPagoApiError) {
+    return (
+      error.status === 408 ||
+      error.status === 425 ||
+      error.status === 429 ||
+      error.status >= 500
+    );
+  }
+
+  return false;
+}
+
+/** `true` para 4xx que confirman que Mercado Pago rechazó la operación. */
+export function isDefinitiveProviderError(error: unknown): boolean {
+  return error instanceof MercadoPagoApiError && !isAmbiguousProviderError(error);
 }

@@ -5,13 +5,16 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
+import { isRetryableStatus, retry } from '../common/http-retry';
 import {
   MercadoPagoApiError,
   MercadoPagoApiErrorBody,
+  MercadoPagoTransportError,
   MpOrder,
   MpPayment,
   MpPaymentsSearch,
   MpPreference,
+  MpRefund,
   MpTerminal,
   MpTerminalsResponse,
   MpTokenResponse,
@@ -21,6 +24,7 @@ import {
 const API_BASE_URL = 'https://api.mercadopago.com';
 const AUTHORIZE_URL = 'https://auth.mercadopago.com/authorization';
 const REQUEST_TIMEOUT_MS = 12_000;
+const MAX_ATTEMPTS = 3;
 
 type Query = Record<string, string | number | undefined>;
 
@@ -35,9 +39,10 @@ interface RequestOptions {
 /**
  * Cliente HTTP mínimo de Mercado Pago (sin SDK oficial).
  *
- * Solo cubre lo que usa la integración Point: OAuth, terminales y orders.
- * Traduce los errores del proveedor a `MercadoPagoApiError` para que la capa
- * de servicio decida qué mensaje mostrar al usuario.
+ * Cubre OAuth, terminales, orders, preferencias y reembolsos. Los fallos de red
+ * se traducen a `MercadoPagoTransportError` (resultado desconocido) y los
+ * errores HTTP a `MercadoPagoApiError`, para que los servicios puedan decidir
+ * si cancelan, reintentan o concilian.
  */
 @Injectable()
 export class MercadoPagoClient {
@@ -51,8 +56,36 @@ export class MercadoPagoClient {
     );
   }
 
+  /** Entorno declarado en `MP_ENVIRONMENT`. Nunca se infiere del token. */
+  get environment(): 'test' | 'production' {
+    const configured = this.config
+      .get<string>('MP_ENVIRONMENT')
+      ?.trim()
+      .toLowerCase();
+
+    return configured === 'test' ? 'test' : 'production';
+  }
+
+  get isTestMode(): boolean {
+    return this.environment === 'test';
+  }
+
+  get usesPkce(): boolean {
+    const raw = this.config
+      .get<string>('MP_OAUTH_PKCE')
+      ?.trim()
+      .toLowerCase();
+
+    return raw === 'true' || raw === '1';
+  }
+
   get webhookSecret(): string {
     return this.config.get<string>('MP_WEBHOOK_SECRET') ?? '';
+  }
+
+  get webhookMaxSkewSeconds(): number {
+    const raw = Number(this.config.get<string>('MP_WEBHOOK_MAX_SKEW_SECONDS'));
+    return Number.isFinite(raw) && raw > 0 ? raw : 0;
   }
 
   authorizationUrl(state: string, codeChallenge?: string): string {
@@ -194,6 +227,29 @@ export class MercadoPagoClient {
     );
   }
 
+  /**
+   * Reembolso total o parcial de un pago de Checkout Pro.
+   *
+   * Sin `amount` Mercado Pago reembolsa el total. La operación es idempotente
+   * por pago: repetirla devuelve los reembolsos existentes en lugar de cobrar
+   * dos veces.
+   */
+  refundPayment(
+    accessToken: string,
+    paymentId: string,
+    amount?: number,
+  ): Promise<MpRefund> {
+    return this.request<MpRefund>(
+      `/v1/payments/${encodeURIComponent(paymentId)}/refunds`,
+      {
+        method: 'POST',
+        accessToken,
+        body: amount === undefined ? {} : { amount },
+        idempotencyKey: `refund-${paymentId}`,
+      },
+    );
+  }
+
   searchPayments(
     accessToken: string,
     externalReference: string,
@@ -217,14 +273,14 @@ export class MercadoPagoClient {
   cancelOrder(accessToken: string, orderId: string): Promise<MpOrder> {
     return this.request<MpOrder>(
       `/v1/orders/${encodeURIComponent(orderId)}/cancel`,
-      { method: 'POST', accessToken },
+      { method: 'POST', accessToken, idempotencyKey: `cancel-${orderId}` },
     );
   }
 
   refundOrder(accessToken: string, orderId: string): Promise<MpOrder> {
     return this.request<MpOrder>(
       `/v1/orders/${encodeURIComponent(orderId)}/refund`,
-      { method: 'POST', accessToken },
+      { method: 'POST', accessToken, idempotencyKey: `refund-${orderId}` },
     );
   }
 
@@ -254,47 +310,103 @@ export class MercadoPagoClient {
       headers['x-idempotency-key'] = options.idempotencyKey;
     }
 
-    let response: Response;
+    const method = options.method ?? 'GET';
+    // Solo se reintentan peticiones que no pueden duplicar efectos. Los POST
+    // con `x-idempotency-key` son seguros; OAuth (código de un solo uso) no.
+    const canRetry =
+      method !== 'POST' || Boolean(options.idempotencyKey);
+
+    const execute = async (): Promise<T> => {
+      let response: Response;
+
+      try {
+        response = await fetch(url, {
+          method,
+          headers,
+          body:
+            options.body === undefined
+              ? undefined
+              : JSON.stringify(options.body),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
+      } catch (error) {
+        throw new MercadoPagoTransportError(
+          `No se pudo contactar con Mercado Pago (${path}): ${
+            (error as Error).message
+          }`,
+          path,
+        );
+      }
+
+      const text = await response.text();
+      const payload = text ? safeJson(text) : null;
+
+      if (!response.ok) {
+        const body = payload as MercadoPagoApiErrorBody | null;
+        const cause = body?.cause?.[0];
+        const message =
+          cause?.description ??
+          body?.message ??
+          `Mercado Pago respondió con ${response.status}`;
+
+        if (isRetryableStatus(response.status)) {
+          throw new HttpRetrySignal(
+            response.status,
+            message,
+            cause?.code ?? body?.error,
+            payload,
+          );
+        }
+
+        throw new MercadoPagoApiError(
+          response.status,
+          message,
+          cause?.code ?? body?.error,
+          payload,
+        );
+      }
+
+      return payload as T;
+    };
 
     try {
-      response = await fetch(url, {
-        method: options.method ?? 'GET',
-        headers,
-        body:
-          options.body === undefined
-            ? undefined
-            : JSON.stringify(options.body),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      return await retry(execute, {
+        attempts: canRetry ? MAX_ATTEMPTS : 1,
+        shouldRetry: (error) =>
+          error instanceof MercadoPagoTransportError ||
+          error instanceof HttpRetrySignal,
+        onRetry: (error, attempt, delay) => {
+          this.logger.warn(
+            `Reintento ${attempt} de ${method} ${path} en ${delay} ms: ${
+              (error as Error).message
+            }`,
+          );
+        },
       });
     } catch (error) {
-      this.logger.error(
-        `Error de red con Mercado Pago (${path}): ${(error as Error).message}`,
-      );
-      throw new ServiceUnavailableException(
-        'No se pudo contactar con Mercado Pago. Intenta de nuevo en unos segundos.',
-      );
-    }
+      if (error instanceof HttpRetrySignal) {
+        throw new MercadoPagoApiError(
+          error.status,
+          error.message,
+          error.code,
+          error.body,
+        );
+      }
 
-    const text = await response.text();
-    const payload = text ? safeJson(text) : null;
+      if (
+        error instanceof MercadoPagoTransportError ||
+        error instanceof MercadoPagoApiError
+      ) {
+        throw error;
+      }
 
-    if (!response.ok) {
-      const body = payload as MercadoPagoApiErrorBody | null;
-      const cause = body?.cause?.[0];
-      const message =
-        cause?.description ??
-        body?.message ??
-        `Mercado Pago respondió con ${response.status}`;
-
-      throw new MercadoPagoApiError(
-        response.status,
-        message,
-        cause?.code ?? body?.error,
-        payload,
+      throw new MercadoPagoTransportError(
+        `Error inesperado con Mercado Pago (${path}): ${
+          (error as Error).message
+        }`,
+        path,
       );
     }
-
-    return payload as T;
   }
 
   private clientId(): string {
@@ -314,6 +426,22 @@ export class MercadoPagoClient {
       `http://localhost:${this.config.get<string>('PORT') ?? '3001'}`;
 
     return `${apiOrigin.replace(/\/$/, '')}/v1/mercadopago/callback`;
+  }
+}
+
+/**
+ * Señal interna: convierte una respuesta HTTP reintentable en algo que `retry`
+ * pueda volver a intentar sin perder el status ni el cuerpo.
+ */
+class HttpRetrySignal extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly code?: string,
+    readonly body?: unknown,
+  ) {
+    super(message);
+    this.name = 'HttpRetrySignal';
   }
 }
 

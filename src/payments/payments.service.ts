@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import {
   OrderRoundStatus,
@@ -21,6 +22,7 @@ import { rolesHavePermission } from '../common/permissions';
 import { OrdersEventsService } from '../orders/orders.events';
 import { OrderSplitsService } from '../orders/order-splits.service';
 import { CreatePaymentDto, VoidPaymentDto } from './dto/payments.dto';
+import { ProviderPaymentRegistry } from './provider-payment.registry';
 
 const ACTIVE_ROUND_STATUSES = [
   OrderRoundStatus.PENDING,
@@ -73,6 +75,7 @@ export class PaymentsService {
     private readonly events: OrdersEventsService,
     private readonly splits: OrderSplitsService,
     private readonly analytics: AnalyticsService,
+    private readonly providers: ProviderPaymentRegistry,
   ) {}
 
   /**
@@ -240,8 +243,8 @@ export class PaymentsService {
     const idempotencyKey = dto.idempotencyKey?.trim() || null;
 
     if (idempotencyKey) {
-      const existing = await this.prisma.payment.findUnique({
-        where: { idempotencyKey },
+      const existing = await this.prisma.payment.findFirst({
+        where: { organizationId, idempotencyKey },
         include: paymentInclude,
       });
 
@@ -429,7 +432,15 @@ export class PaymentsService {
       return { ...payment, duplicated: true };
     }
 
-    if (payment.status !== PaymentStatus.PENDING) {
+    // Un link anulado localmente puede pagarse igual si el cliente conservó la
+    // página. Si Mercado Pago dice que el cobro se aprobó, el dinero existe y
+    // debe registrarse; solo se rechaza si la cuenta ya se cerró (para no
+    // alterar un arqueo histórico sin revisión).
+    const lateProviderPayment =
+      options.source !== 'manual' &&
+      payment.status === PaymentStatus.CANCELLED;
+
+    if (payment.status !== PaymentStatus.PENDING && !lateProviderPayment) {
       throw new BadRequestException(
         'Solo se puede confirmar un pago pendiente',
       );
@@ -461,7 +472,12 @@ export class PaymentsService {
 
       // Guarda contra dobles clics: solo una petición pasa de PENDING.
       const claimed = await tx.payment.updateMany({
-        where: { id: paymentId, status: PaymentStatus.PENDING },
+        where: {
+          id: paymentId,
+          status: lateProviderPayment
+            ? { in: [PaymentStatus.PENDING, PaymentStatus.CANCELLED] }
+            : PaymentStatus.PENDING,
+        },
         data: {
           status: PaymentStatus.CONFIRMED,
           confirmedAt: now,
@@ -494,6 +510,7 @@ export class PaymentsService {
             amount: payment.amount.toFixed(2),
             source: options.source,
             providerStatus: options.providerStatus ?? null,
+            recoveredFromCancelled: lateProviderPayment,
           },
         },
       });
@@ -544,6 +561,7 @@ export class PaymentsService {
     actor: PaymentActor,
     paymentId: string,
     dto: VoidPaymentDto = {},
+    options: { providerHandled?: boolean } = {},
   ) {
     const payment = await this.prisma.payment.findFirst({
       where: { id: paymentId, organizationId },
@@ -573,19 +591,78 @@ export class PaymentsService {
       if (!rolesHavePermission(actor.roles, 'payments:register')) {
         throw new ForbiddenException('No puedes anular pagos');
       }
-
-      // Un cobro de terminal se cancela en Mercado Pago: anularlo solo en la
-      // base dejaría la orden viva en el dispositivo.
-      if (
-        payment.method === PaymentMethod.MERCADO_PAGO_POINT &&
-        payment.provider === 'MERCADO_PAGO'
-      ) {
-        throw new BadRequestException(
-          'Cancela el cobro desde la terminal antes de anularlo',
-        );
-      }
     } else if (!rolesHavePermission(actor.roles, 'payments:refund')) {
       throw new ForbiddenException('Solo administración puede reembolsar');
+    }
+
+    // Primero el proveedor, después la base: si Mercado Pago rechaza o no
+    // responde, el pago local sigue como estaba y se puede reintentar. Sin
+    // esto, un reembolso local dejaría el dinero cobrado en la cuenta del
+    // negocio y la caja cuadrada con datos falsos.
+    let providerRefundedAmount: number | null = null;
+
+    if (!options.providerHandled && payment.organizationId) {
+      const ref = {
+        id: payment.id,
+        organizationId: payment.organizationId,
+        method: payment.method,
+        provider: payment.provider,
+        providerOrderId: payment.providerOrderId,
+        providerPaymentId: payment.providerPaymentId,
+        amount: Number(payment.amount) + Number(payment.tipAmount ?? 0),
+        currency: 'MXN',
+      };
+      const handler = this.providers.find(ref);
+
+      if (handler) {
+        const result = isPending
+          ? handler.cancel
+            ? await handler.cancel(ref)
+            : { status: 'not_supported' as const, providerStatus: null }
+          : await handler.refund(ref);
+
+        if (result.status === 'pending') {
+          throw new ServiceUnavailableException(
+            'Mercado Pago todavía no confirma la operación. Espera unos segundos y vuelve a intentarlo.',
+          );
+        }
+
+        if (result.status === 'refunded') {
+          const refunded = result.refundedAmount ?? ref.amount;
+
+          if (refunded + 0.01 < ref.amount) {
+            await this.prisma.payment.update({
+              where: { id: payment.id },
+              data: {
+                providerStatus: result.providerStatus ?? 'partially_refunded',
+                providerStatusDetail:
+                  result.detail ?? 'partial_refund_from_pos',
+              },
+            });
+
+            await this.prisma.auditLog.create({
+              data: {
+                organizationId,
+                userId: actor.id,
+                action: 'payment.partial_refund',
+                entity: 'Payment',
+                entityId: payment.id,
+                newValues: {
+                  refundedAmount: refunded,
+                  expectedAmount: ref.amount,
+                  reason,
+                },
+              },
+            });
+
+            throw new ConflictException(
+              `Mercado Pago reembolsó ${refunded.toFixed(2)} de ${ref.amount.toFixed(2)}. Revisa el cobro en Mercado Pago.`,
+            );
+          }
+
+          providerRefundedAmount = refunded;
+        }
+      }
     }
 
     const status = isPending
@@ -595,7 +672,15 @@ export class PaymentsService {
     const result = await this.prisma.$transaction(async (tx) => {
       const updated = await tx.payment.update({
         where: { id: paymentId },
-        data: { status },
+        data: {
+          status,
+          ...(providerRefundedAmount !== null
+            ? {
+                providerStatus: 'refunded',
+                providerStatusDetail: 'refunded_from_pos',
+              }
+            : {}),
+        },
         include: paymentInclude,
       });
 
@@ -652,6 +737,7 @@ export class PaymentsService {
             tipAmount: payment.tipAmount.toFixed(2),
             reason,
             sessionId: payment.sessionId,
+            providerRefundedAmount,
           },
         },
       });

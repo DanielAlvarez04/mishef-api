@@ -5,8 +5,11 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
+import { isRetryableStatus, retry } from '../common/http-retry';
+
 const API_BASE_URL = 'https://api.mercadopago.com';
 const REQUEST_TIMEOUT_MS = 15_000;
+const MAX_ATTEMPTS = 3;
 
 export interface MpPreapproval {
   id: string;
@@ -58,6 +61,19 @@ export class BillingProviderError extends Error {
 }
 
 /**
+ * `true` cuando el fallo puede resolverse reintentando (red, timeout, 429 o
+ * 5xx). Mercado Pago debe volver a notificar; no se debe marcar el evento como
+ * procesado.
+ */
+export function isTransientBillingError(error: unknown): boolean {
+  if (error instanceof ServiceUnavailableException) return true;
+  if (error instanceof BillingProviderError) {
+    return error.status === 408 || error.status === 429 || error.status >= 500;
+  }
+  return false;
+}
+
+/**
  * Cliente de la API de Suscripciones de Mercado Pago.
  *
  * Usa el access token de la cuenta de la plataforma (aplicación de billing),
@@ -74,18 +90,39 @@ export class BillingClient {
     return Boolean(this.accessToken());
   }
 
+  /** Entorno declarado en `MP_BILLING_ENVIRONMENT`. Nunca se infiere del token. */
+  get environment(): 'test' | 'production' {
+    const configured = this.config
+      .get<string>('MP_BILLING_ENVIRONMENT')
+      ?.trim()
+      .toLowerCase();
+
+    return configured === 'test' ? 'test' : 'production';
+  }
+
   get isTestMode(): boolean {
-    return this.accessToken().startsWith('TEST-');
+    return this.environment === 'test';
   }
 
   get webhookSecret(): string {
     return this.config.get<string>('MP_BILLING_WEBHOOK_SECRET') ?? '';
   }
 
-  createPreapproval(payload: unknown): Promise<MpPreapproval> {
+  get webhookMaxSkewSeconds(): number {
+    const raw = Number(
+      this.config.get<string>('MP_BILLING_WEBHOOK_MAX_SKEW_SECONDS'),
+    );
+    return Number.isFinite(raw) && raw > 0 ? raw : 0;
+  }
+
+  createPreapproval(
+    payload: unknown,
+    idempotencyKey: string,
+  ): Promise<MpPreapproval> {
     return this.request<MpPreapproval>('/preapproval', {
       method: 'POST',
       body: payload,
+      idempotencyKey,
     });
   }
 
@@ -131,6 +168,7 @@ export class BillingClient {
     options: {
       method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
       body?: unknown;
+      idempotencyKey?: string;
     } = {},
   ): Promise<T> {
     const token = this.accessToken();
@@ -150,53 +188,101 @@ export class BillingClient {
       headers['content-type'] = 'application/json';
     }
 
-    let response: Response;
+    if (options.idempotencyKey) {
+      headers['x-idempotency-key'] = options.idempotencyKey;
+    }
+
+    const method = options.method ?? 'GET';
+    const canRetry = method !== 'POST' || Boolean(options.idempotencyKey);
+
+    const execute = async (): Promise<T> => {
+      let response: Response;
+
+      try {
+        response = await fetch(`${API_BASE_URL}${path}`, {
+          method,
+          headers,
+          body:
+            options.body === undefined
+              ? undefined
+              : JSON.stringify(options.body),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
+      } catch (error) {
+        this.logger.error(
+          `Error de red con suscripciones de Mercado Pago (${path}): ${
+            (error as Error).message
+          }`,
+        );
+        throw new ServiceUnavailableException(
+          'No se pudo contactar con Mercado Pago. Intenta de nuevo en unos segundos.',
+        );
+      }
+
+      const text = await response.text();
+      const payload = text ? safeJson(text) : null;
+
+      if (!response.ok) {
+        const body = payload as
+          | {
+              message?: string;
+              error?: string;
+              cause?: Array<{ code?: string; description?: string }>;
+            }
+          | null;
+        const cause = body?.cause?.[0];
+
+        const error = new BillingProviderError(
+          response.status,
+          cause?.description ??
+            body?.message ??
+            `Mercado Pago respondió con ${response.status}`,
+          cause?.code ?? body?.error,
+          payload,
+        );
+
+        if (isRetryableStatus(response.status)) {
+          throw new RetryableBillingError(error);
+        }
+
+        throw error;
+      }
+
+      return payload as T;
+    };
 
     try {
-      response = await fetch(`${API_BASE_URL}${path}`, {
-        method: options.method ?? 'GET',
-        headers,
-        body:
-          options.body === undefined
-            ? undefined
-            : JSON.stringify(options.body),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      return await retry(execute, {
+        attempts: canRetry ? MAX_ATTEMPTS : 1,
+        shouldRetry: (error) =>
+          error instanceof ServiceUnavailableException ||
+          error instanceof RetryableBillingError,
+        onRetry: (error, attempt, delay) => {
+          this.logger.warn(
+            `Reintento ${attempt} de ${method} ${path} en ${delay} ms: ${
+              (error as Error).message
+            }`,
+          );
+        },
       });
     } catch (error) {
-      this.logger.error(
-        `Error de red con suscripciones de Mercado Pago (${path}): ${
-          (error as Error).message
-        }`,
-      );
-      throw new ServiceUnavailableException(
-        'No se pudo contactar con Mercado Pago. Intenta de nuevo en unos segundos.',
-      );
+      if (error instanceof RetryableBillingError) {
+        throw error.cause;
+      }
+
+      throw error;
     }
-
-    const text = await response.text();
-    const payload = text ? safeJson(text) : null;
-
-    if (!response.ok) {
-      const body = payload as
-        | { message?: string; error?: string; cause?: Array<{ code?: string; description?: string }> }
-        | null;
-      const cause = body?.cause?.[0];
-
-      throw new BillingProviderError(
-        response.status,
-        cause?.description ??
-          body?.message ??
-          `Mercado Pago respondió con ${response.status}`,
-        cause?.code ?? body?.error,
-        payload,
-      );
-    }
-
-    return payload as T;
   }
 
   private accessToken(): string {
     return this.config.get<string>('MP_BILLING_ACCESS_TOKEN') ?? '';
+  }
+}
+
+class RetryableBillingError extends Error {
+  constructor(readonly cause: BillingProviderError) {
+    super(cause.message);
+    this.name = 'RetryableBillingError';
   }
 }
 
