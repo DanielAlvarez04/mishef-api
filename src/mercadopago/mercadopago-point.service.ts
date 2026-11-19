@@ -10,6 +10,7 @@ import {
   PaymentMethod,
   PaymentStatus,
   Prisma,
+  TipSource,
 } from '@prisma/client';
 
 import { PaymentsService, type PaymentActor } from '../payments/payments.service';
@@ -19,6 +20,7 @@ import { MercadoPagoTokenService } from './mercadopago-token.service';
 import {
   MercadoPagoApiError,
   MpOrder,
+  MpOrderPayment,
   isAmbiguousProviderError,
 } from './mercadopago.types';
 import { CreatePointChargeDto } from './dto/create-point-charge.dto';
@@ -134,10 +136,12 @@ export class MercadoPagoPointService {
       {
         method: PaymentMethod.MERCADO_PAGO_POINT,
         amount: dto.amount,
-        tipAmount: dto.tipAmount,
-        tipPercent: dto.tipPercent,
-        tipSource: dto.tipSource,
-        tipBaseAmount: dto.tipBaseAmount,
+        // La propina la captura la terminal; si la app la enviara, el cliente
+        // podría dejar propina dos veces (una en el importe y otra en Point).
+        tipAmount: 0,
+        tipPercent: null,
+        tipSource: TipSource.NONE,
+        tipBaseAmount: null,
         splitId: dto.splitId,
         idempotencyKey: dto.idempotencyKey,
       },
@@ -332,7 +336,13 @@ export class MercadoPagoPointService {
 
     const previous = await this.prisma.payment.findUnique({
       where: { id: paymentId },
-      select: { providerStatusDetail: true },
+      select: {
+        providerStatusDetail: true,
+        amount: true,
+        tipAmount: true,
+        userId: true,
+        tipRecipientId: true,
+      },
     });
 
     await this.prisma.payment.update({
@@ -348,6 +358,34 @@ export class MercadoPagoPointService {
     });
 
     if (status === 'processed') {
+      // La propina real la elige el cliente en la terminal. `tip_amount` es la
+      // fuente de verdad; `paid_amount - amount` queda como respaldo.
+      const terminalTip = readTerminalTip(providerPayment, previous?.amount);
+
+      if (terminalTip !== null) {
+        const currentTip = cents(previous?.tipAmount);
+
+        // No se borra una propina capturada antes (pagos legacy): solo se
+        // escribe si la terminal dejó propina o si el pago aún no tenía.
+        if (terminalTip > 0 || currentTip === 0) {
+          await this.prisma.payment.update({
+            where: { id: paymentId },
+            data: {
+              tipAmount: new Prisma.Decimal(terminalTip).div(100),
+              tipPercent: null,
+              tipSource: TipSource.TERMINAL,
+              tipBaseAmount: previous?.amount ?? null,
+              // La propina de la terminal se atribuye a quien envió el cobro,
+              // igual que la propina manual.
+              tipRecipientId:
+                terminalTip > 0
+                  ? (previous?.tipRecipientId ?? previous?.userId ?? null)
+                  : (previous?.tipRecipientId ?? null),
+            },
+          });
+        }
+      }
+
       await this.payments.confirmByProvider(organizationId, paymentId, {
         paidAt: providerPayment?.date_approved
           ? new Date(providerPayment.date_approved)
@@ -574,9 +612,9 @@ export class MercadoPagoPointService {
         ? 'Para llevar'
         : `Cuenta ${order.id.slice(-6)}`;
 
-    // La terminal cobra la venta más la propina en una sola operación; en la
-    // base siguen separadas para no alterar el saldo de la cuenta.
-    const terminalAmount = payment.amount.plus(payment.tipAmount ?? 0);
+    // La terminal cobra solo la venta y captura la propina por su cuenta.
+    // Si se enviara `amount + tip`, el cliente podría dejar propina dos veces.
+    const terminalAmount = payment.amount;
 
     return {
       type: 'point',
@@ -607,6 +645,47 @@ export class MercadoPagoPointService {
 
 function toJson(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
+}
+
+function cents(value: Prisma.Decimal | string | number | null | undefined): number {
+  if (value === null || value === undefined || value === '') return 0;
+
+  const amount = Number(value);
+
+  return Number.isFinite(amount) && amount > 0
+    ? Math.round(amount * 100)
+    : 0;
+}
+
+/**
+ * Propina que capturó la terminal.
+ *
+ * `tip_amount` es el campo oficial de la order; si no viene, se usa la
+ * diferencia entre `paid_amount` y el importe de la venta.
+ */
+export function readTerminalTip(
+  payment: MpOrderPayment | undefined,
+  base: Prisma.Decimal | null | undefined,
+): number | null {
+  if (!payment) return null;
+
+  const declared = payment.tip_amount;
+
+  if (declared !== undefined && declared !== null && declared !== '') {
+    const tip = Number(declared);
+
+    return Number.isFinite(tip) && tip >= 0 ? Math.round(tip * 100) : null;
+  }
+
+  if (payment.paid_amount === undefined || payment.paid_amount === null) {
+    return null;
+  }
+
+  const paid = Number(payment.paid_amount);
+
+  if (!Number.isFinite(paid)) return null;
+
+  return Math.max(0, Math.round(paid * 100) - cents(base));
 }
 
 function providerMessage(error: unknown): string {

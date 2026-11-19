@@ -52,6 +52,15 @@ export class CreatePaymentDto {
   splitId?: string;
 
   /**
+   * Referencia externa del cobro (autorización, voucher o terminal ajena).
+   * Se muestra en la caja para conciliar pagos manuales.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  reference?: string;
+
+  /**
    * Registra y confirma el pago en la misma petición.
    *
    * Solo se permite a roles con `payments:confirm`; el controlador lo valida.

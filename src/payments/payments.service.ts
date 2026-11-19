@@ -296,6 +296,7 @@ export class PaymentsService {
         changeGiven,
         sessionId: session.id,
         splitId: dto.splitId ?? null,
+        reference: dto.reference?.trim() || null,
         status: PaymentStatus.PENDING,
         paidAt:
           options.paidAt === undefined ? new Date() : options.paidAt,
@@ -321,6 +322,7 @@ export class PaymentsService {
           tipSource: dto.tipSource ?? TipSource.NONE,
           splitId: dto.splitId ?? null,
           cash: cashReceived !== null,
+          reference: dto.reference?.trim() || null,
         },
       },
     ]);

@@ -115,6 +115,8 @@ enum TipSource {
   SUGGESTED
   CUSTOM
   CUSTOMER_DISPLAY
+  /// Propina capturada por la terminal Point (no la elige la app).
+  TERMINAL
 }
 
 enum CashSessionStatus {
@@ -1452,6 +1454,8 @@ model Payment {
   confirmedAt    DateTime?
   confirmedById  String?
   idempotencyKey String?
+  /// Referencia externa del cobro (autorización, voucher o terminal ajena).
+  reference      String?
 
   // Propinas y control de caja.
   tipAmount      Decimal  @default(0) @db.Decimal(12, 2)

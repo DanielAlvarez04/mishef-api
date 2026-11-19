@@ -78,9 +78,19 @@ export interface MpPaymentsSearch {
 export interface MpOrderPayment {
   id: string;
   amount: string;
+  /// Propina que el cliente eligió en la terminal.
+  tip_amount?: string;
+  /// Total cobrado (venta + propina).
+  paid_amount?: string;
+  refunded_amount?: string;
   status: string;
   status_detail?: string;
   date_approved?: string;
+  payment_method?: {
+    type?: string;
+    id?: string;
+    installments?: string | number;
+  };
 }
 
 export interface MpOrder {
