@@ -19,7 +19,6 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Response, Request } from 'express';
 import {
-  createHash,
   createHmac,
   randomBytes,
   timingSafeEqual,
@@ -70,9 +69,6 @@ export class MercadoPagoController {
     const organizationId = this.organizationId(user);
     const state = randomBytes(24).toString('base64url');
     const verifier = randomBytes(32).toString('base64url');
-    const challenge = createHash('sha256')
-      .update(verifier)
-      .digest('base64url');
 
     res.cookie(
       OAUTH_COOKIE,
@@ -85,9 +81,7 @@ export class MercadoPagoController {
       this.cookieOptions(),
     );
 
-    return res.redirect(
-      this.mercadoPago.authorizationUrl(state, challenge),
-    );
+    return res.redirect(this.mercadoPago.authorizationUrl(state));
   }
 
   @ApiOperation({ summary: 'Callback OAuth de Mercado Pago' })
@@ -126,7 +120,6 @@ export class MercadoPagoController {
         organizationId: cookie.organizationId,
         userId: cookie.userId,
         code,
-        codeVerifier: cookie.verifier,
       });
 
       return result.ok

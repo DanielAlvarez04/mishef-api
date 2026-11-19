@@ -99,7 +99,7 @@ export class MercadoPagoService {
     };
   }
 
-  authorizationUrl(state: string, codeChallenge: string): string {
+  authorizationUrl(state: string, codeChallenge?: string): string {
     return this.client.authorizationUrl(state, codeChallenge);
   }
 
@@ -114,7 +114,6 @@ export class MercadoPagoService {
     organizationId: string;
     userId: string;
     code: string;
-    codeVerifier: string;
   }): Promise<CallbackResult> {
     const membership = await this.prisma.membership.findFirst({
       where: {
@@ -132,10 +131,7 @@ export class MercadoPagoService {
 
     let tokens;
     try {
-      tokens = await this.client.exchangeCode(
-        params.code,
-        params.codeVerifier,
-      );
+      tokens = await this.client.exchangeCode(params.code);
     } catch (error) {
       this.logger.warn(
         `Mercado Pago rechazó el código OAuth: ${(error as Error).message}`,
