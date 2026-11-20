@@ -17,6 +17,8 @@ const TERMINALS_SYNC_TTL_MS = 60_000;
 
 export interface MercadoPagoConnectionView {
   mpUserId: string;
+  mpEmail: string | null;
+  mpNickname: string | null;
   status: string;
   expiresAt: Date;
   connectedAt: Date;
@@ -48,7 +50,11 @@ export interface MercadoPagoStatus {
 }
 
 export type CallbackResult =
-  | { ok: true }
+  | {
+      ok: true;
+      /** Se reconectó la misma cuenta que se había desconectado. */
+      sameAccount: boolean;
+    }
   | { ok: false; reason: string };
 
 /**
@@ -95,6 +101,8 @@ export class MercadoPagoService {
       connection: connection
         ? {
             mpUserId: connection.mpUserId,
+            mpEmail: connection.mpEmail,
+            mpNickname: connection.mpNickname,
             status: connection.status,
             expiresAt: connection.expiresAt,
             connectedAt: connection.connectedAt,
@@ -167,10 +175,14 @@ export class MercadoPagoService {
     }
 
     let mpUserId: string;
+    let mpEmail: string | null = null;
+    let mpNickname: string | null = null;
 
     try {
       const account = await this.client.getUser(tokens.access_token);
       mpUserId = String(account.id);
+      mpEmail = account.email?.trim() || null;
+      mpNickname = account.nickname?.trim() || null;
     } catch (error) {
       this.logger.warn(
         `No se pudo leer la cuenta de Mercado Pago (org=${
@@ -180,14 +192,31 @@ export class MercadoPagoService {
       return { ok: false, reason: 'account' };
     }
 
+    const previous = await this.prisma.auditLog.findFirst({
+      where: {
+        organizationId: params.organizationId,
+        action: 'mercadopago.disconnect',
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { newValues: true },
+    });
+    const previousMpUserId =
+      previous?.newValues &&
+      typeof previous.newValues === 'object' &&
+      !Array.isArray(previous.newValues)
+        ? (previous.newValues as { mpUserId?: unknown }).mpUserId
+        : null;
+    const sameAccount = previousMpUserId === mpUserId;
+
     await this.tokens.save(
       params.organizationId,
       params.userId,
       tokens,
+      { email: mpEmail, nickname: mpNickname },
     );
 
     this.logger.log(
-      `Mercado Pago conectado (org=${params.organizationId}, mpUserId=${mpUserId})`,
+      `Mercado Pago conectado (org=${params.organizationId}, mpUserId=${mpUserId}, sameAccount=${sameAccount})`,
     );
 
     // La sincronización es best-effort: si MP falla, la conexión ya quedó
@@ -202,7 +231,7 @@ export class MercadoPagoService {
       );
     }
 
-    return { ok: true };
+    return { ok: true, sameAccount };
   }
 
   async disconnect(organizationId: string): Promise<void> {

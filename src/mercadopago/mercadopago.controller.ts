@@ -86,6 +86,10 @@ export class MercadoPagoController {
       this.cookieOptions(),
     );
 
+    // El redirect no debe quedar cacheado: cada intento necesita un `state`
+    // nuevo y debe llegar a la sesión actual de Mercado Pago.
+    res.setHeader('Cache-Control', 'no-store');
+
     this.logger.log(
       `OAuth MP iniciado (org=${organizationId}, user=${user.sub}, pkce=${usePkce})`,
     );
@@ -106,6 +110,8 @@ export class MercadoPagoController {
     const webOrigin = (
       this.config.get<string>('WEB_ORIGIN') ?? 'http://localhost:3000'
     ).replace(/\/$/, '');
+
+    res.setHeader('Cache-Control', 'no-store');
 
     const cookie = this.decodeCookie(req.cookies?.[OAUTH_COOKIE]);
     res.clearCookie(OAUTH_COOKIE, {
@@ -148,7 +154,11 @@ export class MercadoPagoController {
       }
 
       return result.ok
-        ? res.redirect(`${webOrigin}/settings?mp=connected`)
+        ? res.redirect(
+            `${webOrigin}/settings?mp=${
+              result.sameAccount ? 'connected_same' : 'connected'
+            }`,
+          )
         : res.redirect(
             `${webOrigin}/settings?mp=error_${encodeURIComponent(result.reason)}`,
           );

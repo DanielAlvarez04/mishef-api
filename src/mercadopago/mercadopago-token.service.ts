@@ -38,14 +38,25 @@ export class MercadoPagoTokenService {
     organizationId: string,
     connectedById: string | null,
     tokens: MpTokenResponse,
+    account?: { email?: string | null; nickname?: string | null },
   ): Promise<void> {
     const expiresIn =
       Number(tokens.expires_in) > 0
         ? Number(tokens.expires_in)
         : DEFAULT_EXPIRES_IN_SECONDS;
 
+    // En los refrescos no se vuelve a consultar la cuenta: se conserva la
+    // identidad guardada en la conexión.
+    const identity = account
+      ? {
+          mpEmail: account.email?.trim() || null,
+          mpNickname: account.nickname?.trim() || null,
+        }
+      : {};
+
     const data = {
       mpUserId: String(tokens.user_id),
+      ...identity,
       accessTokenEnc: this.cipher.encrypt(tokens.access_token),
       refreshTokenEnc: this.cipher.encrypt(tokens.refresh_token),
       expiresAt: new Date(Date.now() + expiresIn * 1000),
@@ -127,6 +138,31 @@ export class MercadoPagoTokenService {
     } catch (error) {
       this.logger.warn(
         `No se pudo revocar el token al desconectar: ${
+          (error as Error).message
+        }`,
+      );
+    }
+
+    // La auditoría permite detectar que se reconectó la misma cuenta y
+    // conserva la identidad aunque la conexión se borre.
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          organizationId,
+          userId: connection.connectedById,
+          action: 'mercadopago.disconnect',
+          entity: 'MercadoPagoConnection',
+          entityId: connection.id,
+          newValues: {
+            mpUserId: connection.mpUserId,
+            mpEmail: connection.mpEmail,
+            mpNickname: connection.mpNickname,
+          },
+        },
+      });
+    } catch (error) {
+      this.logger.warn(
+        `No se pudo auditar la desconexión de Mercado Pago: ${
           (error as Error).message
         }`,
       );
