@@ -4,7 +4,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Role } from '@prisma/client';
+import { Role, type MercadoPagoConnection } from '@prisma/client';
 
 import { PrismaService } from '../prisma/prisma.service';
 import { MercadoPagoClient } from './mercadopago.client';
@@ -95,6 +95,12 @@ export class MercadoPagoService {
       }),
     ]);
 
+    // Conexiones anteriores a `mpEmail`/`mpNickname`: se completan una vez con
+    // la cuenta actual para no obligar a reconectar.
+    if (connection) {
+      await this.ensureAccountIdentity(organizationId, connection);
+    }
+
     return {
       configured: this.client.isConfigured,
       connected: Boolean(connection),
@@ -115,6 +121,49 @@ export class MercadoPagoService {
         : null,
       terminals: terminals.map(toView),
     };
+  }
+
+  /**
+   * Completa el correo/apodo de una conexión antigua.
+   *
+   * Se ejecuta solo cuando faltan ambos datos y la conexión está activa. Si
+   * Mercado Pago falla, el error no rompe Configuración: se reintenta en la
+   * siguiente carga.
+   */
+  private async ensureAccountIdentity(
+    organizationId: string,
+    connection: MercadoPagoConnection,
+  ): Promise<void> {
+    if (
+      connection.mpEmail ||
+      connection.mpNickname ||
+      connection.status !== 'ACTIVE'
+    ) {
+      return;
+    }
+
+    try {
+      const accessToken = await this.tokens.getAccessToken(organizationId);
+      const account = await this.client.getUser(accessToken);
+      const mpEmail = account.email?.trim() || null;
+      const mpNickname = account.nickname?.trim() || null;
+
+      if (!mpEmail && !mpNickname) return;
+
+      await this.prisma.mercadoPagoConnection.update({
+        where: { organizationId },
+        data: { mpEmail, mpNickname },
+      });
+
+      connection.mpEmail = mpEmail;
+      connection.mpNickname = mpNickname;
+    } catch (error) {
+      this.logger.warn(
+        `No se pudo leer la identidad de Mercado Pago (org=${organizationId}): ${
+          (error as Error).message
+        }`,
+      );
+    }
   }
 
   authorizationUrl(state: string, codeChallenge?: string): string {
