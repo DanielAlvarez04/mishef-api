@@ -683,10 +683,12 @@ export class AuthService {
   }
 
   /**
-   * Abre una sesión de soporte de solo lectura en nombre de otro usuario.
+   * Abre una sesión de soporte en nombre de otro usuario.
    *
    * No toca las sesiones reales del usuario objetivo: crea una sesión
-   * efímera sin refresh token, marcada con `impersonatedById`.
+   * efímera sin refresh token, marcada con `impersonatedById`. El superadmin
+   * puede editar datos del negocio; credenciales, 2FA y suscripción quedan
+   * bloqueados por `ImpersonationWritePolicyInterceptor`.
    */
   async impersonate(
     actor: JwtUser,

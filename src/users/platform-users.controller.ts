@@ -41,7 +41,7 @@ export class PlatformUsersController {
   }
 
   @ApiOperation({
-    summary: 'Abrir una sesión de soporte de solo lectura como otro usuario',
+    summary: 'Abrir una sesión de soporte como otro usuario',
   })
   @Post(':userId/impersonate')
   impersonate(
