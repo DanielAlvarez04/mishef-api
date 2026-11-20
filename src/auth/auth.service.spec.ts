@@ -323,6 +323,41 @@ describe('AuthService', () => {
     );
   });
 
+  it('una pestaña con un refresh ya rotado no revoca las demás sesiones', async () => {
+    const { service, prisma, jwt } = createMocks();
+
+    jwt.verifyAsync.mockResolvedValue({
+      sub: 'user-1',
+      sid: 'session-1',
+      type: 'refresh',
+    });
+    prisma.authSession.findUnique.mockResolvedValue({
+      id: 'session-1',
+      userId: 'user-1',
+      refreshTokenHash: await hash('refresh-token'),
+      revokedAt: new Date(Date.now() - 10 * 60_000),
+      revokedReason: 'ROTATED',
+      replacedBySessionId: 'session-2',
+      expiresAt: new Date(Date.now() + 60_000),
+      absoluteExpiresAt: new Date(Date.now() + 120_000),
+    });
+
+    try {
+      await service.refresh('refresh-token');
+      throw new Error('Debió rechazar el refresh');
+    } catch (error) {
+      expect((error as UnauthorizedException).getResponse()).toMatchObject({
+        code: 'SESSION_ROTATED',
+      });
+    }
+
+    expect(prisma.authSession.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ revokedReason: 'REUSE_DETECTED' }),
+      }),
+    );
+  });
+
   it('no permite dos rotaciones concurrentes del mismo refresh', async () => {
     const { service, prisma, jwt } = createMocks();
 

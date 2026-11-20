@@ -29,7 +29,9 @@ export class OriginGuard implements CanActivate {
     }
 
     const usesCookies = Boolean(
-      request.cookies?.np_at || request.cookies?.np_rt,
+      request.cookies?.np_at ||
+        request.cookies?.np_rt ||
+        request.cookies?.np_imp,
     );
 
     if (!usesCookies || request.get('authorization')) {

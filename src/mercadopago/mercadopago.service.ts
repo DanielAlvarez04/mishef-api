@@ -12,12 +12,16 @@ import { MercadoPagoTokenService } from './mercadopago-token.service';
 import { UpdateMercadoPagoTerminalDto } from './dto/update-terminal.dto';
 import { MercadoPagoApiError } from './mercadopago.types';
 
+/** Frecuencia mínima de la sincronización automática de terminales. */
+const TERMINALS_SYNC_TTL_MS = 60_000;
+
 export interface MercadoPagoConnectionView {
   mpUserId: string;
   status: string;
   expiresAt: Date;
   connectedAt: Date;
   lastRefreshedAt: Date | null;
+  terminalsSyncedAt: Date | null;
   needsReconnect: boolean;
 }
 
@@ -27,6 +31,10 @@ export interface MercadoPagoTerminalView {
   name: string | null;
   branchId: string | null;
   operatingMode: string | null;
+  model: string | null;
+  storeId: string | null;
+  posId: string | null;
+  externalPosId: string | null;
   isDefault: boolean;
   isActive: boolean;
   lastSyncedAt: Date | null;
@@ -50,6 +58,8 @@ export type CallbackResult =
 @Injectable()
 export class MercadoPagoService {
   private readonly logger = new Logger(MercadoPagoService.name);
+  /** Sincronizaciones en vuelo para no duplicar llamadas desde POS y Ajustes. */
+  private readonly terminalSyncs = new Map<string, Promise<void>>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -66,6 +76,9 @@ export class MercadoPagoService {
   }
 
   async getStatus(organizationId: string): Promise<MercadoPagoStatus> {
+    // Abrir Configuración también actualiza terminales recién vinculadas.
+    await this.syncTerminalsIfStale(organizationId);
+
     const [connection, terminals] = await Promise.all([
       this.prisma.mercadoPagoConnection.findUnique({
         where: { organizationId },
@@ -86,21 +99,13 @@ export class MercadoPagoService {
             expiresAt: connection.expiresAt,
             connectedAt: connection.connectedAt,
             lastRefreshedAt: connection.lastRefreshedAt,
+            terminalsSyncedAt: connection.terminalsSyncedAt,
             needsReconnect:
               connection.status !== 'ACTIVE' ||
               connection.expiresAt.getTime() <= Date.now(),
           }
         : null,
-      terminals: terminals.map((terminal) => ({
-        id: terminal.id,
-        terminalId: terminal.terminalId,
-        name: terminal.name,
-        branchId: terminal.branchId,
-        operatingMode: terminal.operatingMode,
-        isDefault: terminal.isDefault,
-        isActive: terminal.isActive,
-        lastSyncedAt: terminal.lastSyncedAt,
-      })),
+      terminals: terminals.map(toView),
     };
   }
 
@@ -213,21 +218,72 @@ export class MercadoPagoService {
       orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
     });
 
-    return terminals.map((terminal) => ({
-      id: terminal.id,
-      terminalId: terminal.terminalId,
-      name: terminal.name,
-      branchId: terminal.branchId,
-      operatingMode: terminal.operatingMode,
-      isDefault: terminal.isDefault,
-      isActive: terminal.isActive,
-      lastSyncedAt: terminal.lastSyncedAt,
-    }));
+    return terminals.map(toView);
   }
 
-  async syncTerminals(organizationId: string): Promise<void> {
+  /**
+   * Sincroniza terminales como máximo una vez por minuto.
+   *
+   * La usa el POS y Configuración para descubrir terminales vinculadas después
+   * del OAuth sin obligar al usuario a pulsar “Actualizar terminales”. Es
+   * best-effort: si Mercado Pago falla, se conserva la copia local.
+   */
+  async syncTerminalsIfStale(organizationId: string): Promise<void> {
+    const connection = await this.prisma.mercadoPagoConnection.findUnique({
+      where: { organizationId },
+      select: {
+        status: true,
+        expiresAt: true,
+        terminalsSyncedAt: true,
+      },
+    });
+
+    if (
+      !connection ||
+      connection.status !== 'ACTIVE' ||
+      connection.expiresAt.getTime() <= Date.now()
+    ) {
+      return;
+    }
+
+    const last = connection.terminalsSyncedAt?.getTime() ?? 0;
+
+    if (Date.now() - last < TERMINALS_SYNC_TTL_MS) return;
+
+    const inFlight = this.terminalSyncs.get(organizationId);
+    if (inFlight) return inFlight;
+
+    const sync = this.syncTerminals(organizationId, { fast: true })
+      .catch((error) => {
+        this.logger.warn(
+          `No se pudieron sincronizar terminales (org=${organizationId}): ${
+            (error as Error).message
+          }`,
+        );
+      })
+      .finally(() => {
+        this.terminalSyncs.delete(organizationId);
+      });
+
+    this.terminalSyncs.set(organizationId, sync);
+    return sync;
+  }
+
+  async syncTerminals(
+    organizationId: string,
+    options: { fast?: boolean } = {},
+  ): Promise<void> {
+    // Marca el intento antes de llamar a Mercado Pago: si la API está caída,
+    // no reintentamos en cada carga de página.
+    await this.prisma.mercadoPagoConnection
+      .update({
+        where: { organizationId },
+        data: { terminalsSyncedAt: new Date() },
+      })
+      .catch(() => undefined);
+
     const accessToken = await this.tokens.getAccessToken(organizationId);
-    const remote = await this.client.listTerminals(accessToken);
+    const remote = await this.client.listTerminals(accessToken, options);
     const now = new Date();
     const seen: string[] = [];
 
@@ -249,11 +305,29 @@ export class MercadoPagoService {
           terminalId,
           name: terminal.name ?? null,
           operatingMode: terminal.operating_mode ?? null,
+          storeId:
+            terminal.store_id === undefined || terminal.store_id === null
+              ? null
+              : String(terminal.store_id),
+          posId:
+            terminal.pos_id === undefined || terminal.pos_id === null
+              ? null
+              : String(terminal.pos_id),
+          externalPosId: terminal.external_pos_id ?? null,
           lastSyncedAt: now,
         },
         update: {
           name: terminal.name ?? null,
           operatingMode: terminal.operating_mode ?? null,
+          storeId:
+            terminal.store_id === undefined || terminal.store_id === null
+              ? null
+              : String(terminal.store_id),
+          posId:
+            terminal.pos_id === undefined || terminal.pos_id === null
+              ? null
+              : String(terminal.pos_id),
+          externalPosId: terminal.external_pos_id ?? null,
           lastSyncedAt: now,
           isActive: true,
         },
@@ -299,12 +373,17 @@ export class MercadoPagoService {
 
     const changes: {
       branchId?: string | null;
+      model?: string | null;
       isDefault?: boolean;
       isActive?: boolean;
     } = {};
 
     if (branchId !== undefined && branchId !== terminal.branchId) {
       changes.branchId = branchId;
+    }
+
+    if (dto.model !== undefined && dto.model !== terminal.model) {
+      changes.model = dto.model;
     }
 
     if (
@@ -428,6 +507,10 @@ function toView(terminal: {
   name: string | null;
   branchId: string | null;
   operatingMode: string | null;
+  model: string | null;
+  storeId: string | null;
+  posId: string | null;
+  externalPosId: string | null;
   isDefault: boolean;
   isActive: boolean;
   lastSyncedAt: Date | null;
@@ -438,6 +521,10 @@ function toView(terminal: {
     name: terminal.name,
     branchId: terminal.branchId,
     operatingMode: terminal.operatingMode,
+    model: terminal.model,
+    storeId: terminal.storeId,
+    posId: terminal.posId,
+    externalPosId: terminal.externalPosId,
     isDefault: terminal.isDefault,
     isActive: terminal.isActive,
     lastSyncedAt: terminal.lastSyncedAt,

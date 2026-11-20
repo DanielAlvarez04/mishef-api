@@ -34,6 +34,10 @@ interface RequestOptions {
   body?: unknown;
   query?: Query;
   idempotencyKey?: string;
+  /** Tiempo máximo por intento; se usa en sincronizaciones en segundo plano. */
+  timeoutMs?: number;
+  /** Número máximo de intentos; 1 evita bloquear una carga de página. */
+  attempts?: number;
 }
 
 /**
@@ -161,12 +165,18 @@ export class MercadoPagoClient {
     return this.request<MpUser>('/users/me', { accessToken });
   }
 
-  async listTerminals(accessToken: string): Promise<MpTerminal[]> {
+  async listTerminals(
+    accessToken: string,
+    options: { fast?: boolean } = {},
+  ): Promise<MpTerminal[]> {
     const response = await this.request<
       MpTerminalsResponse | MpTerminal[]
     >('/terminals/v1/list', {
       accessToken,
       query: { limit: 50 },
+      // La sincronización automática no debe retrasar la carga del POS.
+      timeoutMs: options.fast ? 3_000 : undefined,
+      attempts: options.fast ? 1 : undefined,
     });
 
     if (Array.isArray(response)) {
@@ -327,7 +337,9 @@ export class MercadoPagoClient {
             options.body === undefined
               ? undefined
               : JSON.stringify(options.body),
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          signal: AbortSignal.timeout(
+            options.timeoutMs ?? REQUEST_TIMEOUT_MS,
+          ),
         });
       } catch (error) {
         throw new MercadoPagoTransportError(
@@ -371,7 +383,7 @@ export class MercadoPagoClient {
 
     try {
       return await retry(execute, {
-        attempts: canRetry ? MAX_ATTEMPTS : 1,
+        attempts: canRetry ? (options.attempts ?? MAX_ATTEMPTS) : 1,
         shouldRetry: (error) =>
           error instanceof MercadoPagoTransportError ||
           error instanceof HttpRetrySignal,

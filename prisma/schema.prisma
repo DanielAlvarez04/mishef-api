@@ -465,6 +465,8 @@ model AuthSession {
   revokedAt           DateTime?
   revokedReason       String? // "LOGOUT", "ROTATED", "REUSE_DETECTED", "PASSWORD_CHANGED"
   replacedBySessionId String?
+  /// Usuario de plataforma que abrió esta sesión de soporte (solo lectura).
+  impersonatedById    String?
   userAgent           String?
   ip                  String?
   lastUsedAt          DateTime?
@@ -473,6 +475,7 @@ model AuthSession {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, revokedAt])
+  @@index([impersonatedById])
   @@index([expiresAt])
 }
 
@@ -1668,6 +1671,8 @@ model MercadoPagoConnection {
   connectedById   String?
   connectedAt     DateTime @default(now())
   lastRefreshedAt DateTime?
+  /// Último intento de sincronización de terminales con Mercado Pago.
+  terminalsSyncedAt DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -1683,6 +1688,14 @@ model MercadoPagoTerminal {
   name           String?
   /// PDV | STANDALONE | SELF_SERVICE
   operatingMode  String?
+  /// SMART_1 | SMART_2 | AIR_2. Se elige en la app; la API no expone el modelo.
+  model          String?
+  /// Sucursal de Mercado Pago (`store_id`).
+  storeId        String?
+  /// Caja de Mercado Pago (`pos_id`).
+  posId          String?
+  /// Identificador externo de la caja (`external_pos_id`).
+  externalPosId  String?
   isDefault      Boolean   @default(false)
   isActive       Boolean   @default(true)
   lastSyncedAt   DateTime?

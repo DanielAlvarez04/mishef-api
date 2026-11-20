@@ -1,4 +1,12 @@
-import { IsBoolean, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  IsBoolean,
+  IsIn,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from 'class-validator';
+
+import { POINT_TERMINAL_MODELS } from '../point-terminal';
 
 /** Actualización parcial de una terminal (solo los campos enviados). */
 export class UpdateMercadoPagoTerminalDto {
@@ -7,6 +15,11 @@ export class UpdateMercadoPagoTerminalDto {
   @IsString()
   @MaxLength(40)
   branchId?: string | null;
+
+  /** Modelo físico; permite saber si captura propina. */
+  @IsOptional()
+  @IsIn(POINT_TERMINAL_MODELS)
+  model?: (typeof POINT_TERMINAL_MODELS)[number] | null;
 
   @IsOptional()
   @IsBoolean()

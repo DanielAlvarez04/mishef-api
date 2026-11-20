@@ -29,6 +29,7 @@ import { PublicModule } from './public/public.module';
 import { StorageModule } from './storage/storage.module';
 import { BillingModule } from './billing/billing.module';
 import { BillingAccessInterceptor } from './billing/billing-access.interceptor';
+import { ImpersonationReadOnlyInterceptor } from './auth/impersonation-read-only.interceptor';
 import { FiscalModule } from './fiscal/fiscal.module';
 import { MediaModule } from './media/media.module';
 
@@ -85,6 +86,10 @@ import { MediaModule } from './media/media.module';
     {
       provide: APP_INTERCEPTOR,
       useClass: BillingAccessInterceptor,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: ImpersonationReadOnlyInterceptor,
     },
   ],
 })

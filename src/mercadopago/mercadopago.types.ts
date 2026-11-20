@@ -26,6 +26,7 @@ export interface MpTerminal {
   operating_mode?: string;
   pos_id?: number | string;
   store_id?: number | string;
+  external_pos_id?: string;
   [key: string]: unknown;
 }
 

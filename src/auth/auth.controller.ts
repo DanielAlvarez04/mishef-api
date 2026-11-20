@@ -300,7 +300,24 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @Get('me')
   me(@CurrentUser() user: JwtUser) {
-    return this.auth.me(user.sub);
+    return this.auth.me(
+      user.sub,
+      user.impersonatedById
+        ? {
+            byId: user.impersonatedById,
+            byName: user.impersonatedByName ?? null,
+          }
+        : undefined,
+      user.organizationId,
+    );
+  }
+
+  @ApiOperation({ summary: 'Salir de la impersonación de soporte' })
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @Post('impersonation/end')
+  endImpersonation(@CurrentUser() user: JwtUser) {
+    return this.auth.endImpersonation(user);
   }
 
   @ApiOperation({ summary: 'Actualizar nombre y usuario de la cuenta' })

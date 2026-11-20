@@ -4,7 +4,9 @@ import {
   Optional,
   UnauthorizedException,
   ConflictException,
+  ForbiddenException,
   Logger,
+  NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { hash, verify } from 'argon2';
@@ -47,6 +49,10 @@ export interface JwtUser {
   branchId?: string | null;
   /** Acceso al panel interno de la plataforma. */
   isPlatformAdmin?: boolean;
+  /** Usuario de plataforma que abrió esta sesión de soporte. */
+  impersonatedById?: string | null;
+  /** Nombre visible del actor, para el banner de soporte. */
+  impersonatedByName?: string | null;
 }
 
 export interface RefreshPayload {
@@ -107,6 +113,8 @@ function sanitizeBusinessName(value?: string): string | null {
 }
 
 const ACCESS_TOKEN_TTL = '15m';
+/** La impersonación es corta y no se renueva. */
+const IMPERSONATION_TTL_MS = 30 * 60 * 1000; // 30 minutos
 const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 días
 const SESSION_ABSOLUTE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 días
 const EMAIL_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 horas
@@ -115,29 +123,23 @@ const TWO_FACTOR_TTL_MS = 10 * 60 * 1000; // 10 minutos
 const TWO_FACTOR_MAX_ATTEMPTS = 5;
 
 /**
- * Margen para aceptar un refresh token recién rotado sin tratarlo como ataque.
+ * Una sesión rotada conserva el id de la sesión que la reemplazó.
  *
- * Dos pestañas (o una navegación y una Server Action) pueden renovar a la vez.
- * La perdedora recibe este error y el cliente reintenta con las cookies nuevas,
- * en lugar de cerrar todas las sesiones del usuario.
+ * Si una pestaña suspendida vuelve con el refresh viejo, no se revocan las
+ * demás sesiones: solo esa petición pierde la carrera. La pestaña puede
+ * recuperarse al recargar con las cookies compartidas del navegador.
  */
-const REFRESH_ROTATION_GRACE_MS = 60 * 1000;
-
 interface RotatableSession {
   revokedAt: Date | null;
   revokedReason: string | null;
   replacedBySessionId: string | null;
 }
 
-function isRecentRotation(
-  session: RotatableSession,
-  now: Date,
-): boolean {
+function isRotatedSession(session: RotatableSession): boolean {
   return Boolean(
     session.revokedAt &&
       session.revokedReason === 'ROTATED' &&
-      session.replacedBySessionId &&
-      now.getTime() - session.revokedAt.getTime() < REFRESH_ROTATION_GRACE_MS,
+      session.replacedBySessionId,
   );
 }
 
@@ -596,14 +598,13 @@ export class AuthService {
 
     const now = new Date();
     if (session.revokedAt) {
-      // Varias pestañas o peticiones en paralelo pueden intentar renovar con el
-      // mismo refresh token. Si la rotación es reciente no es un ataque: se
-      // rechaza esta petición sin cerrar el resto de sesiones del usuario.
-      if (isRecentRotation(session, now)) {
+      // Una pestaña suspendida o una petición en paralelo puede volver con el
+      // refresh anterior. No se cierran las demás sesiones del usuario.
+      if (isRotatedSession(session)) {
         throw rotatedException();
       }
 
-      // Un token ya rotado o cerrado se está reutilizando: se revoca la sesión completa.
+      // Un token ya cerrado (logout, revocación) se está reutilizando.
       await this.revokeAllSessions(session.userId, 'REUSE_DETECTED');
       throw new UnauthorizedException('Sesión revocada');
     }
@@ -654,7 +655,7 @@ export class AuthService {
         },
       });
 
-      if (current && isRecentRotation(current, now)) {
+      if (current && isRotatedSession(current)) {
         throw rotatedException();
       }
 
@@ -681,22 +682,205 @@ export class AuthService {
     };
   }
 
-  async me(userId: string) {
-    const user = await this.prisma.user.findUnique({
+  /**
+   * Abre una sesión de soporte de solo lectura en nombre de otro usuario.
+   *
+   * No toca las sesiones reales del usuario objetivo: crea una sesión
+   * efímera sin refresh token, marcada con `impersonatedById`.
+   */
+  async impersonate(
+    actor: JwtUser,
+    targetUserId: string,
+    organizationId: string,
+    meta: SessionMeta = {},
+  ) {
+    if (!actor.isPlatformAdmin) {
+      throw new ForbiddenException('Solo el equipo de Mishef puede impersonar');
+    }
+
+    if (!targetUserId || !organizationId) {
+      throw new BadRequestException('Falta el usuario o el negocio');
+    }
+
+    if (targetUserId === actor.sub) {
+      throw new BadRequestException('No puedes impersonarte a ti mismo');
+    }
+
+    const actorUser = await this.prisma.user.findUnique({
+      where: { id: actor.sub },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        isActive: true,
+        isPlatformAdmin: true,
+      },
+    });
+
+    if (!actorUser?.isActive || !actorUser.isPlatformAdmin) {
+      throw new ForbiddenException('Tu cuenta ya no puede impersonar');
+    }
+
+    const target = await this.prisma.user.findUnique({
+      where: { id: targetUserId },
+      include: {
+        memberships: {
+          where: {
+            organizationId,
+            isActive: true,
+            organization: { isActive: true },
+          },
+          include: { organization: { select: { id: true, name: true } } },
+        },
+      },
+    });
+
+    if (!target || !target.isActive) {
+      throw new NotFoundException('Usuario no encontrado');
+    }
+
+    if (target.isPlatformAdmin) {
+      throw new ForbiddenException(
+        'No se puede impersonar a una cuenta de plataforma',
+      );
+    }
+
+    const membership = target.memberships[0];
+
+    if (!membership?.organizationId || !membership.organization) {
+      throw new BadRequestException(
+        'El usuario no tiene una membresía activa en ese negocio',
+      );
+    }
+
+    const sessionId = randomUUID();
+    const now = Date.now();
+    const expiresAt = new Date(now + IMPERSONATION_TTL_MS);
+    const actorName =
+      actorUser.name?.trim() || actorUser.email || 'Soporte Mishef';
+
+    const accessToken = await this.jwt.signAsync(
+      {
+        sub: target.id,
+        email: target.email,
+        roles: membership.roles,
+        organizationId: membership.organizationId,
+        sid: sessionId,
+        impersonatedById: actorUser.id,
+        impersonatedByName: actorName,
+      } satisfies JwtUser,
+      {
+        secret: this.config.get('JWT_ACCESS_SECRET'),
+        expiresIn: '30m',
+      },
+    );
+
+    await this.prisma.authSession.create({
+      data: {
+        id: sessionId,
+        userId: target.id,
+        // No hay refresh: la sesión se cierra sola o al salir de soporte.
+        refreshTokenHash: `impersonation:${sessionId}`,
+        expiresAt,
+        absoluteExpiresAt: expiresAt,
+        userAgent: meta.userAgent,
+        ip: meta.ip,
+        impersonatedById: actorUser.id,
+      },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        organizationId: membership.organizationId,
+        userId: actorUser.id,
+        action: 'platform.impersonate.start',
+        entity: 'User',
+        entityId: target.id,
+        newValues: {
+          organizationId: membership.organizationId,
+          organizationName: membership.organization.name,
+          expiresAt: expiresAt.toISOString(),
+        },
+      },
+    });
+
+    return {
+      accessToken,
+      expiresAt,
+      user: {
+        id: target.id,
+        name: target.name,
+        email: target.email,
+        organizationName: membership.organization.name,
+      },
+      actor: {
+        id: actorUser.id,
+        name: actorName,
+      },
+    };
+  }
+
+  /** Revoca la sesión de soporte actual y deja auditoría del cierre. */
+  async endImpersonation(user: JwtUser) {
+    if (!user.impersonatedById) {
+      throw new BadRequestException('No hay una impersonación activa');
+    }
+
+    const revoked = await this.prisma.authSession.updateMany({
+      where: {
+        id: user.sid,
+        userId: user.sub,
+        impersonatedById: user.impersonatedById,
+        revokedAt: null,
+      },
+      data: {
+        revokedAt: new Date(),
+        revokedReason: 'IMPERSONATION_END',
+      },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        organizationId: user.organizationId,
+        userId: user.impersonatedById,
+        action: 'platform.impersonate.end',
+        entity: 'User',
+        entityId: user.sub,
+        newValues: {
+          sessionId: user.sid,
+          revoked: revoked.count,
+        },
+      },
+    });
+
+    return { ok: true };
+  }
+
+  async me(
+    userId: string,
+    impersonation?: { byId: string; byName: string | null },
+    organizationId?: string | null,
+  ) {
+    const found = await this.prisma.user.findUnique({
       where: { id: userId },
       include: {
         memberships: {
-          where: { isActive: true, organization: { isActive: true } },
+          where: {
+            isActive: true,
+            organization: { isActive: true },
+            // La sesión (normal o de soporte) fija el negocio activo.
+            ...(organizationId ? { organizationId } : {}),
+          },
           include: { organization: true },
         },
       },
     });
 
-    if (!user || !user.isActive) {
+    if (!found || !found.isActive) {
       throw new UnauthorizedException('Usuario no encontrado');
     }
 
-    const membership = user.memberships[0];
+    const membership = found.memberships[0];
     // `storageBytes` es BigInt y JSON no lo serializa. La sesión no lo usa: el
     // consumo vive en `/organizations/current`, ya formateado.
     const { storageBytes: _storageBytes, ...organizationFields } =
@@ -712,20 +896,23 @@ export class AuthService {
       : null;
 
     return {
-      id: user.id,
-      email: user.email,
-      username: user.username,
-      name: user.name,
-      emailVerified: user.emailVerified,
-      twoFactorEnabled: user.twoFactorEnabled,
-      onboarded: Boolean(user.onboardedAt),
-      googleLinked: Boolean(user.googleId),
-      isPlatformAdmin: user.isPlatformAdmin,
+      id: found.id,
+      email: found.email,
+      username: found.username,
+      name: found.name,
+      emailVerified: found.emailVerified,
+      twoFactorEnabled: found.twoFactorEnabled,
+      onboarded: Boolean(found.onboardedAt),
+      googleLinked: Boolean(found.googleId),
+      isPlatformAdmin: found.isPlatformAdmin,
       roles: membership?.roles ?? [],
       organizationId: membership?.organizationId,
       organization,
       // Sucursal fija del miembro: si existe, no puede operar en el consolidado.
       branchId: membership?.branchId ?? null,
+      // El banner de soporte vive de estos dos campos; vienen del token de la
+      // sesión efímera, no de la cuenta objetivo.
+      impersonation: impersonation ?? null,
     };
   }
 

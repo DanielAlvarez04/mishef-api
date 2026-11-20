@@ -16,7 +16,12 @@ import {
 import { PaymentsService, type PaymentActor } from '../payments/payments.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { MercadoPagoClient } from './mercadopago.client';
+import { MercadoPagoService } from './mercadopago.service';
 import { MercadoPagoTokenService } from './mercadopago-token.service';
+import {
+  isPointPdvTerminal,
+  supportsPointTips,
+} from './point-terminal';
 import {
   MercadoPagoApiError,
   MpOrder,
@@ -38,6 +43,10 @@ export interface PointConfig {
     name: string | null;
     branchId: string | null;
     isDefault: boolean;
+    model: string | null;
+    operatingMode: string | null;
+    /** `null` = modelo sin configurar; no se puede prometer propina. */
+    supportsTips: boolean | null;
   }>;
 }
 
@@ -55,6 +64,7 @@ export class MercadoPagoPointService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly client: MercadoPagoClient,
+    private readonly mercadoPago: MercadoPagoService,
     private readonly tokens: MercadoPagoTokenService,
     private readonly payments: PaymentsService,
     private readonly config: ConfigService,
@@ -74,13 +84,20 @@ export class MercadoPagoPointService {
       return { enabled: false, linkEnabled: false, terminals: [] };
     }
 
+    // Descubre terminales vinculadas después de la conexión sin exigir que el
+    // cajero entre a Configuración. La sincronización está limitada por tiempo
+    // y nunca bloquea más de 3 s.
+    await this.mercadoPago.syncTerminalsIfStale(organizationId);
+
     const terminals = await this.prisma.mercadoPagoTerminal.findMany({
       where: { organizationId, isActive: true },
       orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
     });
 
-    const usable = terminals.filter(
-      (terminal) => terminal.operatingMode !== 'SELF_SERVICE',
+    // Solo PDV puede recibir orders del POS. Air 2 se descarta aunque una
+    // configuración manual la haya dejado en PDV: su modo real es autoservicio.
+    const usable = terminals.filter((terminal) =>
+      isPointPdvTerminal(terminal.operatingMode, terminal.model),
     );
 
     return {
@@ -91,6 +108,9 @@ export class MercadoPagoPointService {
         name: terminal.name,
         branchId: terminal.branchId,
         isDefault: terminal.isDefault,
+        model: terminal.model,
+        operatingMode: terminal.operatingMode,
+        supportsTips: supportsPointTips(terminal.model),
       })),
     };
   }
@@ -548,13 +568,13 @@ export class MercadoPagoPointService {
       orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
     });
 
-    const usable = terminals.filter(
-      (terminal) => terminal.operatingMode !== 'SELF_SERVICE',
+    const usable = terminals.filter((terminal) =>
+      isPointPdvTerminal(terminal.operatingMode, terminal.model),
     );
 
     if (usable.length === 0) {
       throw new BadRequestException(
-        'No hay una terminal Point disponible. Configúrala en Configuración → Pagos.',
+        'No hay una terminal Point en modo PDV. Actívala en Configuración → Pagos y reinicia la terminal.',
       );
     }
 

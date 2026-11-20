@@ -7,9 +7,23 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { JwtUser } from '../auth.service';
 
 const ACCESS_TOKEN_COOKIE = 'np_at';
+/**
+ * Cookie de la sesión de soporte. Tiene prioridad sobre `np_at` para que el
+ * superadmin vea la app como el usuario objetivo sin tocar su propia sesión ni
+ * la del usuario.
+ */
+const IMPERSONATION_COOKIE = 'np_imp';
 
 /** El frontend usa cookies httpOnly; se acepta también `Authorization: Bearer` para Swagger. */
 function fromCookieOrHeader(req: Request): string | null {
+  const impersonationToken = req?.cookies?.[IMPERSONATION_COOKIE];
+  if (
+    typeof impersonationToken === 'string' &&
+    impersonationToken.length > 0
+  ) {
+    return impersonationToken;
+  }
+
   const cookieToken = req?.cookies?.[ACCESS_TOKEN_COOKIE];
   if (typeof cookieToken === 'string' && cookieToken.length > 0) {
     return cookieToken;
@@ -93,7 +107,15 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       organizationId: membership.organizationId,
       sid: session.id,
       branchId: membership.branchId,
-      isPlatformAdmin: session.user.isPlatformAdmin,
+      // Una sesión de soporte nunca hereda privilegios de plataforma, ni
+      // siquiera si el usuario objetivo también fuera platform admin.
+      isPlatformAdmin: session.impersonatedById
+        ? false
+        : session.user.isPlatformAdmin,
+      impersonatedById: session.impersonatedById ?? null,
+      impersonatedByName: session.impersonatedById
+        ? (payload.impersonatedByName ?? null)
+        : null,
     };
   }
 }
