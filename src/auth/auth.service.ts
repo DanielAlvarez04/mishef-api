@@ -113,6 +113,7 @@ export type GoogleLoginResult =
         | 'no_membership'
         | 'mismatch'
         | 'unverified_email'
+        | 'not_linked'
         | 'subdomain_required';
     };
 
@@ -232,7 +233,12 @@ export class AuthService {
 
     // En el dominio principal solo entra el dueño del negocio (o el equipo de
     // plataforma). El resto debe usar el subdominio de su negocio.
-    if (!tenant && !membership.isOwner && !membership.user.isPlatformAdmin) {
+    if (
+      !tenant &&
+      !membership.isOwner &&
+      !membership.roles.includes(Role.ADMIN) &&
+      !membership.user.isPlatformAdmin
+    ) {
       throw new UnauthorizedException(
         'Entra por el subdominio de tu negocio para iniciar sesión',
       );
@@ -331,10 +337,15 @@ export class AuthService {
       },
       include: { user: true, organization: true },
       orderBy: [{ isOwner: 'desc' }, { createdAt: 'asc' }],
-      take: 2,
+      take: 10,
     });
 
-    return memberships[0] ?? null;
+    return (
+      memberships.find((item) => item.isOwner) ??
+      memberships.find((item) => item.roles.includes(Role.ADMIN)) ??
+      memberships[0] ??
+      null
+    );
   }
 
   /**
@@ -516,9 +527,10 @@ export class AuthService {
   async loginWithGoogle(
     profile: GoogleProfile,
     meta: SessionMeta = {},
-    options: { businessName?: string } = {},
+    options: { businessName?: string; tenant?: string } = {},
   ): Promise<GoogleLoginResult> {
     const email = profile.email.trim().toLowerCase();
+    const tenant = options.tenant ? normalizeSlug(options.tenant) : null;
 
     if (!profile.emailVerified) {
       return { kind: 'error', reason: 'unverified_email' };
@@ -529,7 +541,7 @@ export class AuthService {
       include: googleUserInclude,
     });
 
-    if (!user) {
+    if (!user && !tenant) {
       user = await this.prisma.user.findUnique({
         where: { email },
         include: googleUserInclude,
@@ -537,6 +549,11 @@ export class AuthService {
     }
 
     if (!user) {
+      // En un subdominio solo se permite una cuenta de Google ya vinculada.
+      if (tenant) {
+        return { kind: 'error', reason: 'not_linked' };
+      }
+
       return this.registerWithGoogle(profile, email, meta, options.businessName);
     }
 
@@ -548,14 +565,25 @@ export class AuthService {
       return { kind: 'error', reason: 'mismatch' };
     }
 
-    const membership =
-      user.memberships.find((item) => item.isOwner) ?? user.memberships[0];
+    const membership = tenant
+      ? user.memberships.find(
+          (item) => item.organization?.slug === tenant,
+        ) ?? null
+      : user.memberships.find((item) => item.isOwner) ??
+        user.memberships.find((item) => item.roles.includes(Role.ADMIN)) ??
+        user.memberships[0];
+
     if (!membership) {
       return { kind: 'error', reason: 'no_membership' };
     }
 
-    // Google se usa desde el dominio principal: solo dueños y plataforma.
-    if (!membership.isOwner && !user.isPlatformAdmin) {
+    // En el dominio principal solo entran dueños, ADMIN o plataforma.
+    if (
+      !tenant &&
+      !membership.isOwner &&
+      !membership.roles.includes(Role.ADMIN) &&
+      !user.isPlatformAdmin
+    ) {
       return { kind: 'error', reason: 'subdomain_required' };
     }
 
@@ -567,7 +595,11 @@ export class AuthService {
       });
     }
 
-    if (!user.emailVerified) {
+    // El correo de Google solo verifica la cuenta si es el mismo correo.
+    if (
+      !user.emailVerified &&
+      user.email?.toLowerCase() === email
+    ) {
       await this.prisma.user.update({
         where: { id: user.id },
         data: { emailVerified: true },
@@ -1815,13 +1847,20 @@ export class AuthService {
 
     const membership = organizationId
       ? user.memberships.find((item) => item.organizationId === organizationId)
-      : user.memberships.find((item) => item.isOwner) ?? user.memberships[0];
+      : user.memberships.find((item) => item.isOwner) ??
+        user.memberships.find((item) => item.roles.includes(Role.ADMIN)) ??
+        user.memberships[0];
 
     if (!membership) {
       throw new UnauthorizedException('Usuario sin membresía activa');
     }
 
-    if (!organizationId && !membership.isOwner && !user.isPlatformAdmin) {
+    if (
+      !organizationId &&
+      !membership.isOwner &&
+      !membership.roles.includes(Role.ADMIN) &&
+      !user.isPlatformAdmin
+    ) {
       throw new UnauthorizedException(
         'Entra por el subdominio de tu negocio para iniciar sesión',
       );

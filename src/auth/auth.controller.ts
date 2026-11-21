@@ -37,6 +37,7 @@ import { JwtUser } from './auth.service';
 import { ConfigService } from '@nestjs/config';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { permissionsForRoles } from '../common/permissions';
+import { isValidSlug, normalizeSlug } from '../common/slug';
 import { TurnstileService } from '../common/turnstile.service';
 
 const ACCESS_TOKEN_COOKIE = 'np_at';
@@ -45,6 +46,7 @@ const OAUTH_STATE_COOKIE = 'np_oauth_state';
 const OAUTH_VERIFIER_COOKIE = 'np_oauth_verifier';
 const OAUTH_LINK_COOKIE = 'np_oauth_link';
 const OAUTH_BUSINESS_COOKIE = 'np_oauth_business';
+const OAUTH_TENANT_COOKIE = 'np_oauth_tenant';
 const OAUTH_COOKIE_PATH = '/v1/auth/google';
 
 @ApiTags('auth')
@@ -83,6 +85,7 @@ export class AuthController {
   startGoogleLogin(
     @Res() res: Response,
     @Query('business') business?: string,
+    @Query('tenant') tenant?: string,
   ) {
     if (!this.google.isConfigured) {
       throw new ServiceUnavailableException(
@@ -100,6 +103,16 @@ export class AuthController {
       res.cookie(
         OAUTH_BUSINESS_COOKIE,
         businessName.slice(0, 80),
+        this.oauthCookieOptions(),
+      );
+    }
+
+    const tenantSlug = tenant ? normalizeSlug(tenant) : '';
+
+    if (tenantSlug && isValidSlug(tenantSlug)) {
+      res.cookie(
+        OAUTH_TENANT_COOKIE,
+        tenantSlug,
         this.oauthCookieOptions(),
       );
     }
@@ -143,14 +156,30 @@ export class AuthController {
     ).replace(/\/$/, '');
 
     const isLinkFlow = req.cookies?.[OAUTH_LINK_COOKIE] === '1';
+    const rawTenant = req.cookies?.[OAUTH_TENANT_COOKIE];
+    const tenant =
+      rawTenant && isValidSlug(normalizeSlug(rawTenant))
+        ? normalizeSlug(rawTenant)
+        : null;
+    const tenantDomain = (
+      this.config.get<string>('TENANT_DOMAIN') ?? 'mishef.co'
+    )
+      .trim()
+      .toLowerCase();
 
     this.clearOAuthCookies(res);
+
+    // El login de un subdominio vuelve a su propio host; el resto, al principal.
+    const redirectOrigin =
+      tenant && !isLinkFlow
+        ? `${new URL(webOrigin).protocol}//${tenant}.${tenantDomain}`
+        : webOrigin;
 
     const fail = (reason: string) =>
       res.redirect(
         isLinkFlow
           ? `${webOrigin}/settings?google=${encodeURIComponent(reason)}`
-          : `${webOrigin}/login?error=${encodeURIComponent(reason)}`,
+          : `${redirectOrigin}/login?error=${encodeURIComponent(reason)}`,
       );
 
     if (error) {
@@ -198,7 +227,10 @@ export class AuthController {
     const result = await this.auth.loginWithGoogle(
       profile,
       this.metaFrom(req),
-      { businessName: req.cookies?.[OAUTH_BUSINESS_COOKIE] },
+      {
+        businessName: req.cookies?.[OAUTH_BUSINESS_COOKIE],
+        tenant: tenant ?? undefined,
+      },
     );
 
     if (result.kind === 'error') {
@@ -213,13 +245,13 @@ export class AuthController {
         method: result.method ?? 'EMAIL',
       });
 
-      return res.redirect(`${webOrigin}/login?${params.toString()}`);
+      return res.redirect(`${redirectOrigin}/login?${params.toString()}`);
     }
 
     this.setAuthCookies(res, result.accessToken, result.refreshToken);
 
     return res.redirect(
-      `${webOrigin}${result.created ? '/onboarding' : '/dashboard'}`,
+      `${redirectOrigin}${result.created ? '/onboarding' : '/dashboard'}`,
     );
   }
 
@@ -523,6 +555,7 @@ export class AuthController {
     res.clearCookie(OAUTH_VERIFIER_COOKIE, { path: OAUTH_COOKIE_PATH });
     res.clearCookie(OAUTH_LINK_COOKIE, { path: OAUTH_COOKIE_PATH });
     res.clearCookie(OAUTH_BUSINESS_COOKIE, { path: OAUTH_COOKIE_PATH });
+    res.clearCookie(OAUTH_TENANT_COOKIE, { path: OAUTH_COOKIE_PATH });
   }
 
   private clearAuthCookies(res: Response) {

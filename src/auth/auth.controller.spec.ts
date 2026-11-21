@@ -115,6 +115,48 @@ describe('AuthController — Google OAuth', () => {
     );
   });
 
+  it('guarda el negocio cuando el login de Google viene de un subdominio', () => {
+    const { controller } = createController({});
+    const res = responseMock();
+
+    controller.startGoogleLogin(
+      res as unknown as Response,
+      undefined,
+      'naranja-pimienta',
+    );
+
+    expect(res.cookie).toHaveBeenCalledWith(
+      'np_oauth_tenant',
+      'naranja-pimienta',
+      expect.objectContaining({ httpOnly: true, path: '/v1/auth/google' }),
+    );
+  });
+
+  it('vuelve al subdominio y limita Google a cuentas vinculadas', async () => {
+    const { controller, auth } = createController({});
+    const res = responseMock();
+
+    await controller.googleCallback(
+      requestMock({
+        np_oauth_state: 'state-123',
+        np_oauth_verifier: 'verifier-456',
+        np_oauth_tenant: 'naranja-pimienta',
+      }),
+      res as unknown as Response,
+      'code',
+      'state-123',
+    );
+
+    expect(auth.loginWithGoogle).toHaveBeenCalledWith(
+      profile,
+      expect.anything(),
+      expect.objectContaining({ tenant: 'naranja-pimienta' }),
+    );
+    expect(res.redirect).toHaveBeenCalledWith(
+      'http://naranja-pimienta.mishef.co/dashboard',
+    );
+  });
+
   it('rechaza el callback si el state no coincide', async () => {
     const { controller } = createController({});
     const res = responseMock();

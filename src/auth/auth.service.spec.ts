@@ -230,6 +230,7 @@ describe('AuthService', () => {
         user,
         username: 'mesero',
         isOwner: false,
+        roles: ['WAITER'],
       }),
     ]);
 
@@ -241,6 +242,24 @@ describe('AuthService', () => {
     ).rejects.toMatchObject({
       message: expect.stringContaining('subdominio'),
     });
+  });
+
+  it('permite a un ADMIN no dueño entrar por el dominio principal', async () => {
+    const { service, prisma } = createMocks();
+    const user = await userFixture();
+    user.memberships[0].isOwner = false;
+    prisma.membership.findMany.mockResolvedValue([
+      await loginMembership({ user, isOwner: false }),
+    ]);
+    prisma.user.findUnique.mockResolvedValue(user);
+    prisma.user.update.mockResolvedValue({});
+
+    const result = await service.login({
+      identifier: 'admin@naranjapimienta.local',
+      password: 'Naranja123!',
+    });
+
+    expect(result).toHaveProperty('accessToken');
   });
 
   it('permite al dueño entrar por el dominio principal', async () => {
