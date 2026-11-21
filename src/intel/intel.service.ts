@@ -53,10 +53,10 @@ export class IntelService {
     return {
       enabled: organization.intelEnabled,
       configured: settings.configured,
-      provider: settings.provider,
-      model: settings.model,
-      fastModel: settings.fastModel,
-      visionModel: settings.visionModel,
+      models: settings.targets.map((target) => ({
+        provider: target.provider,
+        model: target.model,
+      })),
       monthlyTokenLimit: settings.monthlyTokenLimit,
       usage,
     };
@@ -204,7 +204,7 @@ export class IntelService {
 
     const settings = readIntelSettings();
 
-    if (!settings.configured || !settings.apiKey || !settings.model) {
+    if (!settings.configured || settings.targets.length === 0) {
       throw new ServiceUnavailableException(
         'Intel no está configurado en el servidor',
       );
@@ -300,43 +300,87 @@ export class IntelService {
     let tokensIn: number | undefined;
     let tokensOut: number | undefined;
     let errorMessage: string | null = null;
+    let usedModel: string | null = null;
+    let usedProvider: string | null = null;
 
     try {
-      for await (const event of this.client.streamChat({
-        baseUrl: settings.baseUrl,
-        apiKey: settings.apiKey,
-        model: settings.model,
-        messages,
-        signal: controller.signal,
-      })) {
-        if (event.type === 'delta') {
-          fullText += event.text;
-          this.writeEvent(res, 'delta', { text: event.text });
-        } else {
-          tokensIn = event.tokensIn ?? tokensIn;
-          tokensOut = event.tokensOut ?? tokensOut;
+      for (let index = 0; index < settings.targets.length; index += 1) {
+        const target = settings.targets[index];
+        const isLast = index === settings.targets.length - 1;
+
+        try {
+          for await (const event of this.client.streamChat({
+            baseUrl: target.baseUrl,
+            apiKey: target.apiKey,
+            model: target.model,
+            messages,
+            signal: controller.signal,
+          })) {
+            if (event.type === 'delta') {
+              fullText += event.text;
+              this.writeEvent(res, 'delta', { text: event.text });
+            } else {
+              tokensIn = event.tokensIn ?? tokensIn;
+              tokensOut = event.tokensOut ?? tokensOut;
+            }
+          }
+
+          usedModel = target.model;
+          usedProvider = target.provider;
+          break;
+        } catch (error) {
+          this.logger.warn(
+            `Intel: falló ${target.provider}/${target.model}: ${redactPii(
+              error instanceof Error ? error.message : 'error desconocido',
+            )}`,
+          );
+
+          if (controller.signal.aborted) {
+            errorMessage = 'La respuesta se canceló';
+            usedModel = fullText.length > 0 ? target.model : null;
+            usedProvider = fullText.length > 0 ? target.provider : null;
+            break;
+          }
+
+          if (fullText.length > 0) {
+            errorMessage = 'No se pudo completar la respuesta';
+            usedModel = target.model;
+            usedProvider = target.provider;
+            break;
+          }
+
+          if (isLast) {
+            errorMessage = 'No se pudo completar la respuesta';
+            break;
+          }
+
+          const next = settings.targets[index + 1];
+          this.writeEvent(res, 'fallback', {
+            from: target.model,
+            to: next.model,
+          });
         }
       }
-    } catch (error) {
-      errorMessage = controller.signal.aborted
-        ? 'La respuesta se canceló'
-        : 'No se pudo completar la respuesta';
 
-      this.logger.warn(
-        `Intel chat falló: ${redactPii(
-          error instanceof Error ? error.message : 'error desconocido',
-        )}`,
-      );
-      this.writeEvent(res, 'error', { message: errorMessage });
+      if (errorMessage) {
+        this.writeEvent(res, 'error', { message: errorMessage });
+      }
     } finally {
       clearInterval(heartbeat);
       req.off('close', onClose);
     }
 
     const latencyMs = Date.now() - startedAt;
-    const estimatedIn =
-      tokensIn ?? estimateTokens(messages.map((m) => m.content).join('\n'));
-    const estimatedOut = tokensOut ?? estimateTokens(fullText);
+    const hasOutput = fullText.length > 0;
+    const estimatedIn = hasOutput
+      ? (tokensIn ??
+        estimateTokens(messages.map((message) => message.content).join('\n')))
+      : 0;
+    const estimatedOut = hasOutput
+      ? (tokensOut ?? estimateTokens(fullText))
+      : 0;
+    const modelForUsage =
+      usedModel ?? settings.targets[0]?.model ?? 'unknown';
 
     const assistantMessage = await this.prisma.aiMessage.create({
       data: {
@@ -357,7 +401,7 @@ export class IntelService {
 
     await this.upsertUsage(
       organization.id,
-      settings.model,
+      modelForUsage,
       estimatedIn,
       estimatedOut,
     );
@@ -370,7 +414,8 @@ export class IntelService {
         entity: 'AiConversation',
         entityId: conversation.id,
         newValues: {
-          model: settings.model,
+          provider: usedProvider,
+          model: modelForUsage,
           tokensIn: estimatedIn,
           tokensOut: estimatedOut,
           latencyMs,
@@ -382,6 +427,8 @@ export class IntelService {
     this.writeEvent(res, 'done', {
       conversationId: conversation.id,
       messageId: assistantMessage.id,
+      provider: usedProvider,
+      model: usedModel,
       tokensIn: estimatedIn,
       tokensOut: estimatedOut,
       latencyMs,

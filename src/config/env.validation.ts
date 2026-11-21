@@ -76,33 +76,50 @@ export function validateEnv(
     }
   }
 
-  // Intel es opcional: si hay clave, debe haber modelo y una URL válida.
-  if (config.INTEL_API_KEY) {
-    if (!config.INTEL_MODEL) {
+  // Intel es opcional. Si se declara una clave o un modelo, la configuración
+  // debe ser coherente.
+  const hasIntelKey = Boolean(config.INTEL_API_KEY || config.INTEL_API_KEY_ENV);
+  const hasIntelModel = Boolean(config.INTEL_MODEL);
+  const hasIntelFallbackKey = Boolean(
+    config.INTEL_FALLBACK_API_KEY || config.INTEL_FALLBACK_API_KEY_ENV,
+  );
+  const hasIntelFallbackModel = Boolean(config.INTEL_FALLBACK_MODEL);
+
+  if (hasIntelKey && !hasIntelModel) {
+    throw new Error(
+      'INTEL_MODEL es obligatoria cuando hay una clave de Intel configurada',
+    );
+  }
+
+  if (hasIntelFallbackKey && !hasIntelFallbackModel) {
+    throw new Error(
+      'INTEL_FALLBACK_MODEL es obligatoria cuando hay una clave de respaldo',
+    );
+  }
+
+  for (const [name, value] of [
+    ['INTEL_BASE_URL', config.INTEL_BASE_URL],
+    ['INTEL_FALLBACK_BASE_URL', config.INTEL_FALLBACK_BASE_URL],
+  ] as const) {
+    if (!value) continue;
+
+    try {
+      new URL(String(value));
+    } catch {
+      throw new Error(`${name} debe ser una URL válida`);
+    }
+  }
+
+  if (
+    config.INTEL_MONTHLY_TOKEN_LIMIT !== undefined &&
+    config.INTEL_MONTHLY_TOKEN_LIMIT !== ''
+  ) {
+    const limit = Number(config.INTEL_MONTHLY_TOKEN_LIMIT);
+
+    if (!Number.isFinite(limit) || limit <= 0) {
       throw new Error(
-        'INTEL_MODEL es obligatoria cuando INTEL_API_KEY está configurada',
+        'INTEL_MONTHLY_TOKEN_LIMIT debe ser un número positivo',
       );
-    }
-
-    if (config.INTEL_BASE_URL) {
-      try {
-        new URL(String(config.INTEL_BASE_URL));
-      } catch {
-        throw new Error('INTEL_BASE_URL debe ser una URL válida');
-      }
-    }
-
-    if (
-      config.INTEL_MONTHLY_TOKEN_LIMIT !== undefined &&
-      config.INTEL_MONTHLY_TOKEN_LIMIT !== ''
-    ) {
-      const limit = Number(config.INTEL_MONTHLY_TOKEN_LIMIT);
-
-      if (!Number.isFinite(limit) || limit <= 0) {
-        throw new Error(
-          'INTEL_MONTHLY_TOKEN_LIMIT debe ser un número positivo',
-        );
-      }
     }
   }
 
