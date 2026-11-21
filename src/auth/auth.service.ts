@@ -1041,7 +1041,9 @@ export class AuthService {
             isActive: true,
             organization: { isActive: true },
           },
-          include: { organization: { select: { id: true, name: true } } },
+          include: {
+            organization: { select: { id: true, name: true, slug: true } },
+          },
         },
       },
     });
@@ -1123,6 +1125,7 @@ export class AuthService {
         name: target.name,
         email: target.email,
         organizationName: membership.organization.name,
+        organizationSlug: membership.organization.slug,
       },
       actor: {
         id: actorUser.id,
