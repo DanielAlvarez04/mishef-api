@@ -35,6 +35,8 @@ export const PERMISSIONS = {
   ],
   /** Costos y márgenes: ADMIN, CASHIER e INVENTORY_MANAGER. */
   'costs:read': ['ADMIN', 'CASHIER', 'INVENTORY_MANAGER'],
+  /** Copiloto y capa Intel. El supervisor se agrega cuando exista el rol. */
+  'intel:use': ['ADMIN', 'INVENTORY_MANAGER'],
   /** Checador: cualquier miembro activo puede marcar su entrada y salida. */
   'attendance:clock': [
     'ADMIN',

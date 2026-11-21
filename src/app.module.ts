@@ -34,6 +34,7 @@ import { PasswordChangeInterceptor } from './auth/password-change.interceptor';
 import { TenantScopeInterceptor } from './auth/tenant-scope.interceptor';
 import { FiscalModule } from './fiscal/fiscal.module';
 import { MediaModule } from './media/media.module';
+import { IntelModule } from './intel/intel.module';
 
 @Module({
   imports: [
@@ -69,6 +70,7 @@ import { MediaModule } from './media/media.module';
     BillingModule,
     MediaModule,
     FiscalModule,
+    IntelModule,
     HealthModule,
   ],
   controllers: [],

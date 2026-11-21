@@ -239,6 +239,8 @@ model Organization {
   latitude  Decimal? @db.Decimal(10, 7)
   longitude Decimal? @db.Decimal(10, 7)
   isActive  Boolean  @default(true)
+  /// Activa la capa Intel (IA) para este negocio.
+  intelEnabled Boolean @default(false)
   /// Modo práctica: no se registra analítica de operación mientras esté activo.
   practiceMode  Boolean   @default(false)
   /// Fin automático del modo práctica (48 h desde el alta). `null` = manual.
@@ -302,6 +304,15 @@ model Organization {
   optionGroups         OptionGroup[]
   menus                Menu[]
   mediaAssets          MediaAsset[]
+
+  // Intel (IA)
+  aiProviderConfig AiProviderConfig?
+  aiConversations  AiConversation[]
+  aiUsage          AiUsage[]
+  aiPendingActions AiPendingAction[]
+  aiRuns           AiRun[]
+  aiNotifications  AiNotification[]
+  aiDocuments      AiDocument[]
 
   mercadoPagoConnection MercadoPagoConnection?
   mercadoPagoTerminals  MercadoPagoTerminal[]
@@ -377,6 +388,7 @@ model User {
   attendanceEvents       AttendanceEvent[]
   scheduleEntries        ScheduleEntry[]
   wastes                 Waste[]
+  aiConversations        AiConversation[]
 
   @@index([isActive])
   @@index([username])
@@ -2307,5 +2319,225 @@ model SlugAlias {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@index([organizationId])
+}
+
+// ============================================================================
+// Intel (IA): proveedores, conversaciones, uso, acciones, jobs y documentos
+// ============================================================================
+
+enum AiMessageRole {
+  SYSTEM
+  USER
+  ASSISTANT
+  TOOL
+}
+
+enum AiActionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXECUTED
+  FAILED
+}
+
+enum AiRunStatus {
+  QUEUED
+  RUNNING
+  DONE
+  FAILED
+}
+
+enum AiDocumentStatus {
+  UPLOADED
+  PROCESSING
+  EXTRACTED
+  FAILED
+}
+
+/// Configuración de proveedor de IA por organización.
+///
+/// `apiKeyEncrypted` se guarda cifrada con el mismo patrón que las claves de
+/// Mercado Pago. Si es `null`, se usa la configuración de plataforma por env.
+model AiProviderConfig {
+  id                String   @id @default(cuid())
+  organizationId    String   @unique
+  provider          String   @default("openrouter")
+  baseUrl           String
+  apiKeyEncrypted   String?
+  model             String
+  fastModel         String?
+  visionModel       String?
+  fallbackProvider  String?
+  fallbackModel     String?
+  monthlyTokenLimit Int?
+  isEnabled         Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+}
+
+/// Conversación del copiloto. Pertenece a una organización y, opcionalmente,
+/// a un usuario y una sucursal.
+model AiConversation {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String?
+  branchId       String?
+  title          String?
+  locale         String   @default("es-MX")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  messages     AiMessage[]
+
+  @@index([organizationId, updatedAt])
+  @@index([userId])
+  @@index([branchId])
+}
+
+/// Mensaje de una conversación. Es la fuente de verdad del historial y de la
+/// auditoría de respuestas; el contenido no se replica en logs.
+model AiMessage {
+  id             String        @id @default(cuid())
+  conversationId String
+  role           AiMessageRole
+  content        String
+  toolName       String?
+  toolPayload    Json?
+  tokensIn       Int?
+  tokensOut      Int?
+  latencyMs      Int?
+  error          String?
+  createdAt      DateTime      @default(now())
+
+  conversation AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  feedback     AiFeedback[]
+
+  @@index([conversationId, createdAt])
+}
+
+/// Feedback explícito del usuario sobre una respuesta.
+model AiFeedback {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String?
+  rating    Int
+  comment   String?
+  createdAt DateTime @default(now())
+
+  message AiMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+}
+
+/// Consumo agregado por organización, día, función y modelo.
+model AiUsage {
+  id             String   @id @default(cuid())
+  organizationId String
+  day            DateTime @db.Date
+  feature        String // CHAT | DIGEST | TICKET | FORECAST
+  model          String
+  requests       Int      @default(0)
+  tokensIn       Int      @default(0)
+  tokensOut      Int      @default(0)
+  costUsd        Decimal? @db.Decimal(12, 6)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, day, feature, model])
+  @@index([organizationId, day])
+}
+
+/// Acción propuesta por la IA que requiere aprobación humana.
+model AiPendingAction {
+  id             String         @id @default(cuid())
+  organizationId String
+  conversationId String?
+  action         String
+  payload        Json
+  preview        Json?
+  status         AiActionStatus @default(PENDING)
+  requestedById  String?
+  approvedById   String?
+  approvedAt     DateTime?
+  result         Json?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status, createdAt])
+}
+
+/// Job durable de Intel (digest, extracción, pronóstico).
+model AiRun {
+  id             String      @id @default(cuid())
+  organizationId String
+  kind           String
+  status         AiRunStatus @default(QUEUED)
+  payload        Json?
+  result         Json?
+  error          String?
+  attempts       Int         @default(0)
+  traceId        String?
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, kind, createdAt])
+  @@index([status, createdAt])
+}
+
+/// Notificación in-app (digest, alerta, ticket pendiente).
+model AiNotification {
+  id             String    @id @default(cuid())
+  organizationId String
+  branchId       String?
+  userId         String?
+  kind           String
+  title          String
+  body           String
+  data           Json?
+  readAt         DateTime?
+  emailedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, userId, readAt])
+  @@index([organizationId, createdAt])
+  @@index([branchId])
+}
+
+/// Documento subido para extracción (ticket o factura).
+model AiDocument {
+  id             String           @id @default(cuid())
+  organizationId String
+  purchaseId     String?
+  r2Key          String
+  mimeType       String
+  pages          Int              @default(1)
+  status         AiDocumentStatus @default(UPLOADED)
+  extractedJson  Json?
+  model          String?
+  tokensIn       Int?
+  tokensOut      Int?
+  confidence     Decimal?         @db.Decimal(5, 4)
+  error          String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+  @@index([purchaseId])
 }
 

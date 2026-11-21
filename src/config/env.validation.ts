@@ -76,6 +76,36 @@ export function validateEnv(
     }
   }
 
+  // Intel es opcional: si hay clave, debe haber modelo y una URL válida.
+  if (config.INTEL_API_KEY) {
+    if (!config.INTEL_MODEL) {
+      throw new Error(
+        'INTEL_MODEL es obligatoria cuando INTEL_API_KEY está configurada',
+      );
+    }
+
+    if (config.INTEL_BASE_URL) {
+      try {
+        new URL(String(config.INTEL_BASE_URL));
+      } catch {
+        throw new Error('INTEL_BASE_URL debe ser una URL válida');
+      }
+    }
+
+    if (
+      config.INTEL_MONTHLY_TOKEN_LIMIT !== undefined &&
+      config.INTEL_MONTHLY_TOKEN_LIMIT !== ''
+    ) {
+      const limit = Number(config.INTEL_MONTHLY_TOKEN_LIMIT);
+
+      if (!Number.isFinite(limit) || limit <= 0) {
+        throw new Error(
+          'INTEL_MONTHLY_TOKEN_LIMIT debe ser un número positivo',
+        );
+      }
+    }
+  }
+
   if (isProduction) {
     for (const key of ['JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET'] as const) {
       const value = String(config[key]);
