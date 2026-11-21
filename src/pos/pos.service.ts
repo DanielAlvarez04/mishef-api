@@ -180,6 +180,7 @@ export class PosService {
       },
       select: {
         userId: true,
+        username: true,
         roles: true,
         pinHash: true,
         user: { select: { id: true, name: true, username: true } },
@@ -195,7 +196,7 @@ export class PosService {
       members: memberships.map((membership) => ({
         id: membership.userId,
         name: membership.user.name,
-        username: membership.user.username,
+        username: membership.username,
         roles: membership.roles,
         hasPin: Boolean(membership.pinHash),
       })),

@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { VerifiedEmailGuard } from '../auth/guards/verified-email.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtUser } from '../auth/auth.service';
 import { RequirePermissions } from '../common/decorators/require-permissions.decorator';
@@ -67,6 +68,7 @@ export class OrganizationsController {
 
   @ApiOperation({ summary: 'Conectar un dominio propio (queda pendiente)' })
   @RequirePermissions('organization:manage')
+  @UseGuards(VerifiedEmailGuard)
   @Put('domain')
   setDomain(@CurrentUser() user: JwtUser, @Body() dto: SetDomainDto) {
     return this.organizations.setDomain(user.organizationId, dto.domain);
@@ -75,6 +77,7 @@ export class OrganizationsController {
   @ApiOperation({ summary: 'Verificar el dominio contra el DNS' })
   @HttpCode(200)
   @RequirePermissions('organization:manage')
+  @UseGuards(VerifiedEmailGuard)
   @Post('domain/verify')
   verifyDomain(@CurrentUser() user: JwtUser) {
     return this.organizations.verifyDomain(user.organizationId);
@@ -82,6 +85,7 @@ export class OrganizationsController {
 
   @ApiOperation({ summary: 'Desconectar el dominio propio' })
   @RequirePermissions('organization:manage')
+  @UseGuards(VerifiedEmailGuard)
   @Delete('domain')
   removeDomain(@CurrentUser() user: JwtUser) {
     return this.organizations.removeDomain(user.organizationId);

@@ -33,6 +33,8 @@ export const PERMISSIONS = {
     'KITCHEN',
     'INVENTORY_MANAGER',
   ],
+  /** Costos y márgenes: ADMIN, CASHIER e INVENTORY_MANAGER. */
+  'costs:read': ['ADMIN', 'CASHIER', 'INVENTORY_MANAGER'],
   /** Checador: cualquier miembro activo puede marcar su entrada y salida. */
   'attendance:clock': [
     'ADMIN',

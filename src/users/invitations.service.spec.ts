@@ -20,6 +20,7 @@ function build() {
     },
     membership: {
       findFirst: jest.fn(),
+      findMany: jest.fn().mockResolvedValue([]),
       create: jest.fn(),
     },
     user: {
@@ -52,6 +53,8 @@ const pendingInvitation = {
   id: 'inv1',
   organizationId: 'org1',
   email: 'ana@cafe.com',
+  name: 'Ana',
+  username: 'ana',
   roles: ['WAITER'],
   branchId: null,
   acceptedAt: null,
@@ -113,6 +116,7 @@ describe('InvitationsService', () => {
     expect(result).toEqual({
       ok: true,
       organizationSlug: 'cafe-central',
+      username: 'ana',
       alreadyHadAccount: false,
     });
     expect(tx.user.create).toHaveBeenCalledWith(
@@ -127,6 +131,7 @@ describe('InvitationsService', () => {
       data: {
         userId: 'u2',
         organizationId: 'org1',
+        username: 'ana',
         roles: ['WAITER'],
         branchId: null,
       },

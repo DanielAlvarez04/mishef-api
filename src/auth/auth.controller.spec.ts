@@ -193,7 +193,7 @@ describe('AuthController — Google OAuth', () => {
 
     expect(res.cookie).not.toHaveBeenCalled();
     expect(res.redirect).toHaveBeenCalledWith(
-      'http://localhost:3000/login?twoFactor=1&challengeId=challenge-1&email=admin%40naranjapimienta.local',
+      'http://localhost:3000/login?twoFactor=1&challengeId=challenge-1&email=admin%40naranjapimienta.local&method=EMAIL',
     );
   });
 

@@ -70,6 +70,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
                 isActive: true,
                 organization: { isActive: true },
               },
+              include: { organization: { select: { slug: true } } },
             },
           },
         },
@@ -112,6 +113,12 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       isPlatformAdmin: session.impersonatedById
         ? false
         : session.user.isPlatformAdmin,
+      isOwner: session.impersonatedById
+        ? false
+        : membership.isOwner,
+      organizationSlug: membership.organization?.slug ?? null,
+      emailVerified: session.user.emailVerified,
+      mustChangePassword: session.user.mustChangePassword,
       impersonatedById: session.impersonatedById ?? null,
       impersonatedByName: session.impersonatedById
         ? (payload.impersonatedByName ?? null)

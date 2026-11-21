@@ -109,3 +109,53 @@ export function passwordChangedEmail() {
     }),
   };
 }
+
+/** Aviso de un inicio de sesión desde una IP o dispositivo nuevo. */
+export function loginAlertEmail(input: {
+  ip?: string | null;
+  userAgent?: string | null;
+  at?: Date;
+}) {
+  const at = input.at ?? new Date();
+  const date = new Intl.DateTimeFormat('es-MX', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(at);
+  const ip = input.ip?.trim() || 'IP desconocida';
+  const device = input.userAgent?.trim() || 'Dispositivo desconocido';
+  const escapeHtml = (value: string) =>
+    value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  const text = [
+    'Detectamos un inicio de sesión en tu cuenta de Mishef.',
+    '',
+    `Fecha: ${date}`,
+    `IP: ${ip}`,
+    `Dispositivo: ${device}`,
+    '',
+    'Si no fuiste tú, cambia tu contraseña de inmediato.',
+  ].join('\n');
+
+  return {
+    subject: 'Nuevo inicio de sesión — Mishef',
+    text,
+    html: layout({
+      title: 'Nuevo inicio de sesión',
+      intro:
+        'Detectamos un inicio de sesión desde una IP o dispositivo distinto al anterior.',
+      body: `
+        <ul style="margin:0 0 20px;padding-left:20px;line-height:1.7">
+          <li><strong>Fecha:</strong> ${escapeHtml(date)}</li>
+          <li><strong>IP:</strong> ${escapeHtml(ip)}</li>
+          <li><strong>Dispositivo:</strong> ${escapeHtml(device)}</li>
+        </ul>
+      `,
+      footer:
+        'Si no reconoces esta actividad, cambia tu contraseña de inmediato.',
+    }),
+  };
+}

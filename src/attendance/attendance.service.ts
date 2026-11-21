@@ -727,6 +727,7 @@ export class AttendanceService {
       },
       select: {
         userId: true,
+        username: true,
         roles: true,
         pinHash: true,
         pinLockedUntil: true,
@@ -791,7 +792,7 @@ export class AttendanceService {
       return {
         id: membership.userId,
         name: membership.user.name,
-        username: membership.user.username,
+        username: membership.username,
         roles: membership.roles,
         scheduledStart: entry?.startTime ?? null,
         scheduledEnd: entry?.endTime ?? null,
@@ -1458,6 +1459,7 @@ export class AttendanceService {
           where: { organizationId, isActive: true, user: { isActive: true } },
           select: {
             userId: true,
+            username: true,
             roles: true,
             attendanceKioskEnabled: true,
             user: { select: { id: true, name: true, username: true } },
@@ -1481,7 +1483,7 @@ export class AttendanceService {
       employees: memberships.map((membership) => ({
         id: membership.userId,
         name: membership.user.name,
-        username: membership.user.username,
+        username: membership.username,
         roles: membership.roles,
         kioskEnabled: membership.attendanceKioskEnabled,
       })),

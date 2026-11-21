@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { VerifiedEmailGuard } from '../auth/guards/verified-email.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { OrganizationsController } from './organizations.controller';
 import { PublicTenantController } from './public-tenant.controller';
@@ -10,7 +11,13 @@ import { CloudflareHostnamesService } from './cloudflare-hostnames.service';
 @Module({
   imports: [PrismaModule],
   controllers: [OrganizationsController, PublicTenantController],
-  providers: [OrganizationsService, CloudflareHostnamesService, JwtAuthGuard, RolesGuard],
+  providers: [
+    OrganizationsService,
+    CloudflareHostnamesService,
+    JwtAuthGuard,
+    RolesGuard,
+    VerifiedEmailGuard,
+  ],
   exports: [OrganizationsService],
 })
 export class OrganizationsModule {}

@@ -12,13 +12,13 @@ import {
 import { Role } from '@prisma/client';
 
 export class CreateUserDto {
-  /** Usuario de acceso: `ana` o `ana@naranjapimienta.cafe`. */
+  /** Usuario local del negocio: `ana`. */
   @IsString()
   @MinLength(3)
-  @MaxLength(120)
-  @Matches(/^[a-zA-Z0-9._-]+(@[a-zA-Z0-9.-]+)?$/, {
+  @MaxLength(32)
+  @Matches(/^[a-zA-Z0-9._-]+$/, {
     message:
-      'El usuario admite letras, números, punto, guion, guion bajo y, opcionalmente, @dominio',
+      'El usuario admite letras, números, punto, guion y guion bajo; sin @dominio',
   })
   username!: string;
 

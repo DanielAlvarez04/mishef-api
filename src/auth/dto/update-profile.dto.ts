@@ -1,4 +1,5 @@
 import {
+  IsEmail,
   IsOptional,
   IsString,
   Matches,
@@ -15,10 +16,15 @@ export class UpdateProfileDto {
   @IsOptional()
   @IsString()
   @MinLength(3)
-  @MaxLength(120)
-  @Matches(/^[a-zA-Z0-9._-]+(@[a-zA-Z0-9.-]+)?$/, {
+  @MaxLength(32)
+  @Matches(/^[a-zA-Z0-9._-]+$/, {
     message:
-      'El usuario admite letras, números, punto, guion, guion bajo y, opcionalmente, @dominio',
+      'El usuario admite letras, números, punto, guion y guion bajo; sin @dominio',
   })
   username?: string;
+
+  /** Nuevo correo; requiere verificación y desactiva 2FA hasta verificarlo. */
+  @IsOptional()
+  @IsEmail()
+  email?: string;
 }

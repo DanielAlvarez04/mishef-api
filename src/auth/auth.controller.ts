@@ -2,9 +2,11 @@ import {
   Controller,
   Post,
   Patch,
+  Delete,
   Body,
   Get,
   Query,
+  Param,
   Req,
   Res,
   UseGuards,
@@ -26,6 +28,7 @@ import { ChangePasswordDto } from './dto/change-password.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import {
   DisableTwoFactorDto,
+  TotpCodeDto,
   TwoFactorChallengeDto,
 } from './dto/two-factor.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
@@ -207,6 +210,7 @@ export class AuthController {
         twoFactor: '1',
         challengeId: result.challengeId,
         email: result.email,
+        method: result.method ?? 'EMAIL',
       });
 
       return res.redirect(`${webOrigin}/login?${params.toString()}`);
@@ -290,8 +294,7 @@ export class AuthController {
   ) {
     await this.auth.logout(req.cookies?.[REFRESH_TOKEN_COOKIE]);
 
-    res.clearCookie(ACCESS_TOKEN_COOKIE, { path: '/' });
-    res.clearCookie(REFRESH_TOKEN_COOKIE, { path: '/' });
+    this.clearAuthCookies(res);
 
     return { ok: true };
   }
@@ -320,6 +323,31 @@ export class AuthController {
     return this.auth.endImpersonation(user);
   }
 
+  @ApiOperation({ summary: 'Sesiones activas de la cuenta' })
+  @UseGuards(JwtAuthGuard)
+  @Get('sessions')
+  sessions(@CurrentUser() user: JwtUser) {
+    return this.auth.listSessions(user.sub, user.sid);
+  }
+
+  @ApiOperation({ summary: 'Revocar una sesión de la cuenta' })
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @Delete('sessions/:id')
+  async revokeSession(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.auth.revokeSession(user.sub, id);
+
+    if (id === user.sid) {
+      this.clearAuthCookies(res);
+    }
+
+    return result;
+  }
+
   @ApiOperation({ summary: 'Actualizar nombre y usuario de la cuenta' })
   @UseGuards(JwtAuthGuard)
   @Patch('me')
@@ -327,7 +355,7 @@ export class AuthController {
     @CurrentUser() user: JwtUser,
     @Body() dto: UpdateProfileDto,
   ) {
-    return this.auth.updateProfile(user.sub, dto);
+    return this.auth.updateProfile(user.sub, dto, user.organizationId);
   }
 
   @ApiOperation({ summary: 'Completar el onboarding inicial' })
@@ -380,8 +408,7 @@ export class AuthController {
   ) {
     const result = await this.auth.resetPassword(dto.token, dto.password);
 
-    res.clearCookie(ACCESS_TOKEN_COOKIE, { path: '/' });
-    res.clearCookie(REFRESH_TOKEN_COOKIE, { path: '/' });
+    this.clearAuthCookies(res);
 
     return result;
   }
@@ -402,8 +429,7 @@ export class AuthController {
       dto.newPassword,
     );
 
-    res.clearCookie(ACCESS_TOKEN_COOKIE, { path: '/' });
-    res.clearCookie(REFRESH_TOKEN_COOKIE, { path: '/' });
+    this.clearAuthCookies(res);
 
     return result;
   }
@@ -431,6 +457,27 @@ export class AuthController {
       dto.challengeId,
       dto.code,
     );
+  }
+
+  @ApiOperation({ summary: 'Generar el secreto TOTP' })
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @Post('2fa/totp/setup')
+  startTotp(@CurrentUser() user: JwtUser) {
+    return this.auth.startTotpSetup(user.sub);
+  }
+
+  @ApiOperation({ summary: 'Confirmar el primer código TOTP' })
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @Post('2fa/totp/confirm')
+  confirmTotp(
+    @CurrentUser() user: JwtUser,
+    @Body() dto: TotpCodeDto,
+  ) {
+    return this.auth.confirmTotpSetup(user.sub, dto.code);
   }
 
   @ApiOperation({ summary: 'Desactivar 2FA' })
@@ -476,6 +523,21 @@ export class AuthController {
     res.clearCookie(OAUTH_VERIFIER_COOKIE, { path: OAUTH_COOKIE_PATH });
     res.clearCookie(OAUTH_LINK_COOKIE, { path: OAUTH_COOKIE_PATH });
     res.clearCookie(OAUTH_BUSINESS_COOKIE, { path: OAUTH_COOKIE_PATH });
+  }
+
+  private clearAuthCookies(res: Response) {
+    const secure = this.config.get('NODE_ENV') === 'production';
+    const domain = this.config.get<string>('COOKIE_DOMAIN')?.trim() || undefined;
+    const options = {
+      path: '/',
+      httpOnly: true,
+      secure,
+      sameSite: 'lax' as const,
+      ...(domain ? { domain } : {}),
+    };
+
+    res.clearCookie(ACCESS_TOKEN_COOKIE, options);
+    res.clearCookie(REFRESH_TOKEN_COOKIE, options);
   }
 
   private setAuthCookies(

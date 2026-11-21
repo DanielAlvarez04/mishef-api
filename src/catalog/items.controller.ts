@@ -63,6 +63,7 @@ export class ItemsController {
   }
 
   @ApiOperation({ summary: 'Food cost por artículo (costo y margen en vivo)' })
+  @RequirePermissions('costs:read')
   @Get('food-cost')
   foodCost(
     @CurrentUser() user: JwtUser,

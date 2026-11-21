@@ -1,12 +1,12 @@
 /**
- * Reglas compartidas de los nombres de usuario y del dominio del negocio.
+ * Reglas compartidas del nombre de usuario local y del dominio del negocio.
  *
- * El usuario se guarda en minúsculas y puede ser local (`ana`) o con el
- * dominio del negocio (`ana@naranjapimienta.cafe`). El login acepta el usuario
- * tal cual lo escriba la persona porque se normaliza antes de consultar.
+ * El username identifica a la persona **dentro de un negocio**: el subdominio
+ * resuelve la organización y el username solo se busca en su membresía. Nunca
+ * lleva `@dominio`; el correo es un dato aparte.
  */
 export const USERNAME_MIN_LENGTH = 3;
-export const USERNAME_MAX_LENGTH = 120;
+export const USERNAME_MAX_LENGTH = 32;
 export const USERNAME_LOCAL_PATTERN = /^[a-z0-9._-]+$/;
 
 /** Dominio con al menos dos etiquetas: `naranjapimienta.cafe`. */
@@ -25,7 +25,7 @@ export function isValidDomain(value: string): boolean {
   return value.length >= 3 && value.length <= 80 && DOMAIN_PATTERN.test(value);
 }
 
-/** Acepta `ana` (cuentas antiguas) o `ana@naranjapimienta.cafe`. */
+/** Username local: minúsculas, letras, números, punto, guion y guion bajo. */
 export function isValidUsername(value: string): boolean {
   if (
     value.length < USERNAME_MIN_LENGTH ||
@@ -34,17 +34,7 @@ export function isValidUsername(value: string): boolean {
     return false;
   }
 
-  const parts = value.split('@');
-
-  if (parts.length > 2) {
-    return false;
-  }
-
-  if (!USERNAME_LOCAL_PATTERN.test(parts[0])) {
-    return false;
-  }
-
-  return parts.length === 1 || isValidDomain(parts[1]);
+  return USERNAME_LOCAL_PATTERN.test(value);
 }
 
 /** Separa un nombre en nombre de pila y primer apellido (sin acentos). */
@@ -63,26 +53,25 @@ export function splitName(name: string): { first: string; surname: string } {
 
 /**
  * Usuarios propuestos para un nombre, en orden de preferencia:
- * `ana@dominio`, `a.perez@dominio`, `a.perez2@dominio`, ...
+ * `ana`, `a.perez`, `a.perez2`, ...
  */
-export function usernameCandidates(name: string, domain: string | null): string[] {
+export function usernameCandidates(name: string): string[] {
   const { first, surname } = splitName(name);
 
   if (!first) {
     return [];
   }
 
-  const suffix = domain ? `@${domain}` : '';
   const alt = surname ? `${first[0]}.${surname}` : first[0];
-  const candidates = [`${first}${suffix}`];
-  const altUsername = `${alt}${suffix}`;
+  const candidates = [first];
+  const altUsername = alt;
 
   if (!candidates.includes(altUsername)) {
     candidates.push(altUsername);
   }
 
   for (let n = 2; n <= 9; n += 1) {
-    candidates.push(`${alt}${n}${suffix}`);
+    candidates.push(`${alt}${n}`);
   }
 
   return candidates;

@@ -37,14 +37,11 @@ export class UsersController {
 
   @ApiOperation({ summary: 'Comprobar disponibilidad de un nombre de usuario' })
   @Get('username-available')
-  usernameAvailable(@Query('username') username?: string) {
-    return this.users.usernameAvailable(username ?? '');
-  }
-
-  @ApiOperation({ summary: 'Buscar un usuario por correo (precarga nombre/apellido)' })
-  @Get('by-email')
-  findByEmail(@Query('email') email?: string) {
-    return this.users.findByEmail(email ?? '');
+  usernameAvailable(
+    @CurrentUser() user: JwtUser,
+    @Query('username') username?: string,
+  ) {
+    return this.users.usernameAvailable(user.organizationId, username ?? '');
   }
 
   @ApiOperation({ summary: 'Proponer un nombre de usuario a partir del nombre' })

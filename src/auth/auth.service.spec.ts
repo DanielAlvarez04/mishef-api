@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { hash } from 'argon2';
 import { AuthService } from './auth.service';
+import { totpAt } from './totp';
 import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -18,7 +19,13 @@ function createMocks() {
       count: jest.fn(),
       create: jest.fn(),
     },
-    membership: { create: jest.fn() },
+    membership: {
+      findMany: jest.fn(),
+      findFirst: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+      count: jest.fn(),
+    },
     organization: { create: jest.fn() },
     authSession: {
       findUnique: jest.fn(),
@@ -85,19 +92,46 @@ async function userFixture(overrides: Record<string, unknown> = {}) {
     passwordHash: await hash('Naranja123!'),
     memberships: [
       {
+        id: 'membership-1',
+        username: 'admin' as string | null,
         roles: ['ADMIN'],
         organizationId: 'org-1',
-        organization: { id: 'org-1', name: 'Naranja Pimienta' },
+        isActive: true,
+        isOwner: true,
+        organization: {
+          id: 'org-1',
+          name: 'Naranja Pimienta',
+          slug: 'naranja-pimienta',
+          isActive: true,
+        },
       },
     ],
     ...overrides,
   };
 }
 
+async function loginMembership(
+  overrides: Record<string, unknown> = {},
+) {
+  const user = await userFixture((overrides.user as Record<string, unknown>) ?? {});
+  const membership = user.memberships[0];
+
+  return {
+    ...membership,
+    ...overrides,
+    user,
+    organization: membership.organization,
+  };
+}
+
 describe('AuthService', () => {
   it('inicia sesión y crea una sesión persistida', async () => {
     const { service, prisma } = createMocks();
-    prisma.user.findUnique.mockResolvedValue(await userFixture());
+    const user = await userFixture();
+    prisma.membership.findMany.mockResolvedValue([
+      await loginMembership({ user }),
+    ]);
+    prisma.user.findUnique.mockResolvedValue(user);
 
     const result = await service.login({
       identifier: '  ADMIN@naranjapimienta.local ',
@@ -113,24 +147,31 @@ describe('AuthService', () => {
 
   it('inicia sesión con el nombre de usuario de una cuenta interna', async () => {
     const { service, prisma } = createMocks();
-    prisma.user.findUnique.mockResolvedValue(
-      await userFixture({ username: 'mesero', email: null }),
-    );
+    const user = await userFixture({ username: 'mesero', email: null });
+    prisma.membership.findMany.mockResolvedValue([
+      await loginMembership({
+        user,
+        username: 'mesero',
+      }),
+    ]);
+    prisma.user.findUnique.mockResolvedValue(user);
 
     const result = await service.login({
       identifier: ' MESERO ',
       password: 'Naranja123!',
     });
 
-    expect(prisma.user.findUnique).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { username: 'mesero' } }),
+    expect(prisma.membership.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ username: 'mesero' }),
+      }),
     );
     expect(result).toMatchObject({ user: { id: 'user-1' } });
   });
 
   it('no permite entrar con un usuario que parece correo', async () => {
     const { service, prisma } = createMocks();
-    prisma.user.findUnique.mockResolvedValue(null);
+    prisma.membership.findMany.mockResolvedValue([]);
 
     await expect(
       service.login({
@@ -139,21 +180,22 @@ describe('AuthService', () => {
       }),
     ).rejects.toBeInstanceOf(UnauthorizedException);
 
-    // Una sola consulta, por correo. El nombre de usuario con `@` ya no es una
-    // vía de acceso: se eliminó para que no se confundan cuentas.
-    expect(prisma.user.findUnique).toHaveBeenCalledTimes(1);
-    expect(prisma.user.findUnique).toHaveBeenCalledWith(
+    expect(prisma.membership.findMany).toHaveBeenCalledTimes(1);
+    expect(prisma.membership.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { email: 'ana@naranjapimienta.cafe' },
+        where: expect.objectContaining({
+          user: expect.objectContaining({ email: 'ana@naranjapimienta.cafe' }),
+        }),
       }),
     );
   });
 
   it('rechaza una cuenta sin contraseña (solo Google)', async () => {
     const { service, prisma } = createMocks();
-    prisma.user.findUnique.mockResolvedValue(
-      await userFixture({ passwordHash: null }),
-    );
+    const user = await userFixture({ passwordHash: null });
+    prisma.membership.findMany.mockResolvedValue([
+      await loginMembership({ user }),
+    ]);
 
     await expect(
       service.login({
@@ -165,7 +207,10 @@ describe('AuthService', () => {
 
   it('rechaza credenciales inválidas sin crear sesión', async () => {
     const { service, prisma } = createMocks();
-    prisma.user.findUnique.mockResolvedValue(await userFixture());
+    const user = await userFixture();
+    prisma.membership.findMany.mockResolvedValue([
+      await loginMembership({ user }),
+    ]);
 
     await expect(
       service.login({
@@ -177,11 +222,74 @@ describe('AuthService', () => {
     expect(prisma.authSession.create).not.toHaveBeenCalled();
   });
 
+  it('rechaza a un empleado en el dominio principal', async () => {
+    const { service, prisma } = createMocks();
+    const user = await userFixture({ username: 'mesero', email: null });
+    prisma.membership.findMany.mockResolvedValue([
+      await loginMembership({
+        user,
+        username: 'mesero',
+        isOwner: false,
+      }),
+    ]);
+
+    await expect(
+      service.login({
+        identifier: 'mesero',
+        password: 'Naranja123!',
+      }),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('subdominio'),
+    });
+  });
+
+  it('permite al dueño entrar por el dominio principal', async () => {
+    const { service, prisma } = createMocks();
+    const user = await userFixture();
+    prisma.membership.findMany.mockResolvedValue([
+      await loginMembership({ user, isOwner: true }),
+    ]);
+    prisma.user.findUnique.mockResolvedValue(user);
+
+    const result = await service.login({
+      identifier: 'admin@naranjapimienta.local',
+      password: 'Naranja123!',
+    });
+
+    expect(result).toHaveProperty('accessToken');
+    expect(prisma.authSession.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('permite a un empleado entrar por el subdominio', async () => {
+    const { service, prisma } = createMocks();
+    const user = await userFixture({ username: 'mesero', email: null });
+    const membership = await loginMembership({
+      user,
+      username: 'mesero',
+      isOwner: false,
+    });
+    prisma.membership.findMany.mockResolvedValue([membership]);
+    prisma.user.findUnique.mockResolvedValue({
+      ...user,
+      memberships: [{ ...membership, user: undefined }],
+    });
+
+    const result = await service.login({
+      identifier: 'mesero',
+      password: 'Naranja123!',
+      tenant: 'naranja-pimienta',
+    });
+
+    expect(result).toHaveProperty('accessToken');
+    expect(prisma.authSession.create).toHaveBeenCalledTimes(1);
+  });
+
   it('con 2FA activo no entrega sesión y envía un código', async () => {
     const { service, prisma, mail } = createMocks();
-    prisma.user.findUnique.mockResolvedValue(
-      await userFixture({ twoFactorEnabled: true }),
-    );
+    const user = await userFixture({ twoFactorEnabled: true });
+    prisma.membership.findMany.mockResolvedValue([
+      await loginMembership({ user }),
+    ]);
     prisma.twoFactorCode.create.mockResolvedValue({});
 
     const result = (await service.login({
@@ -501,6 +609,7 @@ describe('AuthService', () => {
           userId: 'user-1',
           organizationId: 'org-1',
           roles: ['ADMIN'],
+          isOwner: true,
         },
       });
       expect(result.user).toMatchObject({ id: 'user-1' });
@@ -525,32 +634,42 @@ describe('AuthService', () => {
   describe('perfil y onboarding', () => {
     it('normaliza y guarda el nombre de usuario disponible', async () => {
       const { service, prisma } = createMocks();
-      prisma.user.findUnique
-        .mockResolvedValueOnce(await userFixture({ username: null }))
-        .mockResolvedValueOnce(null);
-      prisma.user.update.mockResolvedValue({
-        id: 'user-1',
-        name: 'Ana Pérez',
-        username: 'ana.perez',
-      });
+      const user = await userFixture();
+      user.memberships[0].username = null;
+      prisma.user.findUnique.mockResolvedValue(user);
+      prisma.membership.findFirst.mockResolvedValue(null);
+      prisma.membership.update.mockResolvedValue({});
 
       const result = await service.updateProfile('user-1', {
         name: ' Ana Pérez ',
         username: ' Ana.Perez ',
       });
 
+      expect(prisma.membership.findFirst).toHaveBeenCalledWith({
+        where: {
+          organizationId: 'org-1',
+          username: 'ana.perez',
+          id: { not: 'membership-1' },
+        },
+        select: { id: true },
+      });
       expect(prisma.user.update).toHaveBeenCalledWith({
         where: { id: 'user-1' },
         data: { name: 'Ana Pérez', username: 'ana.perez' },
+      });
+      expect(prisma.membership.update).toHaveBeenCalledWith({
+        where: { id: 'membership-1' },
+        data: { username: 'ana.perez' },
       });
       expect(result).toMatchObject({ username: 'ana.perez' });
     });
 
     it('rechaza un nombre de usuario ya ocupado', async () => {
       const { service, prisma } = createMocks();
-      prisma.user.findUnique
-        .mockResolvedValueOnce(await userFixture({ username: null }))
-        .mockResolvedValueOnce({ id: 'otro-usuario' });
+      const user = await userFixture();
+      user.memberships[0].username = null;
+      prisma.user.findUnique.mockResolvedValue(user);
+      prisma.membership.findFirst.mockResolvedValue({ id: 'otro-usuario' });
 
       await expect(
         service.updateProfile('user-1', { username: 'ana.perez' }),
@@ -639,6 +758,7 @@ describe('AuthService', () => {
           userId: 'user-1',
           organizationId: 'org-1',
           roles: ['ADMIN'],
+          isOwner: true,
         },
       });
       expect(result.kind).toBe('session');
@@ -953,6 +1073,98 @@ describe('AuthService', () => {
       expect(result.organization).not.toHaveProperty('storageBytes');
       // Lo que sí serializa JSON debe seguir ahí.
       expect(result.organization).toMatchObject({ id: 'org-1' });
+    });
+  });
+
+  describe('TOTP', () => {
+    it('genera, confirma y usa un código TOTP', async () => {
+      const { service, prisma } = createMocks();
+      const user = await userFixture();
+      prisma.user.findUnique.mockResolvedValue(user);
+      prisma.user.update.mockResolvedValue({});
+
+      const setup = await service.startTotpSetup('user-1');
+
+      expect(setup.secret).toMatch(/^[A-Z2-7]+$/);
+      expect(setup.otpauthUrl).toContain('otpauth://totp/');
+      expect(prisma.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            twoFactorTotpSecret: setup.secret,
+            twoFactorTotpEnabled: false,
+          }),
+        }),
+      );
+
+      const withSecret = {
+        ...user,
+        twoFactorTotpSecret: setup.secret,
+      };
+      prisma.user.findUnique.mockResolvedValue(withSecret);
+
+      const code = totpAt(setup.secret, Date.now());
+      const result = await service.confirmTotpSetup('user-1', code);
+
+      expect(result.twoFactorEnabled).toBe(true);
+      expect(result.recoveryCodes).toHaveLength(8);
+      expect(prisma.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            twoFactorEnabled: true,
+            twoFactorTotpEnabled: true,
+          }),
+        }),
+      );
+    });
+
+    it('pide TOTP en el login y no envía correo', async () => {
+      const { service, prisma, mail } = createMocks();
+      const secret = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
+      const user = await userFixture({
+        twoFactorEnabled: true,
+        twoFactorTotpEnabled: true,
+        twoFactorTotpSecret: secret,
+      });
+      prisma.membership.findMany.mockResolvedValue([
+        await loginMembership({ user }),
+      ]);
+      prisma.twoFactorCode.create.mockResolvedValue({});
+
+      const result = (await service.login({
+        identifier: 'admin@naranjapimienta.local',
+        password: 'Naranja123!',
+      })) as { twoFactorRequired: boolean; method: string };
+
+      expect(result.twoFactorRequired).toBe(true);
+      expect(result.method).toBe('TOTP');
+      expect(mail.send).not.toHaveBeenCalled();
+    });
+
+    it('alerta cuando el inicio viene de otra IP o dispositivo', async () => {
+      const { service, prisma, mail } = createMocks();
+      const user = await userFixture({
+        lastLoginIp: '1.1.1.1',
+        lastLoginUserAgent: 'dispositivo-viejo',
+      });
+      prisma.membership.findMany.mockResolvedValue([
+        await loginMembership({ user }),
+      ]);
+      prisma.user.findUnique.mockResolvedValue(user);
+      prisma.user.update.mockResolvedValue({});
+
+      await service.login(
+        {
+          identifier: 'admin@naranjapimienta.local',
+          password: 'Naranja123!',
+        },
+        { ip: '2.2.2.2', userAgent: 'dispositivo-nuevo' },
+      );
+
+      expect(mail.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subject: expect.stringContaining('Nuevo inicio de sesión'),
+        }),
+      );
     });
   });
 });

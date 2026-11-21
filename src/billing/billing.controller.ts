@@ -14,6 +14,7 @@ import { BillingInterval } from '@prisma/client';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtUser } from '../auth/auth.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { VerifiedEmailGuard } from '../auth/guards/verified-email.guard';
 import { RequirePermissions } from '../common/decorators/require-permissions.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { BillingService } from './billing.service';
@@ -70,6 +71,7 @@ export class BillingController {
   @RequirePermissions('organization:manage')
   @HttpCode(201)
   @Post('subscribe')
+  @UseGuards(VerifiedEmailGuard)
   subscribe(@CurrentUser() user: JwtUser, @Body() dto: SubscribeDto) {
     return this.billing.subscribe(requireOrganization(user), dto);
   }
@@ -78,6 +80,7 @@ export class BillingController {
   @RequirePermissions('organization:manage')
   @HttpCode(201)
   @Post('change-plan')
+  @UseGuards(VerifiedEmailGuard)
   changePlan(@CurrentUser() user: JwtUser, @Body() dto: ChangePlanDto) {
     return this.billing.changePlan(requireOrganization(user), dto);
   }
@@ -86,6 +89,7 @@ export class BillingController {
   @RequirePermissions('organization:manage')
   @HttpCode(200)
   @Post('cancel')
+  @UseGuards(VerifiedEmailGuard)
   cancel(@CurrentUser() user: JwtUser) {
     return this.billing.cancel(requireOrganization(user));
   }
@@ -94,6 +98,7 @@ export class BillingController {
   @RequirePermissions('organization:manage')
   @HttpCode(200)
   @Post('pause')
+  @UseGuards(VerifiedEmailGuard)
   pause(@CurrentUser() user: JwtUser) {
     return this.billing.pause(requireOrganization(user));
   }
@@ -102,6 +107,7 @@ export class BillingController {
   @RequirePermissions('organization:manage')
   @HttpCode(200)
   @Post('resume')
+  @UseGuards(VerifiedEmailGuard)
   resume(@CurrentUser() user: JwtUser) {
     return this.billing.resume(requireOrganization(user));
   }

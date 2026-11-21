@@ -37,6 +37,7 @@ import {
 @ApiTags('inventory')
 @Controller('inventory')
 @UseGuards(JwtAuthGuard, RolesGuard)
+@RequirePermissions('inventory:manage')
 export class InventoryController {
   constructor(private readonly inventory: InventoryService) {}
 

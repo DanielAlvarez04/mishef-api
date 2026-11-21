@@ -15,6 +15,7 @@ function createMocks() {
     organization: { findUnique: jest.fn() },
     membership: {
       findMany: jest.fn(),
+      findFirst: jest.fn(),
       findUnique: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
@@ -48,9 +49,7 @@ describe('UsersService', () => {
 
   it('no permite duplicar el nombre de usuario', async () => {
     const { service, prisma } = createMocks();
-    prisma.user.findUnique
-      .mockResolvedValueOnce({ id: 'user-1' })
-      .mockResolvedValueOnce(null);
+    prisma.membership.findFirst.mockResolvedValue({ id: 'membership-1' });
 
     await expect(
       service.create('org-1', {
@@ -65,9 +64,11 @@ describe('UsersService', () => {
 
   it('no permite duplicar el correo', async () => {
     const { service, prisma } = createMocks();
-    prisma.user.findUnique
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ id: 'user-1', email: 'ocupado@naranjapimienta.local' });
+    prisma.membership.findFirst.mockResolvedValue(null);
+    prisma.user.findUnique.mockResolvedValue({
+      id: 'user-1',
+      email: 'ocupado@naranjapimienta.local',
+    });
 
     await expect(
       service.create('org-1', {
@@ -93,7 +94,7 @@ describe('UsersService', () => {
 
   it('crea una cuenta interna sin correo y su membresía', async () => {
     const { service, prisma } = createMocks();
-    prisma.user.findUnique.mockResolvedValue(null);
+    prisma.membership.findFirst.mockResolvedValue(null);
     prisma.user.create.mockResolvedValue({
       id: 'user-2',
       username: 'cocina',
@@ -101,6 +102,7 @@ describe('UsersService', () => {
       name: 'Cocina',
     });
     prisma.membership.create.mockResolvedValue({
+      username: 'cocina',
       roles: [Role.KITCHEN],
     });
 
@@ -123,6 +125,7 @@ describe('UsersService', () => {
       data: {
         userId: 'user-2',
         organizationId: 'org-1',
+        username: 'cocina',
         branchId: null,
         roles: [Role.KITCHEN],
       },
@@ -136,113 +139,105 @@ describe('UsersService', () => {
 
   it('indica que un nombre de usuario libre está disponible', async () => {
     const { service, prisma } = createMocks();
-    prisma.user.findUnique.mockResolvedValue(null);
+    prisma.membership.findFirst.mockResolvedValue(null);
 
-    const result = await service.usernameAvailable(' Ana.Perez ');
+    const result = await service.usernameAvailable('org-1', ' Ana.Perez ');
 
-    expect(prisma.user.findUnique).toHaveBeenCalledWith({
-      where: { username: 'ana.perez' },
+    expect(prisma.membership.findFirst).toHaveBeenCalledWith({
+      where: { organizationId: 'org-1', username: 'ana.perez' },
+      select: { id: true },
     });
-    expect(result).toEqual({ username: 'ana.perez', available: true });
+    expect(result).toEqual({
+      username: 'ana.perez',
+      available: true,
+      message: 'Disponible',
+    });
   });
 
   it('marca como no disponible un nombre de usuario ocupado', async () => {
     const { service, prisma } = createMocks();
-    prisma.user.findUnique.mockResolvedValue({ id: 'otro' });
+    prisma.membership.findFirst.mockResolvedValue({ id: 'otro' });
 
-    const result = await service.usernameAvailable('ana.perez');
+    const result = await service.usernameAvailable('org-1', 'ana.perez');
 
     expect(result).toEqual({
       username: 'ana.perez',
       available: false,
       reason: 'taken',
+      message: 'Ese usuario ya está en uso en este negocio.',
     });
   });
 
   it('marca como inválido un nombre de usuario fuera de formato', async () => {
     const { service, prisma } = createMocks();
 
-    const result = await service.usernameAvailable('a b');
+    const result = await service.usernameAvailable('org-1', 'a b');
 
     expect(result).toEqual({
       username: 'a b',
       available: false,
       reason: 'invalid',
+      message:
+        'Usa entre 3 y 32 caracteres: letras, números, punto, guion o guion bajo.',
     });
-    expect(prisma.user.findUnique).not.toHaveBeenCalled();
+    expect(prisma.membership.findFirst).not.toHaveBeenCalled();
   });
 
-  it('acepta usuarios con el dominio del negocio', async () => {
-    const { service, prisma } = createMocks();
-    prisma.user.findUnique.mockResolvedValue(null);
+  it('rechaza un username con @dominio (modelo viejo)', async () => {
+    const { service } = createMocks();
 
-    const result = await service.usernameAvailable(' Ana@NaranjaPimienta.Cafe ');
+    const result = await service.usernameAvailable(
+      'org-1',
+      'ana@naranjapimienta.cafe',
+    );
 
-    expect(prisma.user.findUnique).toHaveBeenCalledWith({
-      where: { username: 'ana@naranjapimienta.cafe' },
-    });
-    expect(result).toEqual({
-      username: 'ana@naranjapimienta.cafe',
-      available: true,
-    });
+    expect(result.available).toBe(false);
+    expect(result.reason).toBe('invalid');
   });
 
-  it('propone nombre@dominio cuando está libre', async () => {
+  it('propone el nombre local cuando está libre', async () => {
     const { service, prisma } = createMocks();
-    prisma.organization.findUnique.mockResolvedValue({
-      domain: 'naranjapimienta.cafe',
-    });
-    prisma.user.findMany.mockResolvedValue([]);
+    prisma.membership.findMany.mockResolvedValue([]);
 
     const result = await service.suggestUsername('org-1', 'Ana Pérez');
 
-    expect(prisma.organization.findUnique).toHaveBeenCalledWith({
-      where: { id: 'org-1' },
-      select: { domain: true },
+    expect(prisma.membership.findMany).toHaveBeenCalledWith({
+      where: {
+        organizationId: 'org-1',
+        username: { in: expect.arrayContaining(['ana']) },
+      },
+      select: { username: true },
     });
-    expect(result).toEqual({
-      username: 'ana@naranjapimienta.cafe',
-      domain: 'naranjapimienta.cafe',
-    });
+    expect(result).toEqual({ username: 'ana' });
   });
 
   it('usa inicial.apellido si el nombre ya está ocupado', async () => {
     const { service, prisma } = createMocks();
-    prisma.organization.findUnique.mockResolvedValue({
-      domain: 'naranjapimienta.cafe',
-    });
-    prisma.user.findMany.mockResolvedValue([
-      { username: 'ana@naranjapimienta.cafe' },
-    ]);
+    prisma.membership.findMany.mockResolvedValue([{ username: 'ana' }]);
 
     const result = await service.suggestUsername('org-1', 'Ana Pérez');
 
-    expect(result.username).toBe('a.perez@naranjapimienta.cafe');
+    expect(result.username).toBe('a.perez');
   });
 
   it('añade un número si el nombre y la inicial.apellido están ocupados', async () => {
     const { service, prisma } = createMocks();
-    prisma.organization.findUnique.mockResolvedValue({
-      domain: 'naranjapimienta.cafe',
-    });
-    prisma.user.findMany.mockResolvedValue([
-      { username: 'ana@naranjapimienta.cafe' },
-      { username: 'a.perez@naranjapimienta.cafe' },
+    prisma.membership.findMany.mockResolvedValue([
+      { username: 'ana' },
+      { username: 'a.perez' },
     ]);
 
     const result = await service.suggestUsername('org-1', 'Ana Pérez');
 
-    expect(result.username).toBe('a.perez2@naranjapimienta.cafe');
+    expect(result.username).toBe('a.perez2');
   });
 
-  it('sin dominio configurado mantiene el formato antiguo', async () => {
-    const { service, prisma } = createMocks();
-    prisma.organization.findUnique.mockResolvedValue({ domain: null });
-    prisma.user.findMany.mockResolvedValue([]);
+  it('sin organización no propone usuario', async () => {
+    const { service } = createMocks();
 
-    const result = await service.suggestUsername('org-1', 'Ana Pérez');
+    const result = await service.suggestUsername(null, 'Ana Pérez');
 
-    expect(result).toEqual({ username: 'ana', domain: null });
+    expect(result).toEqual({ username: '' });
   });
 
   it('impide que un administrador se desactive a sí mismo', async () => {
@@ -299,6 +294,9 @@ describe('UsersService', () => {
     prisma.membership.findUnique.mockResolvedValue({
       id: 'membership-1',
       userId: 'user-2',
+      username: 'mesero',
+      isActive: true,
+      branchId: null,
       roles: [Role.WAITER],
       user: { email: null, username: 'mesero', name: 'Mesero' },
     });
@@ -331,6 +329,9 @@ describe('UsersService', () => {
     prisma.membership.findUnique.mockResolvedValue({
       id: 'membership-1',
       userId: 'user-2',
+      username: 'mesero',
+      isActive: true,
+      branchId: null,
       roles: [Role.WAITER],
       user: { email: null, username: 'mesero', name: 'Mesero' },
     });

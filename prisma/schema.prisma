@@ -325,13 +325,25 @@ model Organization {
 model User {
   id               String    @id @default(cuid())
   email            String?   @unique
-  username         String?   @unique // login de cuentas internas (minúsculas)
+  /// Campo legado solo para mostrar en reportes. El login vive en `Membership.username`.
+  username         String?
   passwordHash     String?
   name             String?
   googleId         String?   @unique // `sub` de Google (OpenID Connect)
   isActive         Boolean   @default(true)
   emailVerified    Boolean   @default(false)
   twoFactorEnabled Boolean   @default(false)
+  /// Secreto TOTP (app autenticadora), solo si `twoFactorTotpEnabled`.
+  twoFactorTotpSecret String?
+  twoFactorTotpEnabled Boolean @default(false)
+  /// Códigos de recuperación hasheados (se muestran una sola vez al activar 2FA).
+  twoFactorRecoveryCodes String[] @default([])
+  /// El usuario debe cambiar la contraseña inicial en su primer acceso.
+  mustChangePassword Boolean @default(false)
+  /// Metadatos del último inicio de sesión para alertar de uno nuevo.
+  lastLoginAt DateTime?
+  lastLoginIp String?
+  lastLoginUserAgent String?
   /// Acceso al panel de plataforma (`/platform`, `/plans`, `/subscriptions`).
   isPlatformAdmin  Boolean   @default(false)
   onboardedAt      DateTime? // null hasta completar el onboarding
@@ -367,6 +379,7 @@ model User {
   wastes                 Waste[]
 
   @@index([isActive])
+  @@index([username])
 }
 
 model Membership {
@@ -374,8 +387,12 @@ model Membership {
   userId         String
   organizationId String?
   branchId       String? // null = acceso a todas las sucursales
+  /// Nombre de usuario local del negocio (minúsculas). Único por organización.
+  username       String?
   roles          Role[]   @default([WAITER])
   isActive       Boolean  @default(true)
+  /// Creador del negocio; puede iniciar sesión desde el dominio principal.
+  isOwner        Boolean  @default(false)
   /// PIN de 4-8 dígitos para entrar a la caja en un dispositivo vinculado.
   pinHash        String?
   pinUpdatedAt   DateTime?
@@ -391,6 +408,8 @@ model Membership {
   branch       Branch?       @relation(fields: [branchId], references: [id], onDelete: SetNull)
 
   @@unique([userId, organizationId])
+  @@unique([organizationId, username])
+  @@index([username])
   @@index([organizationId])
   @@index([branchId])
 }
@@ -493,6 +512,8 @@ model EmailVerificationToken {
 model TwoFactorCode {
   id         String           @id
   userId     String
+  /// Negocio de la sesión que se está autenticando (solo en LOGIN).
+  organizationId String?
   purpose    TwoFactorPurpose
   codeHash   String
   expiresAt  DateTime
@@ -2011,6 +2032,9 @@ model Invitation {
   email          String
   roles          Role[]   @default([])
   branchId       String?
+  /// Nombre visible y username local que tendrá al aceptar.
+  name           String?
+  username       String?
   tokenHash      String   @unique
   invitedById    String?
   expiresAt      DateTime

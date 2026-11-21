@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { VerifiedEmailGuard } from '../auth/guards/verified-email.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { PrismaModule } from '../prisma/prisma.module';
 import { BillingClient } from './billing.client';
@@ -23,6 +24,7 @@ import { PlatformAdminGuard } from './platform-admin.guard';
     PlatformAdminGuard,
     JwtAuthGuard,
     RolesGuard,
+    VerifiedEmailGuard,
   ],
   exports: [BillingService],
 })

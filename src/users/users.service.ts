@@ -45,7 +45,7 @@ export class UsersService {
     return memberships.map((membership) => ({
       id: membership.user.id,
       email: membership.user.email,
-      username: membership.user.username,
+      username: membership.username,
       name: membership.user.name,
       isActive: membership.isActive && membership.user.isActive,
       emailVerified: membership.user.emailVerified,
@@ -82,7 +82,7 @@ export class UsersService {
                 { user: { name: { contains: search, mode: 'insensitive' } } },
                 { user: { email: { contains: search, mode: 'insensitive' } } },
                 {
-                  user: { username: { contains: search, mode: 'insensitive' } },
+                  username: { contains: search, mode: 'insensitive' },
                 },
                 {
                   organization: {
@@ -113,7 +113,7 @@ export class UsersService {
         {
           id: membership.user.id,
           email: membership.user.email,
-          username: membership.user.username,
+          username: membership.username,
           name: membership.user.name,
           isActive: membership.isActive && membership.user.isActive,
           emailVerified: membership.user.emailVerified,
@@ -131,88 +131,80 @@ export class UsersService {
   }
 
   /**
-   * Comprueba si un nombre de usuario se puede usar.
+   * Comprueba si un nombre de usuario está libre **dentro del negocio**.
    *
    * Devuelve `reason: 'invalid'` cuando no cumple el formato, para que el
    * formulario muestre el mismo mensaje sin depender de un 400.
    */
-  async usernameAvailable(rawUsername: string) {
+  async usernameAvailable(
+    organizationId: string | null,
+    rawUsername: string,
+  ) {
     const username = normalizeUsername(rawUsername ?? '');
 
     if (!isValidUsername(username)) {
-      return { username, available: false, reason: 'invalid' as const };
+      return {
+        username,
+        available: false,
+        reason: 'invalid' as const,
+        message:
+          'Usa entre 3 y 32 caracteres: letras, números, punto, guion o guion bajo.',
+      };
     }
 
-    const existing = await this.prisma.user.findUnique({
-      where: { username },
+    if (!organizationId) {
+      return {
+        username,
+        available: false,
+        reason: 'invalid' as const,
+        message: 'La sesión no tiene un negocio activo.',
+      };
+    }
+
+    const existing = await this.prisma.membership.findFirst({
+      where: { organizationId, username },
+      select: { id: true },
     });
 
     if (existing) {
-      return { username, available: false, reason: 'taken' as const };
+      return {
+        username,
+        available: false,
+        reason: 'taken' as const,
+        message: 'Ese usuario ya está en uso en este negocio.',
+      };
     }
 
-    return { username, available: true };
+    return { username, available: true, message: 'Disponible' };
   }
 
   /**
-   * Busca un usuario por correo para precargar su nombre.
+   * Propone el usuario local para una cuenta nueva.
    *
-   * Se usa cuando el administrador crea un usuario interno y el correo ya
-   * pertenece a una cuenta existente (registro con correo o Google), de modo
-   * que nombre y apellido se completen automáticamente.
-   */
-  async findByEmail(email: string) {
-    const normalized = email.trim().toLowerCase();
-
-    if (!normalized) {
-      return { found: false };
-    }
-
-    const user = await this.prisma.user.findUnique({
-      where: { email: normalized },
-      select: { id: true, name: true, email: true, username: true },
-    });
-
-    if (!user) {
-      return { found: false };
-    }
-
-    return { found: true, name: user.name, email: user.email, username: user.username };
-  }
-
-  /**
-   * Propone el usuario para una cuenta nueva.
-   *
-   * Usa el dominio del negocio: `ana@naranjapimienta.cafe`; si ya existe, cae
-   * en `a.perez@naranjapimienta.cafe` y, si también, añade un número. Sin
-   * dominio configurado mantiene el formato antiguo (`ana`, `a.perez`).
+   * `ana`, `a.perez`, `a.perez2`, ... dentro del negocio. No usa el dominio:
+   * el subdominio ya resuelve la organización.
    */
   async suggestUsername(organizationId: string | null, rawName: string) {
     if (!organizationId) {
-      return { username: '', domain: null };
+      return { username: '' };
     }
-    const organization = await this.prisma.organization.findUnique({
-      where: { id: organizationId },
-      select: { domain: true },
-    });
 
-    const domain = organization?.domain ?? null;
-    const candidates = usernameCandidates(rawName?.trim() ?? '', domain);
+    const candidates = usernameCandidates(rawName?.trim() ?? '');
 
     if (candidates.length === 0) {
-      return { username: '', domain };
+      return { username: '' };
     }
 
-    const taken = await this.prisma.user.findMany({
-      where: { username: { in: candidates } },
+    const taken = await this.prisma.membership.findMany({
+      where: { organizationId, username: { in: candidates } },
       select: { username: true },
     });
-    const takenUsernames = new Set(taken.map((user) => user.username));
+    const takenUsernames = new Set(taken.map((member) => member.username));
     const username =
       candidates.find((candidate) => !takenUsernames.has(candidate)) ??
       candidates[candidates.length - 1];
 
-    return { username, domain };
+    return { username };
   }
 
   /**
@@ -222,21 +214,32 @@ export class UsersService {
    * para 2FA y recuperación. No se reutilizan cuentas de otras organizaciones.
    */
   async create(organizationId: string | null, dto: CreateUserDto) {
+    if (!organizationId) {
+      throw new BadRequestException('La sesión no tiene un negocio activo');
+    }
+
     const username = normalizeUsername(dto.username);
 
     if (!isValidUsername(username)) {
-      throw new BadRequestException('El nombre de usuario no es válido');
+      throw new BadRequestException(
+        'El nombre de usuario no es válido: usa entre 3 y 32 caracteres, sin @dominio',
+      );
     }
 
     const email = dto.email?.trim().toLowerCase() || null;
 
     const [usernameTaken, emailTaken] = await Promise.all([
-      this.prisma.user.findUnique({ where: { username } }),
+      this.prisma.membership.findFirst({
+        where: { organizationId, username },
+        select: { id: true },
+      }),
       email ? this.prisma.user.findUnique({ where: { email } }) : null,
     ]);
 
     if (usernameTaken) {
-      throw new ConflictException('Ese nombre de usuario ya está en uso');
+      throw new ConflictException(
+        'Ese nombre de usuario ya está en uso en este negocio',
+      );
     }
 
     if (emailTaken) {
@@ -253,12 +256,16 @@ export class UsersService {
     return this.prisma.$transaction(async (tx) => {
       const user = await tx.user.create({
         data: {
+          // Espejo legado para reportes; el login usa `Membership.username`.
           username,
           email,
           name: fullName || null,
           passwordHash,
-          // El ADMIN que crea la cuenta responde por el correo indicado.
-          emailVerified: Boolean(email),
+          // El ADMIN que crea la cuenta no puede dar por verificado un correo
+          // que no controla: se verifica desde la cuenta.
+          emailVerified: false,
+          // La contraseña inicial la conoce el ADMIN; se cambia al entrar.
+          mustChangePassword: true,
           // La cuenta interna ya queda configurada; no pasa por el onboarding.
           onboardedAt: new Date(),
         },
@@ -267,7 +274,8 @@ export class UsersService {
       const membership = await tx.membership.create({
         data: {
           userId: user.id,
-          organizationId: organizationId,
+          organizationId,
+          username,
           branchId,
           roles: dto.roles,
         },
@@ -275,7 +283,7 @@ export class UsersService {
 
       return {
         id: user.id,
-        username: user.username,
+        username: membership.username,
         email: user.email,
         name: user.name,
         roles: membership.roles,
@@ -318,7 +326,8 @@ export class UsersService {
     userId: string,
     dto: UpdateUserDto,
     actorId: string,
-  ) {    if (!organizationId) {
+  ) {
+    if (!organizationId) {
       throw new NotFoundException('Usuario no encontrado en la organización');
     }
     const membership = await this.prisma.membership.findUnique({
@@ -372,6 +381,50 @@ export class UsersService {
       }
     }
 
+    const nextUsername =
+      dto.username !== undefined
+        ? normalizeUsername(dto.username)
+        : undefined;
+
+    if (nextUsername !== undefined) {
+      if (!isValidUsername(nextUsername)) {
+        throw new BadRequestException(
+          'El nombre de usuario no es válido: usa entre 3 y 32 caracteres, sin @dominio',
+        );
+      }
+
+      if (nextUsername !== membership.username) {
+        const taken = await this.prisma.membership.findFirst({
+          where: {
+            organizationId,
+            username: nextUsername,
+            id: { not: membership.id },
+          },
+          select: { id: true },
+        });
+
+        if (taken) {
+          throw new ConflictException(
+            'Ese nombre de usuario ya está en uso en este negocio',
+          );
+        }
+      }
+    }
+
+    const nextEmail =
+      dto.email !== undefined ? dto.email.trim().toLowerCase() : undefined;
+
+    if (nextEmail !== undefined && nextEmail !== membership.user.email) {
+      const emailTaken = await this.prisma.user.findUnique({
+        where: { email: nextEmail },
+        select: { id: true },
+      });
+
+      if (emailTaken && emailTaken.id !== userId) {
+        throw new ConflictException('Ese correo ya está registrado');
+      }
+    }
+
     const passwordHash = dto.password ? await hash(dto.password) : undefined;
     const branchId =
       dto.branchId !== undefined
@@ -397,6 +450,10 @@ export class UsersService {
       dto.isActive !== undefined && dto.isActive !== membership.isActive;
     const branchChanged =
       branchId !== undefined && branchId !== membership.branchId;
+    const usernameChanged =
+      nextUsername !== undefined && nextUsername !== membership.username;
+    const emailChanged =
+      nextEmail !== undefined && nextEmail !== membership.user.email;
 
     // Si no cambió nada, no se escribe ni se revocan sesiones.
     if (
@@ -404,11 +461,13 @@ export class UsersService {
       !passwordHash &&
       !rolesChanged &&
       !isActiveChanged &&
-      !branchChanged
+      !branchChanged &&
+      !usernameChanged &&
+      !emailChanged
     ) {
       return {
         id: userId,
-        username: membership.user.username,
+        username: membership.username,
         email: membership.user.email,
         name: membership.user.name,
         roles: membership.roles,
@@ -418,12 +477,24 @@ export class UsersService {
     }
 
     return this.prisma.$transaction(async (tx) => {
-      if (nameIsDifferent || passwordHash) {
+      if (nameIsDifferent || passwordHash || emailChanged || usernameChanged) {
         await tx.user.update({
           where: { id: userId },
           data: {
             ...(nameIsDifferent ? { name: nextName } : {}),
             ...(passwordHash ? { passwordHash } : {}),
+            ...(passwordHash ? { mustChangePassword: true } : {}),
+            ...(usernameChanged ? { username: nextUsername } : {}),
+            ...(emailChanged
+              ? {
+                  email: nextEmail,
+                  emailVerified: false,
+                  twoFactorEnabled: false,
+                  twoFactorTotpEnabled: false,
+                  twoFactorTotpSecret: null,
+                  twoFactorRecoveryCodes: [],
+                }
+              : {}),
           },
         });
       }
@@ -436,21 +507,22 @@ export class UsersService {
       }
 
       const updated =
-        rolesChanged || isActiveChanged || branchChanged
+        rolesChanged || isActiveChanged || branchChanged || usernameChanged
           ? await tx.membership.update({
               where: { id: membership.id },
               data: {
                 ...(rolesChanged ? { roles: dto.roles } : {}),
                 ...(isActiveChanged ? { isActive: dto.isActive } : {}),
                 ...(branchChanged ? { branchId } : {}),
+                ...(usernameChanged ? { username: nextUsername } : {}),
               },
             })
           : membership;
 
       return {
         id: userId,
-        username: membership.user.username,
-        email: membership.user.email,
+        username: usernameChanged ? nextUsername : membership.username,
+        email: emailChanged ? nextEmail : membership.user.email,
         name: nameIsDifferent ? nextName : membership.user.name,
         roles: updated.roles,
         branchId: updated.branchId,

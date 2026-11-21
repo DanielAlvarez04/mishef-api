@@ -12,7 +12,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { hash, verify } from 'argon2';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { Role, TwoFactorPurpose } from '@prisma/client';
+import { Prisma, Role, TwoFactorPurpose } from '@prisma/client';
 import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -24,11 +24,18 @@ import {
 } from '../common/slug';
 import { PRACTICE_WINDOW_MS } from '../common/practice';
 import { isValidUsername, normalizeUsername } from '../common/usernames';
+import { permissionsForRoles } from '../common/permissions';
+import {
+  generateTotpSecret,
+  totpUri,
+  verifyTotp,
+} from './totp';
 import { MailService } from '../mail/mail.service';
 import type { GoogleProfile } from './google-oauth.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { BillingService } from '../billing/billing.service';
 import {
+  loginAlertEmail,
   passwordChangedEmail,
   passwordResetEmail,
   twoFactorEmail,
@@ -49,6 +56,14 @@ export interface JwtUser {
   branchId?: string | null;
   /** Acceso al panel interno de la plataforma. */
   isPlatformAdmin?: boolean;
+  /** Dueño del negocio: único que puede entrar por el dominio principal. */
+  isOwner?: boolean;
+  /** Slug del negocio de la sesión, para validar el host. */
+  organizationSlug?: string | null;
+  /** El correo de la cuenta está verificado. */
+  emailVerified?: boolean;
+  /** Debe cambiar la contraseña inicial antes de operar. */
+  mustChangePassword?: boolean;
   /** Usuario de plataforma que abrió esta sesión de soporte. */
   impersonatedById?: string | null;
   /** Nombre visible del actor, para el banner de soporte. */
@@ -59,6 +74,8 @@ export interface RefreshPayload {
   sub: string;
   sid: string;
   type: 'refresh';
+  /** Negocio de la sesión; evita elegir `memberships[0]` al rotar. */
+  organizationId?: string | null;
 }
 
 export interface SessionMeta {
@@ -82,7 +99,12 @@ export type GoogleLoginResult =
         organizationName: string;
       };
     }
-  | { kind: 'twofactor'; challengeId: string; email: string }
+  | {
+      kind: 'twofactor';
+      challengeId: string;
+      email: string;
+      method?: 'TOTP' | 'EMAIL';
+    }
   | {
       kind: 'error';
       reason:
@@ -90,7 +112,8 @@ export type GoogleLoginResult =
         | 'inactive'
         | 'no_membership'
         | 'mismatch'
-        | 'unverified_email';
+        | 'unverified_email'
+        | 'subdomain_required';
     };
 
 export type GoogleLinkResult =
@@ -104,8 +127,9 @@ const googleUserInclude = {
   memberships: {
     where: { isActive: true, organization: { isActive: true } },
     include: { organization: true },
+    orderBy: [{ isOwner: 'desc' }, { createdAt: 'asc' }],
   },
-} as const;
+} satisfies Prisma.UserInclude;
 
 function sanitizeBusinessName(value?: string): string | null {
   const name = value?.trim();
@@ -121,6 +145,7 @@ const EMAIL_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 horas
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000; // 1 hora
 const TWO_FACTOR_TTL_MS = 10 * 60 * 1000; // 10 minutos
 const TWO_FACTOR_MAX_ATTEMPTS = 5;
+const TWO_FACTOR_RECOVERY_CODE_COUNT = 8;
 
 /**
  * Una sesión rotada conserva el id de la sesión que la reemplazó.
@@ -155,6 +180,11 @@ function rotatedException(): UnauthorizedException {
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
+  /** Intentos fallidos por negocio+identificador (en memoria, por proceso). */
+  private readonly loginAttempts = new Map<
+    string,
+    { count: number; blockedUntil: number }
+  >();
 
   constructor(
     private prisma: PrismaService,
@@ -170,82 +200,141 @@ export class AuthService {
   // --------------------------------------------------------------------------
 
   async login(dto: LoginDto, meta: SessionMeta = {}) {
-    const identifier = dto.identifier.trim().toLowerCase();
-    const include = {
-      memberships: {
-        where: { isActive: true, organization: { isActive: true } },
-        include: { organization: true },
-      },
-    } as const;
+    const identifier = normalizeUsername(dto.identifier);
+    const tenant = dto.tenant ? normalizeSlug(dto.tenant) : null;
+    const attemptKey = `${tenant ?? "main"}:${identifier}`;
+    const attempt = this.loginAttempts.get(attemptKey);
 
-    // El identificador con `@` es siempre un correo. Antes se probaba también
-    // como `username`, lo que permitía crear usuarios con forma de correo y
-    // confundir cuentas entre negocios: ya no se admite.
-    let user = await this.prisma.user.findUnique({
-      where: identifier.includes('@')
-        ? { email: identifier }
-        : { username: identifier },
-      include,
-    });
-
-    if (!user || !user.passwordHash) {
-      throw new UnauthorizedException('Credenciales inválidas');
-    }
-
-    const valid = await verify(user.passwordHash, dto.password);
-    if (!valid) {
-      throw new UnauthorizedException('Credenciales inválidas');
-    }
-
-    // Si la petición viene de un subdominio de negocio, la cuenta debe
-    // pertenecer a esa organización. Sin esto, el login de `micafeteria`
-    // aceptaría a un empleado de otro negocio y la sesión se crearía igual.
-    if (dto.tenant) {
-      const tenant = normalizeSlug(dto.tenant);
-      const belongs = user.memberships.some(
-        (membership) => membership.organization?.slug === tenant,
+    if (attempt && attempt.blockedUntil > Date.now()) {
+      throw new UnauthorizedException(
+        'Demasiados intentos fallidos. Espera unos minutos e inténtalo de nuevo.',
       );
-
-      if (!belongs) {
-        throw new UnauthorizedException(
-          'Esta cuenta no pertenece a este negocio',
-        );
-      }
     }
 
-    if (!user.isActive) {
+    const membership = await this.resolveLoginMembership(identifier, tenant);
+
+    if (!membership?.user.passwordHash) {
+      this.registerLoginFailure(attemptKey);
+      throw new UnauthorizedException('Credenciales inválidas');
+    }
+
+    const valid = await verify(membership.user.passwordHash, dto.password);
+    if (!valid) {
+      this.registerLoginFailure(attemptKey);
+      throw new UnauthorizedException('Credenciales inválidas');
+    }
+
+    this.loginAttempts.delete(attemptKey);
+
+    if (!membership.user.isActive || !membership.isActive) {
       throw new UnauthorizedException('Usuario desactivado');
     }
 
-    if (user.memberships.length === 0) {
-      throw new UnauthorizedException('Usuario sin membresía activa');
+    // En el dominio principal solo entra el dueño del negocio (o el equipo de
+    // plataforma). El resto debe usar el subdominio de su negocio.
+    if (!tenant && !membership.isOwner && !membership.user.isPlatformAdmin) {
+      throw new UnauthorizedException(
+        'Entra por el subdominio de tu negocio para iniciar sesión',
+      );
     }
 
-    if (user.twoFactorEnabled) {
-      if (!user.email) {
+    if (membership.user.twoFactorEnabled) {
+      if (
+        membership.user.twoFactorTotpEnabled &&
+        membership.user.twoFactorTotpSecret
+      ) {
+        const challenge = await this.createTwoFactorCode(
+          membership.user.id,
+          TwoFactorPurpose.LOGIN,
+          membership.organizationId,
+        );
+
+        return {
+          twoFactorRequired: true as const,
+          challengeId: challenge.id,
+          email: membership.user.email,
+          method: 'TOTP' as const,
+        };
+      }
+
+      if (!membership.user.email) {
         throw new UnauthorizedException(
           'La cuenta no tiene un correo para el segundo factor',
         );
       }
 
       const challenge = await this.createTwoFactorCode(
-        user.id,
+        membership.user.id,
         TwoFactorPurpose.LOGIN,
+        membership.organizationId,
       );
 
       await this.mail.send({
-        to: user.email,
+        to: membership.user.email,
         ...twoFactorEmail(challenge.code, 'LOGIN'),
       });
 
       return {
         twoFactorRequired: true as const,
         challengeId: challenge.id,
-        email: user.email,
+        email: membership.user.email,
+        method: 'EMAIL' as const,
       };
     }
 
-    return this.issueSessionForUser(user.id, meta);
+    return this.issueSessionForUser(
+      membership.user.id,
+      meta,
+      membership.organizationId,
+      { notifyLogin: true },
+    );
+  }
+
+  private registerLoginFailure(key: string) {
+    const now = Date.now();
+    const current = this.loginAttempts.get(key);
+    const count =
+      current && current.blockedUntil > now ? current.count + 1 : 1;
+
+    this.loginAttempts.set(key, {
+      count,
+      blockedUntil:
+        count >= 10 ? now + 15 * 60 * 1000 : (current?.blockedUntil ?? 0),
+    });
+  }
+
+  /**
+   * Busca la membresía con la que se intenta iniciar sesión.
+   *
+   * - Con subdominio: usuario o correo dentro de esa organización.
+   * - Sin subdominio: se prefiere la membresía de dueño; el login decide
+   *   después si permite la entrada.
+   */
+  private async resolveLoginMembership(
+    identifier: string,
+    tenant: string | null,
+  ) {
+    const email = identifier.includes('@') ? identifier : null;
+
+    const memberships = await this.prisma.membership.findMany({
+      where: {
+        isActive: true,
+        organization: {
+          isActive: true,
+          ...(tenant ? { slug: tenant } : {}),
+        },
+        user: {
+          isActive: true,
+          ...(email ? { email } : {}),
+        },
+        ...(email ? {} : { username: identifier }),
+      },
+      include: { user: true, organization: true },
+      orderBy: [{ isOwner: 'desc' }, { createdAt: 'asc' }],
+      take: 2,
+    });
+
+    return memberships[0] ?? null;
   }
 
   /**
@@ -277,6 +366,7 @@ export class AuthService {
       membership.roles,
       organizationId,
       meta,
+      membership.isOwner,
     );
 
     return {
@@ -284,7 +374,7 @@ export class AuthService {
       user: {
         id: user.id,
         name: user.name,
-        username: user.username,
+        username: membership.username,
         roles: membership.roles,
       },
     };
@@ -295,13 +385,119 @@ export class AuthService {
     code: string,
     meta: SessionMeta = {},
   ) {
-    const userId = await this.consumeTwoFactorCode(
+    const record = await this.prisma.twoFactorCode.findUnique({
+      where: { id: challengeId },
+    });
+
+    if (
+      !record ||
+      record.purpose !== TwoFactorPurpose.LOGIN ||
+      record.consumedAt ||
+      record.expiresAt <= new Date() ||
+      record.attempts >= TWO_FACTOR_MAX_ATTEMPTS
+    ) {
+      throw new UnauthorizedException('Código inválido o expirado');
+    }
+
+    // Los códigos de recuperación son alfanuméricos; el de correo es de 6
+    // dígitos. Ambos consumen el mismo reto.
+    if (!/^\d{6}$/.test(code.trim())) {
+      const user = await this.prisma.user.findUnique({
+        where: { id: record.userId },
+      });
+
+      const normalized = code.trim().toLowerCase();
+      let matchedIndex = -1;
+
+      if (user) {
+        for (const [index, hashValue] of user.twoFactorRecoveryCodes.entries()) {
+          if (await verify(hashValue, normalized)) {
+            matchedIndex = index;
+            break;
+          }
+        }
+      }
+
+      if (!user || !user.twoFactorEnabled || matchedIndex < 0) {
+        await this.registerTwoFactorFailure(record);
+        throw new UnauthorizedException('Código inválido o expirado');
+      }
+
+      await this.prisma.$transaction([
+        this.prisma.user.update({
+          where: { id: user.id },
+          data: {
+            twoFactorRecoveryCodes: user.twoFactorRecoveryCodes.filter(
+              (_value, index) => index !== matchedIndex,
+            ),
+          },
+        }),
+        this.prisma.twoFactorCode.update({
+          where: { id: record.id },
+          data: { consumedAt: new Date() },
+        }),
+      ]);
+
+      return this.issueSessionForUser(
+        user.id,
+        meta,
+        record.organizationId,
+        { notifyLogin: true },
+      );
+    }
+
+    const normalizedCode = code.trim();
+    const user = await this.prisma.user.findUnique({
+      where: { id: record.userId },
+    });
+
+    if (
+      /^\d{6}$/.test(normalizedCode) &&
+      user?.twoFactorTotpEnabled &&
+      user.twoFactorTotpSecret &&
+      verifyTotp(user.twoFactorTotpSecret, normalizedCode)
+    ) {
+      await this.prisma.twoFactorCode.update({
+        where: { id: record.id },
+        data: { consumedAt: new Date() },
+      });
+
+      return this.issueSessionForUser(
+        user.id,
+        meta,
+        record.organizationId,
+        { notifyLogin: true },
+      );
+    }
+
+    const challenge = await this.consumeTwoFactorCode(
       challengeId,
-      code,
+      normalizedCode,
       TwoFactorPurpose.LOGIN,
     );
 
-    return this.issueSessionForUser(userId, meta);
+    return this.issueSessionForUser(
+      challenge.userId,
+      meta,
+      challenge.organizationId,
+      { notifyLogin: true },
+    );
+  }
+
+  private async registerTwoFactorFailure(record: {
+    id: string;
+    attempts: number;
+  }) {
+    const attempts = record.attempts + 1;
+
+    await this.prisma.twoFactorCode.update({
+      where: { id: record.id },
+      data: {
+        attempts,
+        consumedAt:
+          attempts >= TWO_FACTOR_MAX_ATTEMPTS ? new Date() : undefined,
+      },
+    });
   }
 
   // --------------------------------------------------------------------------
@@ -352,9 +548,15 @@ export class AuthService {
       return { kind: 'error', reason: 'mismatch' };
     }
 
-    const membership = user.memberships[0];
+    const membership =
+      user.memberships.find((item) => item.isOwner) ?? user.memberships[0];
     if (!membership) {
       return { kind: 'error', reason: 'no_membership' };
+    }
+
+    // Google se usa desde el dominio principal: solo dueños y plataforma.
+    if (!membership.isOwner && !user.isPlatformAdmin) {
+      return { kind: 'error', reason: 'subdomain_required' };
     }
 
     // Vinculación idempotente: si otra petición ya vinculó la cuenta, no duplica.
@@ -373,6 +575,21 @@ export class AuthService {
     }
 
     if (user.twoFactorEnabled) {
+      if (user.twoFactorTotpEnabled && user.twoFactorTotpSecret) {
+        const challenge = await this.createTwoFactorCode(
+          user.id,
+          TwoFactorPurpose.LOGIN,
+          membership.organizationId,
+        );
+
+        return {
+          kind: 'twofactor',
+          challengeId: challenge.id,
+          email: user.email ?? '',
+          method: 'TOTP',
+        };
+      }
+
       if (!user.email) {
         return { kind: 'error', reason: 'unverified_email' };
       }
@@ -380,6 +597,7 @@ export class AuthService {
       const challenge = await this.createTwoFactorCode(
         user.id,
         TwoFactorPurpose.LOGIN,
+        membership.organizationId,
       );
 
       await this.mail.send({
@@ -391,10 +609,16 @@ export class AuthService {
         kind: 'twofactor',
         challengeId: challenge.id,
         email: user.email,
+        method: 'EMAIL',
       };
     }
 
-    const session = await this.issueSessionForUser(user.id, meta);
+    const session = await this.issueSessionForUser(
+      user.id,
+      meta,
+      membership.organizationId,
+      { notifyLogin: true },
+    );
 
     return { kind: 'session', ...session };
   }
@@ -442,13 +666,18 @@ export class AuthService {
             userId: user.id,
             organizationId: organization.id,
             roles: [Role.ADMIN],
+            isOwner: true,
           },
         });
 
         return user;
       });
 
-      const session = await this.issueSessionForUser(created.id, meta);
+      const session = await this.issueSessionForUser(
+        created.id,
+        meta,
+        organizationId,
+      );
       if (this.inventory) await this.inventory.ensureCoreDefaults();
       if (organizationId) await this.billing?.startTrial(organizationId);
 
@@ -578,6 +807,47 @@ export class AuthService {
     return { ok: true };
   }
 
+  /** Sesiones activas del usuario, marcando la sesión actual. */
+  async listSessions(userId: string, currentSessionId: string) {
+    const sessions = await this.prisma.authSession.findMany({
+      where: {
+        userId,
+        revokedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        userAgent: true,
+        ip: true,
+        createdAt: true,
+        lastUsedAt: true,
+        expiresAt: true,
+        impersonatedById: true,
+      },
+      take: 50,
+    });
+
+    return sessions.map((session) => ({
+      ...session,
+      current: session.id === currentSessionId,
+    }));
+  }
+
+  /** Revoca una sesión concreta del propio usuario. */
+  async revokeSession(userId: string, sessionId: string) {
+    const result = await this.prisma.authSession.updateMany({
+      where: { id: sessionId, userId, revokedAt: null },
+      data: { revokedAt: new Date(), revokedReason: 'REVOKED_BY_USER' },
+    });
+
+    if (result.count === 0) {
+      throw new NotFoundException('Sesión no encontrada');
+    }
+
+    return { ok: true };
+  }
+
   async refresh(refreshToken: string | undefined, meta: SessionMeta = {}) {
     if (!refreshToken) {
       throw new UnauthorizedException('Refresh token no proporcionado');
@@ -625,6 +895,7 @@ export class AuthService {
         memberships: {
           where: { isActive: true, organization: { isActive: true } },
           include: { organization: true },
+          orderBy: [{ isOwner: 'desc' }, { createdAt: 'asc' }],
         },
       },
     });
@@ -633,7 +904,12 @@ export class AuthService {
       throw new UnauthorizedException('Usuario no encontrado');
     }
 
-    const membership = user.memberships[0];
+    const membership = payload.organizationId
+      ? user.memberships.find(
+          (item) => item.organizationId === payload.organizationId,
+        )
+      : user.memberships.find((item) => item.isOwner) ?? user.memberships[0];
+
     if (!membership) {
       throw new UnauthorizedException('Usuario sin membresía activa');
     }
@@ -669,6 +945,7 @@ export class AuthService {
       membership.roles,
       membership.organizationId,
       meta,
+      membership.isOwner,
     );
 
     await this.prisma.authSession.update({
@@ -900,15 +1177,20 @@ export class AuthService {
     return {
       id: found.id,
       email: found.email,
-      username: found.username,
+      username: membership?.username ?? null,
       name: found.name,
       emailVerified: found.emailVerified,
       twoFactorEnabled: found.twoFactorEnabled,
+      twoFactorTotpEnabled: found.twoFactorTotpEnabled,
+      mustChangePassword: found.mustChangePassword,
       onboarded: Boolean(found.onboardedAt),
       googleLinked: Boolean(found.googleId),
       isPlatformAdmin: found.isPlatformAdmin,
+      isOwner: membership?.isOwner ?? false,
       roles: membership?.roles ?? [],
+      permissions: permissionsForRoles(membership?.roles ?? []),
       organizationId: membership?.organizationId,
+      organizationSlug: membership?.organization?.slug ?? null,
       organization,
       // Sucursal fija del miembro: si existe, no puede operar en el consolidado.
       branchId: membership?.branchId ?? null,
@@ -919,16 +1201,37 @@ export class AuthService {
   }
 
   /**
-   * Edita el nombre visible y/o el nombre de usuario de la cuenta actual.
+   * Edita el nombre, el usuario local y/o el correo de la cuenta actual.
    *
-   * Se usa en el onboarding (Admin dueño del negocio) y desde Ajustes. El
-   * usuario se normaliza a minúsculas y debe ser único entre todas las cuentas.
+   * El username vive en la membresía del negocio activo. Cambiar el correo lo
+   * deja sin verificar y desactiva 2FA hasta que se confirme la nueva dirección.
    */
-  async updateProfile(userId: string, dto: UpdateProfileDto) {
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+  async updateProfile(
+    userId: string,
+    dto: UpdateProfileDto,
+    organizationId?: string | null,
+  ) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        memberships: {
+          where: { isActive: true, organization: { isActive: true } },
+          include: { organization: true },
+          orderBy: [{ isOwner: 'desc' }, { createdAt: 'asc' }],
+        },
+      },
+    });
 
     if (!user) {
       throw new UnauthorizedException('Usuario no encontrado');
+    }
+
+    const membership = organizationId
+      ? user.memberships.find((item) => item.organizationId === organizationId)
+      : user.memberships.find((item) => item.isOwner) ?? user.memberships[0];
+
+    if (!membership) {
+      throw new UnauthorizedException('Usuario sin membresía activa');
     }
 
     let username: string | undefined;
@@ -938,40 +1241,97 @@ export class AuthService {
 
       if (!isValidUsername(username)) {
         throw new BadRequestException(
-          'El usuario debe tener entre 3 y 120 caracteres: letras, números, punto, guion, guion bajo y, opcionalmente, @dominio',
+          'El usuario debe tener entre 3 y 32 caracteres: letras, números, punto, guion y guion bajo; sin @dominio',
         );
       }
 
-      if (username !== user.username) {
-        const taken = await this.prisma.user.findUnique({
-          where: { username },
+      if (username !== membership.username) {
+        const taken = await this.prisma.membership.findFirst({
+          where: {
+            organizationId: membership.organizationId,
+            username,
+            id: { not: membership.id },
+          },
+          select: { id: true },
         });
 
         if (taken) {
-          throw new ConflictException('Ese nombre de usuario ya está en uso');
+          throw new ConflictException(
+            'Ese nombre de usuario ya está en uso en este negocio',
+          );
         }
+      }
+    }
+
+    const email =
+      dto.email !== undefined ? dto.email.trim().toLowerCase() : undefined;
+
+    if (email !== undefined && email !== user.email) {
+      const taken = await this.prisma.user.findUnique({
+        where: { email },
+        select: { id: true },
+      });
+
+      if (taken && taken.id !== userId) {
+        throw new ConflictException('Ese correo ya está registrado');
       }
     }
 
     const name = dto.name === undefined ? undefined : dto.name.trim() || null;
     const nameChanged = name !== undefined && name !== user.name;
-    const usernameChanged = username !== undefined && username !== user.username;
+    const usernameChanged =
+      username !== undefined && username !== membership.username;
+    const emailChanged = email !== undefined && email !== user.email;
 
-    const updated =
-      nameChanged || usernameChanged
-        ? await this.prisma.user.update({
-            where: { id: userId },
-            data: {
-              ...(nameChanged ? { name } : {}),
-              ...(usernameChanged ? { username } : {}),
-            },
-          })
-        : user;
+    if (!nameChanged && !usernameChanged && !emailChanged) {
+      return {
+        id: user.id,
+        name: user.name,
+        username: membership.username,
+        email: user.email,
+        emailVerified: user.emailVerified,
+      };
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      if (nameChanged || emailChanged || usernameChanged) {
+        await tx.user.update({
+          where: { id: userId },
+          data: {
+            ...(nameChanged ? { name } : {}),
+            ...(usernameChanged ? { username } : {}),
+            ...(emailChanged
+              ? {
+                  email,
+                  emailVerified: false,
+                  twoFactorEnabled: false,
+                  twoFactorTotpEnabled: false,
+                  twoFactorTotpSecret: null,
+                  twoFactorRecoveryCodes: [],
+                }
+              : {}),
+          },
+        });
+      }
+
+      if (usernameChanged) {
+        await tx.membership.update({
+          where: { id: membership.id },
+          data: { username },
+        });
+      }
+    });
+
+    if (emailChanged) {
+      await this.sendVerificationEmail(userId, email ?? null);
+    }
 
     return {
-      id: updated.id,
-      name: updated.name,
-      username: updated.username,
+      id: userId,
+      name: nameChanged ? name : user.name,
+      username: usernameChanged ? username : membership.username,
+      email: emailChanged ? email : user.email,
+      emailVerified: emailChanged ? false : user.emailVerified,
     };
   }
 
@@ -1053,6 +1413,7 @@ export class AuthService {
           userId: created.id,
           organizationId: organization.id,
           roles: [Role.ADMIN],
+          isOwner: true,
         },
       });
 
@@ -1062,7 +1423,7 @@ export class AuthService {
     if (organizationId) await this.billing?.startTrial(organizationId);
     await this.sendVerificationEmail(user.id, user.email);
 
-    return this.issueSessionForUser(user.id, meta);
+    return this.issueSessionForUser(user.id, meta, organizationId);
   }
 
   // --------------------------------------------------------------------------
@@ -1197,7 +1558,7 @@ export class AuthService {
       }),
       this.prisma.user.update({
         where: { id: record.userId },
-        data: { passwordHash },
+        data: { passwordHash, mustChangePassword: false },
       }),
       this.prisma.authSession.updateMany({
         where: { userId: record.userId, revokedAt: null },
@@ -1243,7 +1604,7 @@ export class AuthService {
     await this.prisma.$transaction([
       this.prisma.user.update({
         where: { id: user.id },
-        data: { passwordHash },
+        data: { passwordHash, mustChangePassword: false },
       }),
       this.prisma.authSession.updateMany({
         where: { userId: user.id, revokedAt: null },
@@ -1280,6 +1641,12 @@ export class AuthService {
       );
     }
 
+    if (!user.emailVerified) {
+      throw new BadRequestException(
+        'Verifica tu correo antes de activar la verificación en dos pasos',
+      );
+    }
+
     const challenge = await this.createTwoFactorCode(
       user.id,
       TwoFactorPurpose.ENABLE,
@@ -1294,22 +1661,94 @@ export class AuthService {
   }
 
   async confirmTwoFactorEnable(userId: string, challengeId: string, code: string) {
-    const owner = await this.consumeTwoFactorCode(
+    const challenge = await this.consumeTwoFactorCode(
       challengeId,
       code,
       TwoFactorPurpose.ENABLE,
     );
 
-    if (owner !== userId) {
+    if (challenge.userId !== userId) {
       throw new UnauthorizedException('Código inválido o expirado');
     }
 
+    const { codes: recoveryCodes, hashes: recoveryHashes } =
+      await this.createRecoveryCodeSet();
+
     await this.prisma.user.update({
       where: { id: userId },
-      data: { twoFactorEnabled: true },
+      data: {
+        twoFactorEnabled: true,
+        twoFactorRecoveryCodes: recoveryHashes,
+      },
     });
 
-    return { twoFactorEnabled: true };
+    return { twoFactorEnabled: true, recoveryCodes };
+  }
+
+  /** Genera el secreto TOTP y lo deja pendiente de confirmar. */
+  async startTotpSetup(userId: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+
+    if (!user) {
+      throw new UnauthorizedException('Usuario no encontrado');
+    }
+
+    if (user.twoFactorTotpEnabled) {
+      throw new BadRequestException(
+        'La app autenticadora ya está activa. Desactiva 2FA para cambiarla.',
+      );
+    }
+
+    const secret = generateTotpSecret();
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { twoFactorTotpSecret: secret, twoFactorTotpEnabled: false },
+    });
+
+    return {
+      secret,
+      otpauthUrl: totpUri(
+        secret,
+        user.email ?? user.username ?? 'cuenta',
+      ),
+    };
+  }
+
+  /** Confirma el primer código de la app y activa TOTP. */
+  async confirmTotpSetup(userId: string, code: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+
+    if (!user?.twoFactorTotpSecret) {
+      throw new BadRequestException('Primero genera el secreto TOTP');
+    }
+
+    if (!verifyTotp(user.twoFactorTotpSecret, code)) {
+      throw new BadRequestException('El código de la app no es válido');
+    }
+
+    const { codes: recoveryCodes, hashes: recoveryHashes } =
+      await this.createRecoveryCodeSet();
+
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        twoFactorEnabled: true,
+        twoFactorTotpEnabled: true,
+        twoFactorRecoveryCodes: recoveryHashes,
+      },
+    });
+
+    return { twoFactorEnabled: true, recoveryCodes };
+  }
+
+  private async createRecoveryCodeSet() {
+    const codes = Array.from(
+      { length: TWO_FACTOR_RECOVERY_CODE_COUNT },
+      () => randomBytes(5).toString('hex'),
+    );
+    const hashes = await Promise.all(codes.map((code) => hash(code)));
+
+    return { codes, hashes };
   }
 
   async disableTwoFactor(userId: string, password: string) {
@@ -1333,7 +1772,12 @@ export class AuthService {
     await this.prisma.$transaction([
       this.prisma.user.update({
         where: { id: userId },
-        data: { twoFactorEnabled: false },
+        data: {
+          twoFactorEnabled: false,
+          twoFactorTotpEnabled: false,
+          twoFactorTotpSecret: null,
+          twoFactorRecoveryCodes: [],
+        },
       }),
       this.prisma.twoFactorCode.updateMany({
         where: { userId, consumedAt: null },
@@ -1348,13 +1792,19 @@ export class AuthService {
   // Helpers
   // --------------------------------------------------------------------------
 
-  private async issueSessionForUser(userId: string, meta: SessionMeta) {
+  private async issueSessionForUser(
+    userId: string,
+    meta: SessionMeta,
+    organizationId?: string | null,
+    options: { notifyLogin?: boolean } = {},
+  ) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       include: {
         memberships: {
           where: { isActive: true, organization: { isActive: true } },
           include: { organization: true },
+          orderBy: [{ isOwner: 'desc' }, { createdAt: 'asc' }],
         },
       },
     });
@@ -1363,9 +1813,18 @@ export class AuthService {
       throw new UnauthorizedException('Usuario no encontrado');
     }
 
-    const membership = user.memberships[0];
+    const membership = organizationId
+      ? user.memberships.find((item) => item.organizationId === organizationId)
+      : user.memberships.find((item) => item.isOwner) ?? user.memberships[0];
+
     if (!membership) {
       throw new UnauthorizedException('Usuario sin membresía activa');
+    }
+
+    if (!organizationId && !membership.isOwner && !user.isPlatformAdmin) {
+      throw new UnauthorizedException(
+        'Entra por el subdominio de tu negocio para iniciar sesión',
+      );
     }
 
     const tokens = await this.createSession(
@@ -1374,7 +1833,50 @@ export class AuthService {
       membership.roles,
       membership.organizationId,
       meta,
+      membership.isOwner,
     );
+
+    const ip = meta.ip?.trim() || null;
+    const userAgent = meta.userAgent?.trim() || null;
+    const previousIp = user.lastLoginIp;
+    const previousAgent = user.lastLoginUserAgent;
+
+    try {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          lastLoginAt: new Date(),
+          lastLoginIp: ip,
+          lastLoginUserAgent: userAgent,
+        },
+      });
+    } catch (error) {
+      this.logger.warn(
+        `No se pudo guardar el último inicio de sesión: ${
+          (error as Error).message
+        }`,
+      );
+    }
+
+    if (
+      options.notifyLogin &&
+      user.email &&
+      previousIp &&
+      (previousIp !== ip || previousAgent !== userAgent)
+    ) {
+      try {
+        await this.mail.send({
+          to: user.email,
+          ...loginAlertEmail({ ip, userAgent }),
+        });
+      } catch (error) {
+        this.logger.warn(
+          `No se pudo enviar la alerta de inicio de sesión: ${
+            (error as Error).message
+          }`,
+        );
+      }
+    }
 
     return {
       accessToken: tokens.accessToken,
@@ -1383,9 +1885,13 @@ export class AuthService {
         id: user.id,
         email: user.email,
         name: user.name,
+        username: membership.username,
         roles: membership.roles,
         organizationId: membership.organizationId,
         organizationName: membership.organization?.name ?? '',
+        organizationSlug: membership.organization?.slug ?? null,
+        isOwner: membership.isOwner,
+        isPlatformAdmin: user.isPlatformAdmin,
       },
     };
   }
@@ -1396,6 +1902,7 @@ export class AuthService {
     roles: Role[],
     organizationId: string | null,
     meta: SessionMeta,
+    isOwner = false,
   ) {
     const sessionId = randomUUID();
     const now = Date.now();
@@ -1407,6 +1914,7 @@ export class AuthService {
         roles,
         organizationId,
         sid: sessionId,
+        isOwner,
       } satisfies JwtUser,
       {
         secret: this.config.get('JWT_ACCESS_SECRET'),
@@ -1415,7 +1923,12 @@ export class AuthService {
     );
 
     const refreshToken = await this.jwt.signAsync(
-      { sub: userId, sid: sessionId, type: 'refresh' } satisfies RefreshPayload,
+      {
+        sub: userId,
+        sid: sessionId,
+        type: 'refresh',
+        organizationId,
+      } satisfies RefreshPayload,
       {
         secret: this.config.get('JWT_REFRESH_SECRET'),
         expiresIn: '7d',
@@ -1531,6 +2044,7 @@ export class AuthService {
   private async createTwoFactorCode(
     userId: string,
     purpose: TwoFactorPurpose,
+    organizationId: string | null = null,
   ): Promise<{ id: string; code: string }> {
     await this.prisma.twoFactorCode.updateMany({
       where: { userId, purpose, consumedAt: null },
@@ -1544,6 +2058,7 @@ export class AuthService {
       data: {
         id,
         userId,
+        organizationId,
         purpose,
         codeHash: await hash(code),
         expiresAt: new Date(Date.now() + TWO_FACTOR_TTL_MS),
@@ -1557,7 +2072,7 @@ export class AuthService {
     challengeId: string,
     code: string,
     purpose: TwoFactorPurpose,
-  ): Promise<string> {
+  ): Promise<{ userId: string; organizationId: string | null }> {
     const record = await this.prisma.twoFactorCode.findUnique({
       where: { id: challengeId },
     });
@@ -1593,7 +2108,10 @@ export class AuthService {
       data: { consumedAt: new Date() },
     });
 
-    return record.userId;
+    return {
+      userId: record.userId,
+      organizationId: record.organizationId,
+    };
   }
 
   private async notifyPasswordChange(userId: string) {
