@@ -23,6 +23,7 @@ const WEB_ORIGIN = process.env.WEB_ORIGIN ?? 'http://localhost:3000';
 const IDENTIFIER =
   process.env.INTEL_VALIDATION_USER ?? 'admin@naranjapimienta.local';
 const PASSWORD = process.env.INTEL_VALIDATION_PASSWORD ?? 'Naranja123!';
+const TENANT = process.env.INTEL_VALIDATION_TENANT?.trim() || null;
 
 const runId = `val-${Date.now()}`;
 const args = new Set(process.argv.slice(2));
@@ -71,6 +72,7 @@ async function api(path, options = {}) {
       cookie,
       origin: WEB_ORIGIN,
       'Content-Type': 'application/json',
+      ...(TENANT ? { 'x-tenant-slug': TENANT } : {}),
       ...(options.headers ?? {}),
     },
   });
@@ -84,7 +86,11 @@ async function login() {
   const response = await fetch(`${API}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ identifier: IDENTIFIER, password: PASSWORD }),
+    body: JSON.stringify({
+      identifier: IDENTIFIER,
+      password: PASSWORD,
+      ...(TENANT ? { tenant: TENANT } : {}),
+    }),
   });
 
   if (!response.ok) {
