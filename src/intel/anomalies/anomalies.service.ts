@@ -498,6 +498,82 @@ export class AnomaliesService {
       });
     }
 
+    // Caja que quedó abierta demasiado tiempo: puede esconder un faltante.
+    for (const session of sessions) {
+      if (session.closedAt !== null) continue;
+
+      const ageHours = (now.getTime() - session.openedAt.getTime()) / 3600000;
+
+      if (ageHours < 12) continue;
+
+      const score = Math.min(100, 50 + (ageHours - 12) * 2);
+
+      findings.push({
+        id: `cash-open-${session.id}`,
+        type: 'CASH',
+        severity: severityFor(score),
+        score: round(score),
+        title: `Caja abierta hace ${round(ageHours, 1)} h sin cerrar`,
+        detail: `El turno de ${userName(session.openedBy)} sigue abierto. Esperado al corte: $${round(
+          Number(session.expectedCash ?? 0),
+        )}.`,
+        evidence: {
+          sessionId: session.id,
+          openedAt: session.openedAt.toISOString(),
+          ageHours: round(ageHours, 1),
+          expectedCash: round(Number(session.expectedCash ?? 0)),
+          openedBy: userName(session.openedBy),
+        },
+        link: '/reports',
+      });
+    }
+
+    const refundsByUser = new Map<
+      string,
+      {
+        count: number;
+        amount: number;
+        user: { name: string | null; username: string | null } | null;
+      }
+    >();
+
+    for (const order of orders) {
+      for (const payment of order.payments) {
+        if (payment.status !== PaymentStatus.REFUNDED) continue;
+
+        const key = payment.userId ?? order.userId ?? 'none';
+        const row = refundsByUser.get(key) ?? {
+          count: 0,
+          amount: 0,
+          user: order.user,
+        };
+        row.count += 1;
+        row.amount += Number(payment.amount);
+        refundsByUser.set(key, row);
+      }
+    }
+
+    for (const [key, row] of refundsByUser) {
+      if (row.count < 2 && row.amount < 300) continue;
+
+      const score = Math.min(100, 40 + row.count * 8 + row.amount / 100);
+
+      findings.push({
+        id: `cash-refunds-${key}`,
+        type: 'CASH',
+        severity: severityFor(score),
+        score: round(score),
+        title: `${row.count} reembolsos por $${round(row.amount)}`,
+        detail: `${userName(row.user)} registró reembolsos en el periodo. Verifica que tengan autorización y comprobante.`,
+        evidence: {
+          user: userName(row.user),
+          refunds: row.count,
+          amount: round(row.amount),
+        },
+        link: '/reports',
+      });
+    }
+
     // ---------------------------------------------------------------------
     // Mermas
     // ---------------------------------------------------------------------
