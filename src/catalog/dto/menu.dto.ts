@@ -6,6 +6,7 @@ import {
   IsBoolean,
   IsDateString,
   IsInt,
+  IsObject,
   IsOptional,
   IsString,
   Matches,
@@ -102,6 +103,11 @@ export class CreateMenuDto {
   @MaxLength(MENU_GROUPS.nameLength, { each: true })
   groups?: string[];
 
+  /** Color por sección: `{ "Bebidas": "sky-500" }`. */
+  @IsOptional()
+  @IsObject()
+  groupColors?: Record<string, string>;
+
   @IsArray()
   @ArrayNotEmpty()
   @ArrayMaxSize(500)
@@ -177,6 +183,11 @@ export class UpdateMenuDto {
   @IsString({ each: true })
   @MaxLength(MENU_GROUPS.nameLength, { each: true })
   groups?: string[];
+
+  /** Color por sección: `{ "Bebidas": "sky-500" }`. */
+  @IsOptional()
+  @IsObject()
+  groupColors?: Record<string, string>;
 }
 
 export class ReplaceMenuItemsDto {

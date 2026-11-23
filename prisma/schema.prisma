@@ -976,6 +976,9 @@ model Menu {
   /// muestran en el POS. Un artículo sin grupo vive en «Sin grupo».
   groups String[] @default([])
 
+  /// Color por sección (`{ "Bebidas frías": "sky-300" }`).
+  groupColors Json?
+
   /// Vigencia por fechas (opcional).
   startsAt DateTime?
   endsAt   DateTime?
@@ -1560,6 +1563,16 @@ model Payment {
   expiresAt            DateTime?
   providerData         Json?
 
+  // Cobros capturados sin conexión.
+  /// Dispositivo que capturó el cobro offline (identificador local, no secreto).
+  offlineDeviceId String?
+  /// Hora local declarada por el dispositivo al capturar el cobro.
+  createdOfflineAt DateTime?
+  /// Cobro offline que requiere conciliación humana antes de darse por cobrado.
+  reviewRequired Boolean @default(false)
+  /// Motivo por el que el cobro requiere revisión.
+  reviewReason String?
+
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
 
@@ -1580,6 +1593,8 @@ model Payment {
   @@index([orderId])
   @@index([provider, providerStatus])
   @@index([sessionId])
+  @@index([organizationId, reviewRequired, status])
+  @@index([sessionId, reviewRequired])
   @@index([tipRecipientId])
   @@index([splitId])
   /// La idempotencia es por negocio: dos negocios pueden repetir la misma

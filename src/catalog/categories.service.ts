@@ -47,10 +47,45 @@ export class CategoriesService {
             },
     });
 
+    // Las categorías core son globales: cada negocio puede personalizar su
+    // descripción y color sin tocar la fila compartida.
+    const coreIds = categories
+      .filter((category) => category.isCore)
+      .map((category) => category.id);
+
+    const overrides =
+      organizationId && coreIds.length > 0
+        ? await this.prisma.categoryOverride.findMany({
+            where: { organizationId, categoryId: { in: coreIds } },
+            select: { categoryId: true, description: true, color: true },
+          })
+        : [];
+
+    const overrideByCategory = new Map(
+      overrides.map((override) => [override.categoryId, override]),
+    );
+
     return categories
-      .map((category) =>
-        category.isCore ? { ...category, isActive: coreEnabled } : category,
-      )
+      .map((category) => {
+        if (!category.isCore) return category;
+
+        const override = overrideByCategory.get(category.id);
+
+        return {
+          ...category,
+          description:
+            override === undefined
+              ? category.description
+              : override.description === null
+                ? category.description
+                : override.description || null,
+          color:
+            override === undefined || override.color === null
+              ? category.color
+              : override.color || null,
+          isActive: coreEnabled,
+        };
+      })
       .sort((a, b) => {
         // Alfabético (es) y las opciones "Otra/Otro…" al final.
         const aOther = isOtherCategory(a);
@@ -73,6 +108,7 @@ export class CategoriesService {
         organizationId,
         name,
         description: normalizeOptional(dto.description),
+        color: normalizeOptional(dto.color),
         sortOrder: dto.sortOrder ?? 0,
         kind,
         isCore: false,
@@ -84,9 +120,95 @@ export class CategoriesService {
     const category = await this.find(organizationId, id);
 
     if (category.isCore) {
-      throw new BadRequestException(
-        'Las categorías core no se pueden editar',
-      );
+      // El nombre es global; descripción y color se guardan por negocio.
+      if (dto.name !== undefined && dto.name.trim() !== category.name) {
+        throw new BadRequestException(
+          'El nombre de las categorías core no se puede cambiar',
+        );
+      }
+
+      if (!organizationId) {
+        throw new BadRequestException(
+          'Personaliza la categoría desde un negocio',
+        );
+      }
+
+      // `null` = hereda el valor core; `""` = el negocio lo dejó vacío.
+      const description =
+        dto.description === undefined
+          ? undefined
+          : (normalizeOptional(dto.description) ?? '');
+      const color =
+        dto.color === undefined
+          ? undefined
+          : (normalizeOptional(dto.color) ?? '');
+
+      const existing = await this.prisma.categoryOverride.findUnique({
+        where: {
+          organizationId_categoryId: { organizationId, categoryId: id },
+        },
+      });
+
+      if (!existing) {
+        if (description === undefined && color === undefined) {
+          return category;
+        }
+
+        const created = await this.prisma.categoryOverride.create({
+          data: {
+            organizationId,
+            categoryId: id,
+            ...(description !== undefined ? { description } : {}),
+            ...(color !== undefined ? { color } : {}),
+          },
+        });
+
+        return {
+          ...category,
+          description:
+            created.description === null
+              ? category.description
+              : created.description || null,
+          color:
+            created.color === null ? category.color : created.color || null,
+        };
+      }
+
+      const data: Prisma.CategoryOverrideUncheckedUpdateInput = {};
+
+      if (description !== undefined && description !== existing.description) {
+        data.description = description;
+      }
+      if (color !== undefined && color !== existing.color) {
+        data.color = color;
+      }
+
+      if (isEmptyPatch(data)) {
+        return {
+          ...category,
+          description:
+            existing.description === null
+              ? category.description
+              : existing.description || null,
+          color:
+            existing.color === null ? category.color : existing.color || null,
+        };
+      }
+
+      const updated = await this.prisma.categoryOverride.update({
+        where: { id: existing.id },
+        data,
+      });
+
+      return {
+        ...category,
+        description:
+          updated.description === null
+            ? category.description
+            : updated.description || null,
+        color:
+          updated.color === null ? category.color : updated.color || null,
+      };
     }
 
     if (dto.name !== undefined) {
@@ -106,12 +228,17 @@ export class CategoriesService {
       dto.description === undefined
         ? undefined
         : normalizeOptional(dto.description);
+    const color =
+      dto.color === undefined ? undefined : normalizeOptional(dto.color);
 
     const data: Prisma.CategoryUncheckedUpdateInput = {};
 
     if (name !== undefined && name !== category.name) data.name = name;
     if (description !== undefined && description !== category.description) {
       data.description = description;
+    }
+    if (color !== undefined && color !== category.color) {
+      data.color = color;
     }
     if (dto.sortOrder !== undefined && dto.sortOrder !== category.sortOrder) {
       data.sortOrder = dto.sortOrder;
