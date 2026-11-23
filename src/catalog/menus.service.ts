@@ -145,31 +145,26 @@ export class MenusService {
         name: true,
         isCombo: true,
         sortOrder: true,
-        category: { select: { name: true, sortOrder: true } },
+        category: { select: { name: true } },
       },
       orderBy: [{ isCombo: 'desc' }, { sortOrder: 'asc' }, { name: 'asc' }],
     });
 
     if (items.length === 0) return;
 
-    // Las categorías core viven con `organizationId` nulo, así que el orden
-    // se toma de las categorías que realmente usan los artículos del negocio.
-    const categoryOrder = new Map<string, number>();
-
-    for (const item of items) {
-      if (item.isCombo || !item.category) continue;
-
-      if (!categoryOrder.has(item.category.name)) {
-        categoryOrder.set(item.category.name, item.category.sortOrder);
-      }
-    }
-
-    const categoryNames = [...categoryOrder.entries()]
-      .sort(
-        ([leftName, leftOrder], [rightName, rightOrder]) =>
-          leftOrder - rightOrder || leftName.localeCompare(rightName, 'es'),
-      )
-      .map(([name]) => name);
+    // El menú global se agrupa por categoría. Los nombres se ordenan
+    // alfabéticamente (ignorando mayúsculas y acentos) para que el orden sea
+    // estable y legible, sin depender del `sortOrder` de la categoría.
+    const categoryNames = [
+      ...new Set(
+        items
+          .filter(
+            (item): item is typeof item & { category: { name: string } } =>
+              !item.isCombo && Boolean(item.category?.name),
+          )
+          .map((item) => item.category.name),
+      ),
+    ];
 
     const groupFor = (item: (typeof items)[number]) =>
       item.isCombo
@@ -181,16 +176,16 @@ export class MenusService {
       (item) => !item.isCombo && !item.category?.name,
     );
 
-    // Los combos van primero; después las categorías en su orden y, al final,
-    // los artículos sin categoría. `Set` evita duplicados si una categoría se
-    // llama igual que el grupo de combos.
+    // Todos los grupos, incluidos Combos y Sin categoría, en orden alfabético.
     const groups = [
       ...new Set([
         ...(hasCombos ? [COMBO_GROUP] : []),
         ...categoryNames,
         ...(hasUncategorized ? [UNCATEGORIZED_GROUP] : []),
       ]),
-    ];
+    ].sort((left, right) =>
+      left.localeCompare(right, 'es', { sensitivity: 'base' }),
+    );
 
     const groupColors = normalizeGroupColors(groups, existing?.groupColors);
 
