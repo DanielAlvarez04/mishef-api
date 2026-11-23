@@ -1,25 +1,129 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { redactPii } from '../pii';
 
-export type IntelChatMessage = {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
-};
+export interface IntelToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+}
+
+export interface IntelToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export type IntelChatMessage =
+  | { role: 'system' | 'user'; content: string }
+  | {
+      role: 'assistant';
+      content?: string | null;
+      tool_calls?: IntelToolCall[];
+    }
+  | {
+      role: 'tool';
+      content: string;
+      tool_call_id: string;
+      name?: string;
+    };
 
 export type IntelStreamEvent =
   | { type: 'delta'; text: string }
   | { type: 'usage'; tokensIn?: number; tokensOut?: number };
 
+export interface IntelCompletion {
+  content: string | null;
+  toolCalls: IntelToolCall[];
+  tokensIn?: number;
+  tokensOut?: number;
+  finishReason?: string;
+}
+
 /**
  * Cliente mínimo para cualquier proveedor OpenAI-compatible.
  *
- * No interpreta el contenido: solo traduce el stream SSE del proveedor a
- * eventos tipados. La validación de la respuesta y las reglas de negocio viven
- * en `IntelService`.
+ * `completeChat` se usa para el ciclo de herramientas (no streaming).
+ * `streamChat` se usa para la respuesta final al usuario.
  */
 @Injectable()
 export class OpenAiCompatibleClient {
   private readonly logger = new Logger(OpenAiCompatibleClient.name);
+
+  async completeChat(params: {
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    messages: IntelChatMessage[];
+    tools?: IntelToolDefinition[];
+    temperature?: number;
+    maxTokens?: number;
+    signal?: AbortSignal;
+  }): Promise<IntelCompletion> {
+    const response = await fetch(`${params.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: params.model,
+        messages: params.messages,
+        stream: false,
+        temperature: params.temperature ?? 0.2,
+        max_tokens: params.maxTokens ?? 900,
+        ...(params.tools?.length
+          ? { tools: params.tools, tool_choice: 'auto' }
+          : {}),
+      }),
+      signal: params.signal,
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      this.logger.error(
+        `Proveedor IA respondió ${response.status}: ${redactPii(body).slice(0, 300)}`,
+      );
+      throw new Error(`El proveedor de IA respondió ${response.status}`);
+    }
+
+    const json = (await response.json()) as {
+      choices?: Array<{
+        message?: {
+          content?: string | null;
+          tool_calls?: IntelToolCall[];
+        };
+        finish_reason?: string;
+      }>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+      };
+    };
+
+    const choice = json.choices?.[0];
+    const message = choice?.message ?? {};
+
+    return {
+      content: typeof message.content === 'string' ? message.content : null,
+      toolCalls: Array.isArray(message.tool_calls)
+        ? message.tool_calls.filter(
+            (call) =>
+              typeof call?.id === 'string' &&
+              typeof call?.function?.name === 'string' &&
+              typeof call?.function?.arguments === 'string',
+          )
+        : [],
+      tokensIn: json.usage?.prompt_tokens,
+      tokensOut: json.usage?.completion_tokens,
+      finishReason: choice?.finish_reason,
+    };
+  }
 
   async *streamChat(params: {
     baseUrl: string;

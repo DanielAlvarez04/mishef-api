@@ -7,6 +7,7 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import type { Request, Response } from 'express';
 import { JwtUser } from '../auth/auth.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -17,22 +18,62 @@ import {
   OpenAiCompatibleClient,
 } from './providers/openai-compatible.client';
 import { redactPii } from './pii';
+import { IntelToolRegistry } from './tools/tool.registry';
+import type { IntelToolContext } from './tools/tool.types';
 
 const HISTORY_LIMIT = 20;
+const MAX_TOOL_ROUNDS = 4;
 const CHARS_PER_TOKEN = 4;
+
+interface ToolTraceEntry {
+  name: string;
+  ok: boolean;
+  summary?: string;
+  error?: string;
+}
 
 function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / CHARS_PER_TOKEN));
 }
 
-function buildSystemPrompt(organizationName: string, locale: string): string {
+function chunkText(text: string, size = 80): string[] {
+  const chunks: string[] = [];
+
+  for (let index = 0; index < text.length; index += size) {
+    chunks.push(text.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
+function buildSystemPrompt(input: {
+  organizationName: string;
+  currency: string;
+  taxRate: number;
+  branchName: string | null;
+  branchCount: number;
+  locale: string;
+}): string {
+  const date = new Intl.DateTimeFormat('es-MX', {
+    dateStyle: 'long',
+  }).format(new Date());
+
+  const scope = input.branchName
+    ? `Sucursal activa: ${input.branchName}.`
+    : input.branchCount > 1
+      ? `Vista consolidada de ${input.branchCount} sucursales.`
+      : 'Vista de la única sucursal.';
+
   return [
-    `Eres el asistente de Mishef para el negocio "${organizationName}".`,
-    `Responde en ${locale === 'en-US' ? 'inglés' : 'español de México'}.`,
-    'Sé breve, claro y práctico. Prioriza acciones concretas.',
-    'No inventes cifras ni datos. Si no tienes una herramienta para consultar el negocio, dilo explícitamente.',
+    `Eres el asistente de Mishef para el negocio "${input.organizationName}".`,
+    `Fecha actual: ${date}. Moneda: ${input.currency}. IVA: ${Math.round(input.taxRate * 100)}%. ${scope}`,
+    `Responde en ${input.locale === 'en-US' ? 'inglés' : 'español de México'}.`,
+    'Usa las herramientas para cualquier cifra de ventas, márgenes, pagos o inventario. No inventes datos.',
+    'Cita el periodo y la fuente cuando des una cifra.',
+    'Si una herramienta falla o no tienes permiso, dilo; no supongas el resultado.',
+    'Si no tienes una herramienta para lo que pide el usuario, dilo explícitamente.',
     'No generes SQL. No reveles información de otras organizaciones.',
-    'En esta fase solo respondes preguntas; no ejecutas acciones.',
+    'En esta fase solo consultas y explicas; no ejecutas acciones.',
   ].join(' ');
 }
 
@@ -43,6 +84,7 @@ export class IntelService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly client: OpenAiCompatibleClient,
+    private readonly tools: IntelToolRegistry,
   ) {}
 
   async getConfig(user: JwtUser) {
@@ -57,6 +99,7 @@ export class IntelService {
         provider: target.provider,
         model: target.model,
       })),
+      tools: this.tools.names(),
       monthlyTokenLimit: settings.monthlyTokenLimit,
       usage,
     };
@@ -182,11 +225,11 @@ export class IntelService {
   }
 
   /**
-   * Chat por SSE.
+   * Chat por SSE con ciclo de herramientas.
    *
-   * El método escribe la respuesta directamente porque el stream no encaja en
-   * el ciclo normal de Nest. Aun si el cliente se desconecta, guarda el
-   * mensaje parcial y el consumo para que la auditoría no pierda el evento.
+   * El modelo primero decide qué tools consultar (llamadas no streaming).
+   * Después de obtener los datos, la respuesta final se envía por SSE en
+   * fragmentos para que la UI la muestre de forma progresiva.
    */
   async chat(
     user: JwtUser,
@@ -241,6 +284,16 @@ export class IntelService {
         },
       }));
 
+    const branch = user.branchId
+      ? await this.prisma.branch.findFirst({
+          where: {
+            id: user.branchId,
+            organizationId: organization.id,
+          },
+          select: { name: true },
+        })
+      : null;
+
     const history = await this.prisma.aiMessage.findMany({
       where: { conversationId: conversation.id },
       orderBy: { createdAt: 'desc' },
@@ -251,10 +304,14 @@ export class IntelService {
     const messages: IntelChatMessage[] = [
       {
         role: 'system',
-        content: buildSystemPrompt(
-          organization.name,
-          dto.locale ?? conversation.locale,
-        ),
+        content: buildSystemPrompt({
+          organizationName: organization.name,
+          currency: organization.currency,
+          taxRate: Number(organization.taxRate),
+          branchName: branch?.name ?? null,
+          branchCount: organization._count.branches,
+          locale: dto.locale ?? conversation.locale,
+        }),
       },
       ...history.reverse().map((message) => ({
         role:
@@ -297,73 +354,165 @@ export class IntelService {
 
     const startedAt = Date.now();
     let fullText = '';
-    let tokensIn: number | undefined;
-    let tokensOut: number | undefined;
+    let tokensIn = 0;
+    let tokensOut = 0;
     let errorMessage: string | null = null;
     let usedModel: string | null = null;
     let usedProvider: string | null = null;
+    const toolTrace: ToolTraceEntry[] = [];
+
+    const context: IntelToolContext = {
+      organizationId: organization.id,
+      branchId: user.branchId ?? null,
+      userId: user.sub,
+      roles: user.roles,
+      currency: organization.currency,
+      taxRate: Number(organization.taxRate),
+    };
+
+    const definitions = this.tools.definitions();
 
     try {
-      for (let index = 0; index < settings.targets.length; index += 1) {
-        const target = settings.targets[index];
-        const isLast = index === settings.targets.length - 1;
+      for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+        let completion: Awaited<
+          ReturnType<OpenAiCompatibleClient['completeChat']>
+        > | null = null;
 
-        try {
-          for await (const event of this.client.streamChat({
-            baseUrl: target.baseUrl,
-            apiKey: target.apiKey,
-            model: target.model,
-            messages,
-            signal: controller.signal,
-          })) {
-            if (event.type === 'delta') {
-              fullText += event.text;
-              this.writeEvent(res, 'delta', { text: event.text });
-            } else {
-              tokensIn = event.tokensIn ?? tokensIn;
-              tokensOut = event.tokensOut ?? tokensOut;
-            }
-          }
-
-          usedModel = target.model;
-          usedProvider = target.provider;
-          break;
-        } catch (error) {
-          this.logger.warn(
-            `Intel: falló ${target.provider}/${target.model}: ${redactPii(
-              error instanceof Error ? error.message : 'error desconocido',
-            )}`,
-          );
-
-          if (controller.signal.aborted) {
-            errorMessage = 'La respuesta se canceló';
-            usedModel = fullText.length > 0 ? target.model : null;
-            usedProvider = fullText.length > 0 ? target.provider : null;
-            break;
-          }
-
-          if (fullText.length > 0) {
-            errorMessage = 'No se pudo completar la respuesta';
+        for (const target of settings.targets) {
+          try {
+            completion = await this.client.completeChat({
+              baseUrl: target.baseUrl,
+              apiKey: target.apiKey,
+              model: target.model,
+              messages,
+              tools: definitions,
+              signal: controller.signal,
+            });
             usedModel = target.model;
             usedProvider = target.provider;
             break;
+          } catch (error) {
+            this.logger.warn(
+              `Intel: falló ${target.provider}/${target.model}: ${redactPii(
+                error instanceof Error ? error.message : 'error desconocido',
+              )}`,
+            );
+          }
+        }
+
+        if (!completion) {
+          errorMessage = controller.signal.aborted
+            ? 'La respuesta se canceló'
+            : 'No se pudo completar la respuesta';
+          break;
+        }
+
+        tokensIn += completion.tokensIn ?? 0;
+        tokensOut += completion.tokensOut ?? 0;
+
+        if (completion.toolCalls.length === 0) {
+          fullText = completion.content?.trim() ?? '';
+          break;
+        }
+
+        messages.push({
+          role: 'assistant',
+          content: completion.content ?? null,
+          tool_calls: completion.toolCalls,
+        });
+
+        for (const call of completion.toolCalls) {
+          let args: unknown = {};
+
+          try {
+            args = call.function.arguments
+              ? JSON.parse(call.function.arguments)
+              : {};
+          } catch {
+            args = {};
           }
 
-          if (isLast) {
-            errorMessage = 'No se pudo completar la respuesta';
-            break;
-          }
+          this.writeEvent(res, 'tool', {
+            name: call.function.name,
+            status: 'running',
+          });
 
-          const next = settings.targets[index + 1];
-          this.writeEvent(res, 'fallback', {
-            from: target.model,
-            to: next.model,
+          const result = await this.tools.execute(
+            call.function.name,
+            args,
+            context,
+          );
+
+          toolTrace.push({
+            name: call.function.name,
+            ok: result.ok,
+            summary: result.summary,
+            error: result.error,
+          });
+
+          this.writeEvent(res, 'tool', {
+            name: call.function.name,
+            status: result.ok ? 'done' : 'error',
+            summary: result.summary,
+            error: result.error,
+          });
+
+          messages.push({
+            role: 'tool',
+            tool_call_id: call.id,
+            name: call.function.name,
+            content: JSON.stringify(result),
           });
         }
       }
 
+      if (!fullText && toolTrace.length > 0 && !errorMessage) {
+        messages.push({
+          role: 'system',
+          content:
+            'Responde al usuario usando los datos de las herramientas. No inventes. Si falta un dato, dilo.',
+        });
+
+        for (const target of settings.targets) {
+          try {
+            const completion = await this.client.completeChat({
+              baseUrl: target.baseUrl,
+              apiKey: target.apiKey,
+              model: target.model,
+              messages,
+              signal: controller.signal,
+            });
+
+            tokensIn += completion.tokensIn ?? 0;
+            tokensOut += completion.tokensOut ?? 0;
+            fullText = completion.content?.trim() ?? '';
+            usedModel = target.model;
+            usedProvider = target.provider;
+
+            if (fullText) break;
+          } catch (error) {
+            this.logger.warn(
+              `Intel: respuesta final falló: ${redactPii(
+                error instanceof Error ? error.message : 'error desconocido',
+              )}`,
+            );
+          }
+        }
+      }
+
+      if (!fullText && !errorMessage) {
+        fullText =
+          'No pude obtener una respuesta con las herramientas disponibles. Intenta reformular la pregunta o revisa el periodo.';
+      }
+
       if (errorMessage) {
         this.writeEvent(res, 'error', { message: errorMessage });
+      } else {
+        for (const chunk of chunkText(fullText)) {
+          if (controller.signal.aborted) break;
+          this.writeEvent(res, 'delta', { text: chunk });
+          await new Promise((resolve) => setTimeout(resolve, 8));
+        }
       }
     } finally {
       clearInterval(heartbeat);
@@ -373,11 +522,17 @@ export class IntelService {
     const latencyMs = Date.now() - startedAt;
     const hasOutput = fullText.length > 0;
     const estimatedIn = hasOutput
-      ? (tokensIn ??
-        estimateTokens(messages.map((message) => message.content).join('\n')))
+      ? (tokensIn ||
+        estimateTokens(
+          messages
+            .map((message) =>
+              typeof message.content === 'string' ? message.content : '',
+            )
+            .join('\n'),
+        ))
       : 0;
     const estimatedOut = hasOutput
-      ? (tokensOut ?? estimateTokens(fullText))
+      ? (tokensOut || estimateTokens(fullText))
       : 0;
     const modelForUsage =
       usedModel ?? settings.targets[0]?.model ?? 'unknown';
@@ -391,6 +546,13 @@ export class IntelService {
         tokensOut: estimatedOut,
         latencyMs,
         error: errorMessage,
+        toolName: toolTrace.length > 0 ? 'tool_calls' : null,
+        toolPayload:
+          toolTrace.length > 0
+            ? (JSON.parse(
+                JSON.stringify({ calls: toolTrace }),
+              ) as Prisma.InputJsonValue)
+            : undefined,
       },
     });
 
@@ -419,6 +581,7 @@ export class IntelService {
           tokensIn: estimatedIn,
           tokensOut: estimatedOut,
           latencyMs,
+          tools: toolTrace.map((tool) => tool.name),
           error: errorMessage,
         },
       },
@@ -432,6 +595,7 @@ export class IntelService {
       tokensIn: estimatedIn,
       tokensOut: estimatedOut,
       latencyMs,
+      tools: toolTrace,
       error: errorMessage,
     });
 
@@ -447,7 +611,14 @@ export class IntelService {
 
     const organization = await this.prisma.organization.findUnique({
       where: { id: user.organizationId },
-      select: { id: true, name: true, intelEnabled: true },
+      select: {
+        id: true,
+        name: true,
+        intelEnabled: true,
+        currency: true,
+        taxRate: true,
+        _count: { select: { branches: true } },
+      },
     });
 
     if (!organization) {
