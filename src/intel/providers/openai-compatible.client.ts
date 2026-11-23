@@ -153,7 +153,10 @@ export class OpenAiCompatibleClient {
         ],
         stream: false,
         temperature: 0,
-        max_tokens: params.maxTokens ?? 1500,
+        max_tokens: params.maxTokens ?? 3000,
+        // El modelo de visión razona antes de responder; sin desactivar el
+        // thinking se consume todo el presupuesto y `content` queda vacío.
+        chat_template_kwargs: { enable_thinking: false },
       }),
       signal: params.signal,
     });

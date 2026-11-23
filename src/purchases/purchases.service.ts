@@ -459,6 +459,14 @@ export class PurchasesService {
       throw new BadRequestException('El ticket no tiene líneas');
     }
 
+    const inventoryItems = purchase.items.filter(
+      (item) => Number(item.lineTotalGross) > 0,
+    );
+
+    if (inventoryItems.length === 0) {
+      throw new BadRequestException('El ticket no tiene líneas de inventario');
+    }
+
     if (duplicateOf(purchase)) {
       throw new ConflictException(
         'Este ticket está marcado como duplicado de otra compra. Corrige el folio o el proveedor, o recházalo.',
@@ -492,7 +500,7 @@ export class PurchasesService {
       unitCostBase: Prisma.Decimal;
     }> = [];
 
-    for (const item of purchase.items) {
+    for (const item of inventoryItems) {
       if (!item.ingredientId) {
         throw new BadRequestException(
           `Mapea el ingrediente de la línea "${item.rawDescription}" antes de aprobar`,

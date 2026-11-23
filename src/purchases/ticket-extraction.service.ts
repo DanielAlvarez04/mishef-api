@@ -48,10 +48,12 @@ const optionalConfidence = z.preprocess(
 
 const lineSchema = z.object({
   description: z.string().trim().min(1),
-  quantity: z.coerce.number().positive(),
+  quantity: z.coerce.number().refine((value) => value !== 0, {
+    message: 'La cantidad no puede ser cero',
+  }),
   unit: optionalText,
   unitPriceGross: optionalNumber,
-  lineTotalGross: z.coerce.number().nonnegative(),
+  lineTotalGross: z.coerce.number(),
   confidence: optionalConfidence,
 });
 
@@ -68,8 +70,7 @@ const receiptSchema = z.object({
   confidence: optionalConfidence,
 });
 
-const UNIT_ALIASES: Record<string, UnitCode> = {
-  pza: UnitCode.UNIT,
+const UNIT_ALIASES: Record<string, UnitCode> = {  pza: UnitCode.UNIT,
   pzas: UnitCode.UNIT,
   pieza: UnitCode.UNIT,
   piezas: UnitCode.UNIT,
@@ -91,6 +92,14 @@ const UNIT_ALIASES: Record<string, UnitCode> = {
   mililitro: UnitCode.ML,
   mililitros: UnitCode.ML,
 };
+
+/**
+ * Líneas de resumen que el modelo a veces devuelve como si fueran productos.
+ * Se descartan antes de mapear para no ensuciar las líneas ni el cuadre.
+ */
+const NON_PRODUCT_TEXT =
+  /^(iva|ieps|subtotal|total|efectivo|cambio|propina|domicilio|ticket|folio|pago|tarjeta|autorizacion|afiliacion)/;
+const NON_PRODUCT_CODE = /^(tda|op|te|tr|cta|cuenta)\d/;
 
 function toUnitCode(value: string | undefined): UnitCode {
   return UNIT_ALIASES[(value ?? '').trim().toLowerCase()] ?? UnitCode.UNIT;
@@ -176,14 +185,18 @@ export class TicketExtractionService {
         model: visionModel,
         imageDataUri: dataUri,
         prompt: [
-          'Eres un extractor de tickets de compra mexicanos (Walmart, HEB, Soriana, proveedores locales).',
+          'Eres un extractor de tickets de compra mexicanos (Bodega Aurrerá, Walmart, La Comer, HEB, Soriana, proveedores locales).',
           'Devuelve SOLO un objeto JSON válido, sin Markdown ni explicaciones, con esta forma:',
           '{"supplierName":"...","rfc":"...","folio":"...","purchasedAt":"YYYY-MM-DD","lines":[{"description":"...","quantity":1,"unit":"UNIT|KG|G|L|ML","lineTotalGross":0}],"subtotal":0,"tax":0,"total":0,"confidence":0.9}',
-          'Reglas: el precio del ticket ya incluye IVA, así que lineTotalGross es el total pagado de la línea.',
-          'Si un dato no aparece, usa null u omítelo. No inventes líneas. Usa la unidad impresa (pza, kg, L, ml).',
-          'La suma de las líneas debe acercarse al total; si no coincide, baja la confianza.',
+          'El precio del ticket ya incluye IVA: lineTotalGross es el importe neto pagado por la línea.',
+          'Incluye TODAS las líneas de producto, incluso descuentos negativos; no omitas ninguna. No inventes líneas.',
+          'No incluyas como producto: IVA, IEPS, subtotal, total, efectivo, cambio, propina, ni encabezados TDA/OP#/TE#/TR#. Son resúmenes, no artículos.',
+          'purchasedAt: usa solo la fecha de compra impresa. Las fechas DD/MM/AA se interpretan con el día primero: 04/02/22 = 2022-02-04. No uses direcciones (p. ej. "5 DE MAYO"), vencimientos de tarjeta, folios ni números de autorización. Si no hay fecha de compra, purchasedAt null.',
+          'folio: usa el número de ticket/transacción impreso; si hay varios, el de la sección TICKET/TRANSACCIÓN. No inventes uno.',
+          'unit: usa PZA para piezas, KG, G, L o ML; los códigos de barras no son unidades. Si no se imprime, usa PZA.',
+          'La suma de lineTotalGross debe coincidir con total; si no coincide, baja confidence.',
         ].join(' '),
-        maxTokens: 1600,
+        maxTokens: 3500,
       };
 
       // Un fallo transitorio del proveedor no debe marcar el ticket como
@@ -275,10 +288,19 @@ export class TicketExtractionService {
 
       for (const line of parsed.lines) {
         const normalized = normalizeName(line.description);
-        let mapping = mappingMap.get(normalized);
+
+        if (
+          NON_PRODUCT_TEXT.test(normalized) ||
+          NON_PRODUCT_CODE.test(normalized)
+        ) {
+          continue;
+        }
+
+        const isDiscount = line.lineTotalGross < 0;
+        let mapping = isDiscount ? undefined : mappingMap.get(normalized);
         let mappingSource = mapping ? 'ALIAS' : 'AI';
 
-        if (!mapping && supplier && normalized) {
+        if (!isDiscount && !mapping && supplier && normalized) {
           const fuzzy = await this.fuzzyMapping(supplier.id, normalized);
 
           if (fuzzy) {
@@ -292,17 +314,22 @@ export class TicketExtractionService {
           }
         }
 
-        const quantity = mapping
-          ? new Prisma.Decimal(line.quantity).times(mapping.quantity)
-          : new Prisma.Decimal(line.quantity);
+        const quantity = isDiscount
+          ? new Prisma.Decimal(line.quantity).abs()
+          : mapping
+            ? new Prisma.Decimal(line.quantity).times(mapping.quantity)
+            : new Prisma.Decimal(line.quantity);
         const unit = mapping?.unit ?? toUnitCode(line.unit);
-        const unitCostGross = quantity.gt(0)
-          ? new Prisma.Decimal(line.lineTotalGross).div(quantity)
-          : new Prisma.Decimal(0);
+        // Un descuento no actualiza el costo del insumo ni mueve inventario.
+        const unitCostGross = isDiscount
+          ? new Prisma.Decimal(0)
+          : quantity.gt(0)
+            ? new Prisma.Decimal(line.lineTotalGross).div(quantity)
+            : new Prisma.Decimal(0);
 
         items.push({
           rawDescription: line.description,
-          ingredientId: mapping?.ingredientId ?? null,
+          ingredientId: isDiscount ? null : mapping?.ingredientId ?? null,
           quantity,
           unit,
           unitCostGross,
@@ -313,7 +340,7 @@ export class TicketExtractionService {
                 ? null
                 : new Prisma.Decimal(parsed.confidence)
               : new Prisma.Decimal(line.confidence),
-          mappingSource,
+          mappingSource: isDiscount ? 'DISCOUNT' : mappingSource,
         });
       }
 
