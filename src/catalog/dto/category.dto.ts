@@ -4,6 +4,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
   Min,
   MinLength,
@@ -20,6 +21,15 @@ export class CreateCategoryDto {
   @IsString()
   @MaxLength(280)
   description?: string;
+
+  /** Token del catálogo de colores (`red-400`, `sky-600`). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  @Matches(/^[a-z]+-(200|400|600|800)$/, {
+    message: 'El color debe ser un tono permitido (p. ej. red-400)',
+  })
+  color?: string;
 
   @IsOptional()
   @IsInt()
@@ -43,6 +53,15 @@ export class UpdateCategoryDto {
   @IsString()
   @MaxLength(280)
   description?: string;
+
+  /** Token del catálogo de colores (`red-400`, `sky-600`). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  @Matches(/^[a-z]+-(200|400|600|800)$/, {
+    message: 'El color debe ser un tono permitido (p. ej. red-400)',
+  })
+  color?: string;
 
   @IsOptional()
   @IsInt()

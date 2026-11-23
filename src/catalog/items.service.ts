@@ -52,7 +52,7 @@ const itemListInclude = {
   catalogEntry: {
     select: { id: true, imageKey: true, imageUrl: true, imageVariants: true, imageName: true },
   },
-  category: { select: { id: true, name: true } },
+  category: { select: { id: true, name: true, color: true } },
   variants: { orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] },
   extras: { orderBy: { name: 'asc' } },
   // El POS necesita saber qué ingredientes se pueden quitar al tomar la comanda.
@@ -84,7 +84,7 @@ const itemListInclude = {
       name: true,
       variantId: true,
       isActive: true,
-      category: { select: { id: true, name: true } },
+      category: { select: { id: true, name: true, color: true } },
     },
     orderBy: { variantId: 'asc' },
   },
@@ -130,7 +130,7 @@ const itemDetailInclude = {
   catalogEntry: {
     select: { id: true, imageKey: true, imageUrl: true, imageVariants: true, imageName: true },
   },
-  category: { select: { id: true, name: true } },
+  category: { select: { id: true, name: true, color: true } },
   variants: {
     orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
     include: { _count: { select: { recipes: true } } },
@@ -177,7 +177,7 @@ const itemDetailInclude = {
   recipes: {
     orderBy: { variantId: 'asc' },
     include: {
-      category: { select: { id: true, name: true } },
+      category: { select: { id: true, name: true, color: true } },
       variant: { select: { id: true, name: true } },
       ingredients: {
         include: {
@@ -282,7 +282,10 @@ export class ItemsService {
       ...(filters.offset ? { skip: Math.max(filters.offset, 0) } : {}),
     });
 
-    return items.map((item) => this.withMenus(item));
+    return this.withCategoryColors(
+      organizationId,
+      items.map((item) => this.withMenus(item)),
+    );
   }
 
   /**
@@ -348,7 +351,64 @@ export class ItemsService {
       throw new NotFoundException('Artículo no encontrado');
     }
 
-    return this.withDisplayUnits(item);
+    const [detail] = await this.withCategoryColors(organizationId, [
+      this.withDisplayUnits(item),
+    ]);
+
+    return detail;
+  }
+
+  /**
+   * Aplica el color personalizado de una categoría core al artículo.
+   *
+   * La fila `Category` es global; el color por negocio vive en
+   * `CategoryOverride`. Las categorías propias ya traen su color directo.
+   */
+  private async withCategoryColors<
+    T extends { category: { id: string; color: string | null } | null },
+  >(organizationId: string | null, items: T[]): Promise<T[]> {
+    if (!organizationId || items.length === 0) return items;
+
+    const categoryIds = [
+      ...new Set(
+        items
+          .map((item) => item.category?.id)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ];
+
+    if (categoryIds.length === 0) return items;
+
+    const overrides = await this.prisma.categoryOverride.findMany({
+      where: { organizationId, categoryId: { in: categoryIds } },
+      select: { categoryId: true, color: true },
+    });
+
+    if (overrides.length === 0) return items;
+
+    // `null` en la fila = hereda el color core; `""` = sin color.
+    const colorByCategory = new Map<string, string | null>();
+
+    for (const override of overrides) {
+      if (override.color === null) continue;
+      colorByCategory.set(override.categoryId, override.color || null);
+    }
+
+    if (colorByCategory.size === 0) return items;
+
+    return items.map((item) => {
+      if (!item.category || !colorByCategory.has(item.category.id)) {
+        return item;
+      }
+
+      return {
+        ...item,
+        category: {
+          ...item.category,
+          color: colorByCategory.get(item.category.id) ?? null,
+        },
+      };
+    });
   }
 
   /**

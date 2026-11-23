@@ -7,6 +7,7 @@ import {
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { isEmptyPatch, sameJson } from '../common/patch';
+import { normalizeGroupColors } from '../common/group-colors';
 import { globalMenuIsFresh, markGlobalMenuSynced } from './global-menu-cache';
 import {
   CreateMenuDto,
@@ -131,7 +132,7 @@ export class MenusService {
         // Si el nombre ya está ocupado no se intenta crear en cada carga.
         OR: [{ isGlobal: true }, { name: GLOBAL_MENU_NAME }],
       },
-      select: { id: true, isGlobal: true, groups: true },
+      select: { id: true, isGlobal: true, groups: true, groupColors: true },
     });
 
     // Un menú del usuario con el mismo nombre no se toca.
@@ -191,6 +192,8 @@ export class MenusService {
       ]),
     ];
 
+    const groupColors = normalizeGroupColors(groups, existing?.groupColors);
+
     const groupOrder = new Map(groups.map((group, index) => [group, index]));
     const ordered = [...items].sort((left, right) => {
       const leftGroup = groupOrder.get(groupFor(left)) ?? groups.length;
@@ -206,10 +209,13 @@ export class MenusService {
     if (existing) {
       // El contenido del menú global siempre refleja el catálogo actual.
       await this.prisma.$transaction(async (tx) => {
-        if (!sameJson(existing.groups, groups)) {
+        if (
+          !sameJson(existing.groups, groups) ||
+          !sameJson(existing.groupColors ?? {}, groupColors)
+        ) {
           await tx.menu.update({
             where: { id: existing.id },
-            data: { groups },
+            data: { groups, groupColors },
           });
         }
 
@@ -237,6 +243,7 @@ export class MenusService {
           isActive: true,
           daysOfWeek: [],
           groups,
+          groupColors,
           items: {
             create: ordered.map((item, index) => ({
               itemId: item.id,
@@ -282,6 +289,7 @@ export class MenusService {
       endsAt: null,
     });
     const groups = this.normalizeGroups(dto.groups);
+    const groupColors = normalizeGroupColors(groups, dto.groupColors);
     const items = await this.validateItems(
       organizationId,
       null,
@@ -299,6 +307,7 @@ export class MenusService {
           sortOrder: dto.sortOrder ?? 0,
           ...schedule,
           groups,
+          groupColors,
           items: {
             create: items.map((item) => ({
               itemId: item.itemId,
@@ -375,6 +384,14 @@ export class MenusService {
         : this.normalizeGroups(dto.groups);
     const groupsChanged = !sameJson(groups, menu.groups);
     if (groupsChanged) data.groups = groups;
+
+    const groupColors = normalizeGroupColors(
+      groups,
+      dto.groupColors ?? menu.groupColors,
+    );
+    if (!sameJson(groupColors, menu.groupColors ?? {})) {
+      data.groupColors = groupColors;
+    }
 
     const items =
       dto.items === undefined
@@ -463,6 +480,7 @@ export class MenusService {
         startsAt: menu.startsAt,
         endsAt: menu.endsAt,
         groups: menu.groups,
+        groupColors: normalizeGroupColors(menu.groups, menu.groupColors),
         items: {
           create: menu.items.map((item) => ({
             itemId: item.itemId,
@@ -523,6 +541,7 @@ export class MenusService {
   private withAvailability(menu: MenuRow) {
     return {
       ...menu,
+      groupColors: normalizeGroupColors(menu.groups, menu.groupColors),
       isAvailableNow: menuIsAvailableNow(menu),
     };
   }
@@ -543,6 +562,7 @@ export class MenusService {
         startsAt: true,
         endsAt: true,
         groups: true,
+        groupColors: true,
       },
     });
 

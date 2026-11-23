@@ -293,6 +293,7 @@ model Organization {
   wastes               Waste[]
   auditLogs            AuditLog[]
   categories           Category[]
+  categoryOverrides    CategoryOverride[]
   items                Item[]
   ingredients          Ingredient[]
   recipes              Recipe[]
@@ -549,6 +550,8 @@ model Category {
   code           String?
   name           String
   description    String?
+  /// Color de la categoría en el catálogo y el POS (`red-400`, `sky-600`, …).
+  color          String?
   isCore         Boolean      @default(false) // true = parte del core, no editable
   kind           CategoryKind @default(ARTICLE)
   isActive       Boolean      @default(true)
@@ -559,11 +562,30 @@ model Category {
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   items        Item[]
   recipes      Recipe[]
+  overrides    CategoryOverride[]
 
   @@unique([organizationId, kind, name])
   @@unique([kind, code])
   @@index([organizationId])
   @@index([kind, isCore])
+}
+
+/// Personalización por negocio de una categoría core (nombre global, lo demás propio).
+model CategoryOverride {
+  id             String   @id @default(cuid())
+  organizationId String
+  categoryId     String
+  /// `null` = hereda la descripción core; `""` = el negocio la dejó vacía.
+  description    String?
+  color          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category     Category     @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, categoryId])
+  @@index([organizationId])
 }
 
 /// Identidad global de un elemento del catálogo (artículo, receta o ambos).
@@ -925,6 +947,9 @@ model Menu {
   /// Secciones del menú (p. ej. «Bebidas frías»), en el orden en que se
   /// muestran en el POS. Un artículo sin grupo vive en «Sin grupo».
   groups String[] @default([])
+
+  /// Color por sección (`{ "Bebidas frías": "sky-300" }`).
+  groupColors Json?
 
   /// Vigencia por fechas (opcional).
   startsAt DateTime?
