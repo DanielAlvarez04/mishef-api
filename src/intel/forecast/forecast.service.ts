@@ -45,6 +45,10 @@ export interface ForecastRow {
   unitCost: number | null;
   estimatedCost: number;
   lastSupplier: { id: string; name: string } | null;
+  /** Promedio simple de los últimos 14 días, como línea base. */
+  baselineDailyAverage: number;
+  /** Diferencia porcentual de la proyección contra la línea base. */
+  vsBaseline: number | null;
 }
 
 function dateKey(date: Date): string {
@@ -322,6 +326,11 @@ export class ForecastService {
         : Number(ingredient.currentStock);
       const minStockBase = Number(ingredient.minStock);
       const dailyProjection = average * trend;
+      const baselineBase = recentTotal / TREND_DAYS;
+      const vsBaseline =
+        baselineBase > 0
+          ? round(((dailyProjection - baselineBase) / baselineBase) * 100, 1)
+          : null;
       const daysOfCover =
         dailyProjection > 0
           ? Math.min(currentStockBase / dailyProjection, MAX_DAYS_OF_COVER)
@@ -384,6 +393,9 @@ export class ForecastService {
             trend,
             2,
           )}×).`,
+          vsBaseline === null
+            ? 'Sin base reciente para comparar.'
+            : `vs. promedio reciente ${vsBaseline > 0 ? '+' : ''}${vsBaseline}%.`,
           `Entrega estimada ${round(leadTimeDays, 1)} días; cobertura ${daysOfCover === null ? "sin consumo" : `${round(daysOfCover, 1)} días`}.`,
           `Stock ${toDisplay(currentStockBase)} ${displayUnit}; sugerido ${toDisplay(
             suggestedBase,
@@ -392,6 +404,8 @@ export class ForecastService {
         unitCost,
         estimatedCost,
         lastSupplier: supplier,
+        baselineDailyAverage: toDisplay(baselineBase),
+        vsBaseline,
       });
     }
 
