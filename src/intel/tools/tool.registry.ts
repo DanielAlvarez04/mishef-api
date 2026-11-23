@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 
 import { rolesHavePermission } from '../../common/permissions';
 import { redactPii } from '../pii';
+import { AnomaliesTools } from './anomalies.tools';
 import { CatalogTools } from './catalog.tools';
 import { ForecastTools } from './forecast.tools';
 import { InventoryTools } from './inventory.tools';
@@ -25,6 +26,7 @@ export class IntelToolRegistry {
     inventory: InventoryTools,
     kitchen: KitchenTools,
     forecast: ForecastTools,
+    anomalies: AnomaliesTools,
   ) {
     this.tools = [
       ...sales.tools,
@@ -32,6 +34,7 @@ export class IntelToolRegistry {
       ...inventory.tools,
       ...kitchen.tools,
       ...forecast.tools,
+      ...anomalies.tools,
     ];
   }
 
