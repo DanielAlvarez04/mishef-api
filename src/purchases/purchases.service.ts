@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import {
@@ -31,6 +32,7 @@ import {
 } from './dto/purchases.dto';
 import { duplicateOf, purchaseFingerprint } from './purchase-fingerprint';
 import { TicketExtractionService } from './ticket-extraction.service';
+import { TicketQueueService } from './ticket-queue.service';
 
 interface PurchaseFilters {
   status?: PurchaseStatus;
@@ -53,11 +55,14 @@ function metaObject(value: unknown): Record<string, unknown> {
 
 @Injectable()
 export class PurchasesService {
+  private readonly logger = new Logger(PurchasesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
     private readonly quantities: QuantityConverter,
     private readonly extraction: TicketExtractionService,
+    private readonly queue: TicketQueueService,
   ) {}
 
   async presignTicket(organizationId: string, dto: PresignTicketDto) {
@@ -130,6 +135,20 @@ export class PurchasesService {
     await this.audit(organizationId, userId, 'PURCHASE_TICKET_CREATED', purchase.id, {
       documentKey: dto.documentKey,
     });
+
+    const queued = await this.queue.enqueue(purchase.id, organizationId);
+
+    if (!queued) {
+      // Si pg-boss no está disponible, no dejamos el ticket colgado en
+      // PROCESSING: la extracción de respaldo corre en este proceso.
+      void this.extraction.extract(organizationId, purchase.id).catch((error) => {
+        this.logger.warn(
+          `Extracción de respaldo falló para ${purchase.id}: ${
+            error instanceof Error ? error.message : 'error desconocido'
+          }`,
+        );
+      });
+    }
 
     return this.get(organizationId, purchase.id);
   }
