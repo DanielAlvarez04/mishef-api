@@ -1,6 +1,8 @@
 import {
   IsBoolean,
+  IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
@@ -10,6 +12,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { Transform } from 'class-transformer';
 import { PaymentMethod, PaymentStatus, TipSource } from '@prisma/client';
 
 /** Registro de un pago (queda PENDIENTE hasta que se confirme). */
@@ -104,6 +107,74 @@ export class VoidPaymentDto {
   reason?: string;
 }
 
+/**
+ * Cobro con tarjeta capturado sin conexión.
+ *
+ * No confirma el pago: crea un PENDING que requiere conciliación humana. La
+ * referencia es el voucher o autorización de la terminal y es obligatoria para
+ * poder rastrear el cobro.
+ */
+export class RegisterOfflineCardPaymentDto {
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @IsPositive()
+  amount!: number;
+
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  tipAmount?: number;
+
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(100)
+  tipPercent?: number | null;
+
+  @IsOptional()
+  @IsEnum(TipSource)
+  tipSource?: TipSource;
+
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  tipBaseAmount?: number | null;
+
+  @IsString()
+  @MaxLength(120)
+  reference!: string;
+
+  @IsString()
+  @MaxLength(64)
+  deviceId!: string;
+
+  @IsOptional()
+  @IsDateString()
+  createdOfflineAt?: string;
+
+  @IsString()
+  @MaxLength(80)
+  idempotencyKey!: string;
+}
+
+/** Resolución manual de un cobro offline pendiente. */
+export class ReconcilePaymentDto {
+  @IsIn(['CONFIRM', 'REJECT'])
+  resolution!: 'CONFIRM' | 'REJECT';
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  reason?: string;
+
+  /**
+   * Al confirmar, intenta cerrar la cuenta si queda pagada y sin comandas
+   * activas. Por defecto se intenta.
+   */
+  @IsOptional()
+  @IsBoolean()
+  closeOrder?: boolean;
+}
+
 /** Filtros de la caja (listado de pagos). */
 export class ListPaymentsQueryDto {
   @IsOptional()
@@ -121,6 +192,12 @@ export class ListPaymentsQueryDto {
   @IsOptional()
   @IsEnum(PaymentStatus)
   status?: PaymentStatus;
+
+  /** Solo cobros que requieren conciliación manual. */
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  review?: boolean;
 
   @IsOptional()
   @IsInt()
