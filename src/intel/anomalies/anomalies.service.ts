@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import {
+  AiAnomalyReviewStatus,
   CashMovementType,
   OrderStatus,
   PaymentMethod,
@@ -8,7 +9,13 @@ import {
 
 import { PrismaService } from '../../prisma/prisma.service';
 
-export type AnomalyType = 'DISCOUNT' | 'CANCELLATION' | 'CASH' | 'WASTE';
+export type AnomalyType =
+  | 'DISCOUNT'
+  | 'CANCELLATION'
+  | 'CASH'
+  | 'WASTE'
+  | 'OPEN_TABLE'
+  | 'ITEM_QUANTITY';
 export type AnomalySeverity = 'HIGH' | 'MEDIUM' | 'LOW';
 
 export interface AnomalyFinding {
@@ -20,6 +27,8 @@ export interface AnomalyFinding {
   detail: string;
   evidence: Record<string, unknown>;
   link?: string;
+  /** Revisión humana persistida, si existe. */
+  reviewStatus?: 'ACKNOWLEDGED' | 'DISMISSED' | null;
 }
 
 const DEFAULT_DAYS = 30;
@@ -91,13 +100,19 @@ export class AnomaliesService {
           status: true,
           total: true,
           subtotal: true,
+          tableNumber: true,
           createdAt: true,
           userId: true,
           user: { select: { name: true, username: true } },
           rounds: {
             select: {
               items: {
-                select: { itemName: true, discountAmount: true },
+                select: {
+                  id: true,
+                  itemName: true,
+                  quantity: true,
+                  discountAmount: true,
+                },
               },
             },
           },
@@ -592,9 +607,137 @@ export class AnomaliesService {
       });
     }
 
+    // ---------------------------------------------------------------------
+    // Mesas abiertas demasiado tiempo
+    // ---------------------------------------------------------------------
+    const OPEN_TABLE_HOURS = 4;
+
+    for (const order of orders) {
+      if (order.status !== OrderStatus.OPEN) continue;
+
+      const ageHours = (now.getTime() - order.createdAt.getTime()) / 3600000;
+
+      if (ageHours < OPEN_TABLE_HOURS) continue;
+
+      const score = Math.min(100, 45 + (ageHours - OPEN_TABLE_HOURS) * 2);
+
+      findings.push({
+        id: `open-table-${order.id}`,
+        type: 'OPEN_TABLE',
+        severity: severityFor(score),
+        score: round(score),
+        title: `Cuenta abierta hace ${round(ageHours, 1)} h`,
+        detail: `La cuenta${
+          order.tableNumber ? ` de la mesa ${order.tableNumber}` : ''
+        } de ${userName(order.user)} sigue abierta con $${round(
+          Number(order.total),
+        )}.`,
+        evidence: {
+          orderId: order.id,
+          tableNumber: order.tableNumber,
+          openedAt: order.createdAt.toISOString(),
+          ageHours: round(ageHours, 1),
+          total: round(Number(order.total)),
+          user: userName(order.user),
+        },
+        link: '/reports',
+      });
+    }
+
+    // ---------------------------------------------------------------------
+    // Cantidades inusuales por artículo
+    // ---------------------------------------------------------------------
+    const linesByItem = new Map<
+      string,
+      Array<{
+        quantity: number;
+        orderId: string;
+        user: { name: string | null; username: string | null } | null;
+        date: Date;
+      }>
+    >();
+
+    for (const order of orders) {
+      for (const round of order.rounds) {
+        for (const item of round.items) {
+          const list = linesByItem.get(item.itemName) ?? [];
+          list.push({
+            quantity: item.quantity,
+            orderId: order.id,
+            user: order.user,
+            date: order.createdAt,
+          });
+          linesByItem.set(item.itemName, list);
+        }
+      }
+    }
+
+    let anomalyLine = 0;
+
+    for (const [itemName, lines] of linesByItem) {
+      if (lines.length < 5) continue;
+
+      const quantities = lines.map((line) => line.quantity);
+      const average = mean(quantities);
+      const deviation = stdDev(quantities);
+      const threshold = Math.max(10, average + 3 * deviation);
+
+      for (const line of lines) {
+        if (line.quantity < threshold) continue;
+
+        const z = deviation > 0 ? (line.quantity - average) / deviation : 0;
+        const score = Math.min(
+          100,
+          50 + (line.quantity - threshold) * 5 + z * 5,
+        );
+
+        anomalyLine += 1;
+        findings.push({
+          id: `item-quantity-${line.orderId}-${anomalyLine}`,
+          type: 'ITEM_QUANTITY',
+          severity: severityFor(score),
+          score: round(score),
+          title: `${line.quantity} × ${itemName} en un pedido`,
+          detail: `El promedio es ${round(average, 1)} unidades por línea (desviación ${round(
+            deviation,
+            1,
+          )}). Revisa si la cantidad es real o si se capturó de más.`,
+          evidence: {
+            orderId: line.orderId,
+            item: itemName,
+            quantity: line.quantity,
+            average: round(average, 1),
+            deviation: round(deviation, 1),
+            user: userName(line.user),
+            date: line.date.toISOString(),
+          },
+          link: '/reports',
+        });
+      }
+    }
+
     findings.sort((left, right) => right.score - left.score);
 
     const limited = findings.slice(0, options.limit ?? 30);
+
+    const reviews =
+      limited.length > 0
+        ? await this.prisma.aiAnomalyReview.findMany({
+            where: {
+              organizationId,
+              findingKey: { in: limited.map((finding) => finding.id) },
+            },
+            select: { findingKey: true, status: true },
+          })
+        : [];
+
+    const reviewMap = new Map(
+      reviews.map((review) => [review.findingKey, review.status]),
+    );
+
+    for (const finding of limited) {
+      finding.reviewStatus = reviewMap.get(finding.id) ?? null;
+    }
 
     return {
       from: from.toISOString(),
@@ -625,6 +768,45 @@ export class AnomaliesService {
       },
       findings: limited,
     };
+  }
+
+  async review(
+    organizationId: string,
+    userId: string,
+    findingKey: string,
+    status: AiAnomalyReviewStatus,
+    note?: string,
+  ) {
+    const review = await this.prisma.aiAnomalyReview.upsert({
+      where: {
+        organizationId_findingKey: { organizationId, findingKey },
+      },
+      create: {
+        organizationId,
+        findingKey,
+        status,
+        userId,
+        note: note?.trim() || null,
+      },
+      update: {
+        status,
+        userId,
+        note: note?.trim() || null,
+      },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        organizationId,
+        userId,
+        action: 'AI_ANOMALY_REVIEWED',
+        entity: 'AiAnomalyReview',
+        entityId: review.id,
+        newValues: { findingKey, status },
+      },
+    });
+
+    return review;
   }
 
   private empty() {

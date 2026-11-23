@@ -1,7 +1,10 @@
 import {
   BadRequestException,
+  Body,
   Controller,
   Get,
+  Param,
+  Post,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -14,7 +17,10 @@ import { CurrentBranch } from '../../common/decorators/current-branch.decorator'
 import { RequirePermissions } from '../../common/decorators/require-permissions.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { AnomaliesService } from './anomalies.service';
-import { AnomaliesQueryDto } from './dto/anomalies.dto';
+import {
+  AnomaliesQueryDto,
+  ReviewAnomalyDto,
+} from './dto/anomalies.dto';
 
 @ApiTags('intel-anomalies')
 @Controller('intel/anomalies')
@@ -33,6 +39,23 @@ export class AnomaliesController {
     @Query() query: AnomaliesQueryDto,
   ) {
     return this.anomalies.findings(organizationId(user), branchId, query);
+  }
+
+  @ApiOperation({ summary: 'Reconocer o descartar una anomalía' })
+  @RequirePermissions('costs:read')
+  @Post(':key/review')
+  review(
+    @CurrentUser() user: JwtUser,
+    @Param('key') key: string,
+    @Body() dto: ReviewAnomalyDto,
+  ) {
+    return this.anomalies.review(
+      organizationId(user),
+      user.sub,
+      key,
+      dto.status,
+      dto.note,
+    );
   }
 }
 

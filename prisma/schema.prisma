@@ -320,6 +320,7 @@ model Organization {
   aiDocuments      AiDocument[]
   aiCatalogProposals AiCatalogProposal[]
   aiSuggestionEvents AiSuggestionEvent[]
+  aiAnomalyReviews   AiAnomalyReview[]
 
   mercadoPagoConnection MercadoPagoConnection?
   mercadoPagoTerminals  MercadoPagoTerminal[]
@@ -2737,5 +2738,27 @@ model AiSuggestionEvent {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@index([organizationId, kind, createdAt])
+}
+
+enum AiAnomalyReviewStatus {
+  ACKNOWLEDGED
+  DISMISSED
+}
+
+/// Reconocimiento o descarte de una anomalía por una persona.
+model AiAnomalyReview {
+  id             String                @id @default(cuid())
+  organizationId String
+  findingKey     String
+  status         AiAnomalyReviewStatus
+  userId         String?
+  note           String?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, findingKey])
+  @@index([organizationId, status])
 }
 

@@ -1,9 +1,6 @@
 -- CreateEnum
 CREATE TYPE "AiProposalStatus" AS ENUM ('PROPOSED', 'APPLIED', 'DISMISSED');
 
--- DropIndex
-DROP INDEX "SupplierProduct_normalizedName_trgm_idx";
-
 -- AlterTable
 ALTER TABLE "Product" ADD COLUMN     "allergens" TEXT[] DEFAULT ARRAY[]::TEXT[],
 ADD COLUMN     "marketingCopy" TEXT,
