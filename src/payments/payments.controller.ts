@@ -21,6 +21,8 @@ import { PaymentsService } from './payments.service';
 import {
   CreatePaymentDto,
   ListPaymentsQueryDto,
+  ReconcilePaymentDto,
+  RegisterOfflineCardPaymentDto,
   VoidPaymentDto,
 } from './dto/payments.dto';
 
@@ -45,6 +47,7 @@ export class PaymentsController {
         to: parseDate(query.to, 'hasta'),
         method: query.method,
         status: query.status,
+        review: query.review,
         limit: query.limit,
         offset: query.offset,
       },
@@ -70,6 +73,40 @@ export class PaymentsController {
     return this.payments.register(user.organizationId, user.sub, id, dto, {
       confirm: Boolean(dto.confirm),
     });
+  }
+
+  @ApiOperation({
+    summary: 'Registrar un cobro con tarjeta capturado sin conexión',
+  })
+  @RequirePermissions('payments:register')
+  @Post('orders/:id/payments/offline-card')
+  registerOfflineCard(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Body() dto: RegisterOfflineCardPaymentDto,
+  ) {
+    return this.payments.registerOfflineCard(
+      user.organizationId,
+      user.sub,
+      id,
+      dto,
+    );
+  }
+
+  @ApiOperation({ summary: 'Conciliar un cobro offline pendiente' })
+  @RequirePermissions('payments:confirm')
+  @Post('payments/:id/reconcile')
+  reconcile(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Body() dto: ReconcilePaymentDto,
+  ) {
+    return this.payments.reconcile(
+      user.organizationId,
+      { id: user.sub, roles: user.roles },
+      id,
+      dto,
+    );
   }
 
   @ApiOperation({ summary: 'Confirmar un pago pendiente' })

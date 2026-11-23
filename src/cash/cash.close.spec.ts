@@ -14,6 +14,7 @@ function build() {
     payment: {
       findMany: jest.fn().mockResolvedValue([]),
       groupBy: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(0),
     },
     cashMovement: { findMany: jest.fn().mockResolvedValue([]) },
     user: { findMany: jest.fn().mockResolvedValue([]) },
@@ -110,5 +111,18 @@ describe('CashService — cierre idempotente', () => {
         idempotencyKey: 'key-2',
       }),
     ).rejects.toBeTruthy();
+  });
+
+  it('bloquea el cierre si hay pagos por conciliar', async () => {
+    const { service, prisma } = build();
+    prisma.cashSession.findFirst.mockResolvedValue(session());
+    prisma.payment.count.mockResolvedValueOnce(2);
+
+    await expect(
+      service.close('org1', 's1', 'u1', {
+        countedCash: 500,
+        idempotencyKey: 'key-1',
+      }),
+    ).rejects.toThrow('pagos por conciliar');
   });
 });

@@ -21,7 +21,12 @@ import { ANALYTICS_EVENTS } from '../analytics/analytics.events';
 import { rolesHavePermission } from '../common/permissions';
 import { OrdersEventsService } from '../orders/orders.events';
 import { OrderSplitsService } from '../orders/order-splits.service';
-import { CreatePaymentDto, VoidPaymentDto } from './dto/payments.dto';
+import {
+  CreatePaymentDto,
+  ReconcilePaymentDto,
+  RegisterOfflineCardPaymentDto,
+  VoidPaymentDto,
+} from './dto/payments.dto';
 import { ProviderPaymentRegistry } from './provider-payment.registry';
 
 const ACTIVE_ROUND_STATUSES = [
@@ -59,6 +64,7 @@ export interface PaymentFilters {
   to?: Date;
   method?: PaymentMethod;
   status?: PaymentStatus;
+  review?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -97,6 +103,7 @@ export class PaymentsService {
       ...(branchId ? { branchId } : {}),
       ...(filters.method ? { method: filters.method } : {}),
       ...(filters.status ? { status: filters.status } : {}),
+      ...(filters.review ? { reviewRequired: true } : {}),
       ...(filters.from || filters.to
         ? {
             createdAt: {
@@ -337,6 +344,160 @@ export class PaymentsService {
     return created;
   }
 
+  /**
+   * Registra un cobro con tarjeta capturado sin conexión.
+   *
+   * Queda PENDING y marcado para conciliación: nunca se confirma ni se cierra
+   * la cuenta aquí. El servidor usa su hora para ordenar el evento y acota la
+   * hora declarada por el dispositivo.
+   */
+  async registerOfflineCard(
+    organizationId: string | null,
+    userId: string,
+    orderId: string,
+    dto: RegisterOfflineCardPaymentDto,
+  ) {
+    const order = await this.getOpenOrder(organizationId, orderId);
+    const amount = decimal(dto.amount, 'El importe');
+    const tipAmount = new Prisma.Decimal(dto.tipAmount ?? 0).toDecimalPlaces(2);
+    const session = await this.requireOpenSession(
+      organizationId,
+      order.branchId,
+    );
+    const reference = dto.reference.trim();
+    const idempotencyKey = dto.idempotencyKey.trim();
+    const deviceId = dto.deviceId.trim().slice(0, 64);
+
+    if (reference.length < 4) {
+      throw new BadRequestException(
+        'Escribe la referencia o autorización del voucher',
+      );
+    }
+
+    if (!idempotencyKey) {
+      throw new BadRequestException('Falta la clave de idempotencia');
+    }
+
+    if (!deviceId) {
+      throw new BadRequestException('Falta el identificador del dispositivo');
+    }
+
+    const existing = await this.prisma.payment.findFirst({
+      where: { organizationId, idempotencyKey },
+      include: paymentInclude,
+    });
+
+    if (existing) {
+      if (existing.orderId !== orderId) {
+        throw new ConflictException('La clave de idempotencia ya está en uso');
+      }
+
+      return { ...existing, duplicated: true };
+    }
+
+    const totals = await this.totals(orderId);
+    const remaining = order.total.minus(totals.confirmed).minus(totals.pending);
+
+    if (amount.gt(remaining)) {
+      throw new BadRequestException(
+        `El importe supera el saldo pendiente (${remaining.toFixed(2)})`,
+      );
+    }
+
+    const now = new Date();
+    const minOffline = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+    let createdOfflineAt = now;
+
+    if (dto.createdOfflineAt) {
+      const parsed = new Date(dto.createdOfflineAt);
+
+      if (Number.isNaN(parsed.getTime())) {
+        throw new BadRequestException('La fecha del cobro offline no es válida');
+      }
+
+      createdOfflineAt =
+        parsed > now ? now : parsed < minOffline ? minOffline : parsed;
+    }
+
+    const created = await this.prisma.payment.create({
+      data: {
+        organizationId,
+        branchId: order.branchId,
+        orderId,
+        userId,
+        method: PaymentMethod.CARD,
+        amount,
+        status: PaymentStatus.PENDING,
+        paidAt: createdOfflineAt,
+        tipAmount,
+        tipPercent:
+          dto.tipPercent === undefined || dto.tipPercent === null
+            ? null
+            : new Prisma.Decimal(dto.tipPercent).toDecimalPlaces(2),
+        tipSource: dto.tipSource ?? TipSource.NONE,
+        tipBaseAmount:
+          dto.tipBaseAmount === undefined || dto.tipBaseAmount === null
+            ? null
+            : new Prisma.Decimal(dto.tipBaseAmount).toDecimalPlaces(2),
+        tipRecipientId: tipAmount.gt(0) ? userId : null,
+        sessionId: session.id,
+        reference,
+        idempotencyKey,
+        offlineDeviceId: deviceId,
+        createdOfflineAt,
+        reviewRequired: true,
+        reviewReason: 'Cobro con tarjeta capturado sin conexión',
+        providerData: {
+          offline: true,
+          deviceId,
+          capturedAt: createdOfflineAt.toISOString(),
+        },
+      },
+      include: paymentInclude,
+    });
+
+    await this.analytics.recordMany([
+      {
+        name: ANALYTICS_EVENTS.paymentRegistered,
+        organizationId,
+        branchId: order.branchId,
+        userId,
+        orderId,
+        subjectType: 'payment',
+        subjectId: created.id,
+        amount: Number(amount),
+        metadata: {
+          method: PaymentMethod.CARD,
+          offline: true,
+          reviewRequired: true,
+          deviceId,
+          reference,
+          tipAmount: Number(tipAmount),
+        },
+      },
+    ]);
+
+    await this.prisma.auditLog.create({
+      data: {
+        organizationId,
+        userId,
+        action: 'payment.offline_card_registered',
+        entity: 'Payment',
+        entityId: created.id,
+        newValues: {
+          orderId,
+          amount: amount.toFixed(2),
+          tipAmount: tipAmount.toFixed(2),
+          reference,
+          deviceId,
+          createdOfflineAt: createdOfflineAt.toISOString(),
+        },
+      },
+    });
+
+    return created;
+  }
+
   /** Exige una caja abierta para la sucursal de la cuenta. */
   private async requireOpenSession(
     organizationId: string | null,
@@ -380,6 +541,155 @@ export class PaymentsService {
       source: 'manual',
     });
   }
+
+  /**
+   * Resuelve un cobro offline desde la cola de conciliación.
+   *
+   * Confirmar y rechazar exigen `payments:confirm` (ADMIN/CASHIER): es una
+   * decisión sobre dinero. La confirmación usa el mismo camino que cualquier
+   * pago y deja auditoría.
+   */
+  async reconcile(
+    organizationId: string | null,
+    actor: PaymentActor,
+    paymentId: string,
+    dto: ReconcilePaymentDto,
+  ) {
+    const payment = await this.prisma.payment.findFirst({
+      where: { id: paymentId, organizationId },
+      select: {
+        id: true,
+        orderId: true,
+        status: true,
+        reference: true,
+        offlineDeviceId: true,
+      },
+    });
+
+    if (!payment) {
+      throw new NotFoundException('Pago no encontrado');
+    }
+
+    if (dto.resolution === 'CONFIRM') {
+      if (!rolesHavePermission(actor.roles, 'payments:confirm')) {
+        throw new ForbiddenException('No puedes confirmar pagos');
+      }
+
+      if (payment.status === PaymentStatus.CONFIRMED) {
+        return {
+          payment: { ...payment, duplicated: true },
+          closed: false,
+          order: null,
+          closeMessage: null,
+        };
+      }
+
+      if (payment.status !== PaymentStatus.PENDING) {
+        throw new BadRequestException(
+          'Solo se puede conciliar un pago pendiente',
+        );
+      }
+
+      const confirmed = await this.confirmInternal(organizationId, paymentId, {
+        userId: actor.id,
+        source: 'offline_reconciliation',
+      });
+
+      let closed = false;
+      let order: unknown = null;
+      let closeMessage: string | null = null;
+
+      if (dto.closeOrder !== false) {
+        try {
+          order = await this.closeOrder(
+            organizationId,
+            actor.id,
+            payment.orderId,
+          );
+          closed = true;
+        } catch (error) {
+          closeMessage =
+            error instanceof Error
+              ? error.message
+              : 'No se pudo cerrar la cuenta';
+        }
+      }
+
+      await this.prisma.auditLog.create({
+        data: {
+          organizationId,
+          userId: actor.id,
+          action: 'payment.reconciled',
+          entity: 'Payment',
+          entityId: paymentId,
+          newValues: {
+            resolution: 'CONFIRM',
+            reference: payment.reference,
+            deviceId: payment.offlineDeviceId,
+            closeOrder: dto.closeOrder !== false,
+            closed,
+            closeMessage,
+          },
+        },
+      });
+
+      return { payment: confirmed, closed, order, closeMessage };
+    }
+
+    if (!rolesHavePermission(actor.roles, 'payments:confirm')) {
+      throw new ForbiddenException('No puedes anular pagos');
+    }
+
+    const reason = dto.reason?.trim();
+
+    if (!reason) {
+      throw new BadRequestException('Indica el motivo del rechazo');
+    }
+
+    if (
+      payment.status === PaymentStatus.CANCELLED ||
+      payment.status === PaymentStatus.REFUNDED
+    ) {
+      return {
+        payment: { ...payment, duplicated: true },
+        closed: false,
+        order: null,
+        closeMessage: null,
+      };
+    }
+
+    const cancelled = await this.voidPayment(
+      organizationId,
+      actor,
+      paymentId,
+      { reason },
+      { providerHandled: true },
+    );
+
+    await this.prisma.auditLog.create({
+      data: {
+        organizationId,
+        userId: actor.id,
+        action: 'payment.reconciled',
+        entity: 'Payment',
+        entityId: paymentId,
+        newValues: {
+          resolution: 'REJECT',
+          reason,
+          reference: payment.reference,
+          deviceId: payment.offlineDeviceId,
+        },
+      },
+    });
+
+    return {
+      payment: cancelled,
+      closed: false,
+      order: null,
+      closeMessage: null,
+    };
+  }
+
   /**
    * Confirma un pago que el proveedor ya cobró (webhook o conciliación).
    *
@@ -485,6 +795,8 @@ export class PaymentsService {
           confirmedAt: now,
           confirmedById: options.userId,
           paidAt: options.paidAt ?? payment.paidAt ?? now,
+          reviewRequired: false,
+          reviewReason: null,
         },
       });
 
@@ -676,6 +988,8 @@ export class PaymentsService {
         where: { id: paymentId },
         data: {
           status,
+          reviewRequired: false,
+          reviewReason: isPending ? reason : payment.reviewReason,
           ...(providerRefundedAmount !== null
             ? {
                 providerStatus: 'refunded',
@@ -789,6 +1103,26 @@ export class PaymentsService {
     if (activeRounds > 0) {
       throw new BadRequestException(
         'Todavía hay comandas activas en cocina; entrégalas o cancélalas antes de cerrar',
+      );
+    }
+
+    // Un pago pendiente (incluido el de tarjeta offline) no cubre la cuenta:
+    // cerrarla dejaría la mesa libre con un cobro sin confirmar.
+    const [pendingCount, pendingSum] = await Promise.all([
+      this.prisma.payment.count({
+        where: { orderId, status: PaymentStatus.PENDING },
+      }),
+      this.prisma.payment.aggregate({
+        where: { orderId, status: PaymentStatus.PENDING },
+        _sum: { amount: true },
+      }),
+    ]);
+
+    if (pendingCount > 0) {
+      const pendingAmount = pendingSum._sum.amount ?? new Prisma.Decimal(0);
+
+      throw new BadRequestException(
+        `Hay ${pendingCount} pagos pendientes de confirmar (${pendingAmount.toFixed(2)}). Confírmalos o anúlalos antes de cerrar.`,
       );
     }
 

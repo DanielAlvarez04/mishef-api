@@ -30,11 +30,13 @@ describe('CashService — conciliación del turno', () => {
     const { service, prisma } = build();
     prisma.cashSession.findFirst.mockResolvedValue(openSession);
 
-    prisma.payment.findMany.mockResolvedValue([
-      { method: PaymentMethod.CASH, amount: 1000, tipAmount: 50 },
-      { method: PaymentMethod.CARD, amount: 300, tipAmount: 20 },
-      { method: PaymentMethod.MERCADO_PAGO_POINT, amount: 200, tipAmount: 0 },
-    ]);
+    prisma.payment.findMany
+      .mockResolvedValueOnce([
+        { method: PaymentMethod.CASH, amount: 1000, tipAmount: 50 },
+        { method: PaymentMethod.CARD, amount: 300, tipAmount: 20 },
+        { method: PaymentMethod.MERCADO_PAGO_POINT, amount: 200, tipAmount: 0 },
+      ])
+      .mockResolvedValueOnce([]);
 
     prisma.cashMovement.findMany.mockResolvedValue([
       { type: CashMovementType.WITHDRAWAL, amount: 100 },
@@ -64,9 +66,11 @@ describe('CashService — conciliación del turno', () => {
   it('calcula la diferencia en vivo sin cerrar el turno', async () => {
     const { service, prisma } = build();
     prisma.cashSession.findFirst.mockResolvedValue(openSession);
-    prisma.payment.findMany.mockResolvedValue([
-      { method: PaymentMethod.CASH, amount: 1000, tipAmount: 0 },
-    ]);
+    prisma.payment.findMany
+      .mockResolvedValueOnce([
+        { method: PaymentMethod.CASH, amount: 1000, tipAmount: 0 },
+      ])
+      .mockResolvedValueOnce([]);
     prisma.cashMovement.findMany.mockResolvedValue([]);
 
     const result = await service.reconciliation('org1', 's1', 1480);
@@ -82,7 +86,9 @@ describe('CashService — conciliación del turno', () => {
       ...openSession,
       openingFloat: 100,
     });
-    prisma.payment.findMany.mockResolvedValue([]);
+    prisma.payment.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
     prisma.cashMovement.findMany.mockResolvedValue([
       { type: CashMovementType.WITHDRAWAL, amount: 400 },
     ]);
@@ -102,9 +108,11 @@ describe('CashService — conciliación del turno', () => {
   it('marca una diferencia grande antes de cerrar', async () => {
     const { service, prisma } = build();
     prisma.cashSession.findFirst.mockResolvedValue(openSession);
-    prisma.payment.findMany.mockResolvedValue([
-      { method: PaymentMethod.CASH, amount: 1000, tipAmount: 0 },
-    ]);
+    prisma.payment.findMany
+      .mockResolvedValueOnce([
+        { method: PaymentMethod.CASH, amount: 1000, tipAmount: 0 },
+      ])
+      .mockResolvedValueOnce([]);
     prisma.cashMovement.findMany.mockResolvedValue([]);
 
     const result = await service.reconciliation('org1', 's1', 1000);
@@ -112,6 +120,42 @@ describe('CashService — conciliación del turno', () => {
     expect(result.proposed?.difference).toBe(-500);
     expect(result.alerts.map((alert) => alert.code)).toContain(
       'large_difference',
+    );
+  });
+
+  it('incluye los pagos por conciliar sin contarlos como venta', async () => {
+    const { service, prisma } = build();
+    prisma.cashSession.findFirst.mockResolvedValue(openSession);
+    prisma.payment.findMany
+      .mockResolvedValueOnce([
+        { method: PaymentMethod.CASH, amount: 1000, tipAmount: 0 },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: 'p1',
+          orderId: 'o1',
+          method: PaymentMethod.CARD,
+          amount: 100,
+          tipAmount: 10,
+          reference: 'AUTH-1',
+          offlineDeviceId: 'dev-1',
+          createdOfflineAt: new Date('2026-11-16T19:00:00Z'),
+          createdAt: new Date('2026-11-16T19:01:00Z'),
+          order: { id: 'o1', tableNumber: '4', isTakeaway: false },
+        },
+      ]);
+    prisma.cashMovement.findMany.mockResolvedValue([]);
+
+    const result = await service.reconciliation('org1', 's1');
+
+    expect(result.cash.sales).toBe(1000);
+    expect(result.pending).toMatchObject({ count: 1, amount: 110 });
+    expect(result.pending.items[0]).toMatchObject({
+      reference: 'AUTH-1',
+      deviceId: 'dev-1',
+    });
+    expect(result.alerts.map((alert) => alert.code)).toContain(
+      'pending_conciliation',
     );
   });
 });

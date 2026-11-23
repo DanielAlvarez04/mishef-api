@@ -150,6 +150,20 @@ export class CashService {
       throw new BadRequestException('La caja ya está cerrada');
     }
 
+    const reviewCount = await this.prisma.payment.count({
+      where: {
+        sessionId,
+        status: PaymentStatus.PENDING,
+        reviewRequired: true,
+      },
+    });
+
+    if (reviewCount > 0) {
+      throw new BadRequestException(
+        `Hay ${reviewCount} pagos por conciliar. Resuélvelos antes de cerrar la caja.`,
+      );
+    }
+
     const expected = await this.expectedCash(session.id, session.openingFloat);
     const counted = new Prisma.Decimal(dto.countedCash).toDecimalPlaces(2);
     const difference = counted.minus(expected).toDecimalPlaces(2);
@@ -373,7 +387,7 @@ export class CashService {
   ) {
     const session = await this.findSession(organizationId, sessionId);
 
-    const [payments, movements] = await Promise.all([
+    const [payments, movements, pendingPayments] = await Promise.all([
       this.prisma.payment.findMany({
         where: { sessionId, status: PaymentStatus.CONFIRMED },
         select: { method: true, amount: true, tipAmount: true },
@@ -381,6 +395,28 @@ export class CashService {
       this.prisma.cashMovement.findMany({
         where: { sessionId },
         select: { type: true, amount: true },
+      }),
+      this.prisma.payment.findMany({
+        where: {
+          sessionId,
+          status: PaymentStatus.PENDING,
+          reviewRequired: true,
+        },
+        select: {
+          id: true,
+          orderId: true,
+          method: true,
+          amount: true,
+          tipAmount: true,
+          reference: true,
+          offlineDeviceId: true,
+          createdOfflineAt: true,
+          createdAt: true,
+          order: {
+            select: { id: true, tableNumber: true, isTakeaway: true },
+          },
+        },
+        orderBy: { createdAt: 'asc' },
       }),
     ]);
 
@@ -453,6 +489,14 @@ export class CashService {
       (row) => row.method !== PaymentMethod.CASH,
     );
 
+    const pendingAmount = round2(
+      pendingPayments.reduce(
+        (sum, payment) =>
+          sum + Number(payment.amount) + Number(payment.tipAmount),
+        0,
+      ),
+    );
+
     const alerts: Array<{ code: string; message: string }> = [];
 
     if (expectedCash < 0) {
@@ -482,6 +526,13 @@ export class CashService {
       alerts.push({
         code: 'no_payments',
         message: 'El turno no tiene cobros confirmados.',
+      });
+    }
+
+    if (pendingPayments.length > 0) {
+      alerts.push({
+        code: 'pending_conciliation',
+        message: `Hay ${pendingPayments.length} pagos por conciliar (${pendingAmount}). Confírmalos o anúlalos antes de cerrar.`,
       });
     }
 
@@ -540,6 +591,23 @@ export class CashService {
             0,
           ),
         ),
+      },
+      pending: {
+        count: pendingPayments.length,
+        amount: pendingAmount,
+        items: pendingPayments.map((payment) => ({
+          id: payment.id,
+          orderId: payment.orderId,
+          method: payment.method,
+          amount: round2(Number(payment.amount)),
+          tipAmount: round2(Number(payment.tipAmount)),
+          reference: payment.reference,
+          deviceId: payment.offlineDeviceId,
+          createdOfflineAt:
+            payment.createdOfflineAt?.toISOString() ?? null,
+          createdAt: payment.createdAt.toISOString(),
+          order: payment.order,
+        })),
       },
       proposed,
       alerts,
