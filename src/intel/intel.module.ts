@@ -4,6 +4,7 @@ import { CatalogModule } from '../catalog/catalog.module';
 import { DashboardModule } from '../dashboard/dashboard.module';
 import { InventoryModule } from '../inventory/inventory.module';
 import { WasteModule } from '../waste/waste.module';
+import { IntelDigestService } from './digest/intel-digest.service';
 import { IntelController } from './intel.controller';
 import { IntelService } from './intel.service';
 import { OpenAiCompatibleClient } from './providers/openai-compatible.client';
@@ -29,6 +30,8 @@ import { IntelToolRegistry } from './tools/tool.registry';
     CatalogTools,
     InventoryTools,
     KitchenTools,
+    IntelDigestService,
   ],
+  exports: [IntelDigestService],
 })
 export class IntelModule {}

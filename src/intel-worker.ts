@@ -1,8 +1,12 @@
+import { NestFactory } from '@nestjs/core';
+import { Logger } from '@nestjs/common';
 import { config } from 'dotenv';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { Logger } from '@nestjs/common';
 import { PgBoss } from 'pg-boss';
+
+import { AppModule } from './app.module';
+import { IntelDigestService } from './intel/digest/intel-digest.service';
 
 /**
  * Worker de Intel.
@@ -11,9 +15,8 @@ import { PgBoss } from 'pg-boss';
  * y los pronósticos no compitan con el POS. Usa la misma base de datos y la
  * cola vive en Postgres (`pg-boss`), sin Redis.
  *
- * En Fase 0 solo corre un heartbeat y un self-test opcional. Las colas reales
- * (`intel-digest`, `intel-ticket`, `intel-forecast`) se registran en las
- * siguientes fases.
+ * El contexto de Nest se crea sin servidor HTTP para reutilizar los servicios
+ * de la API (dashboard, inventario, mermas, correo) sin duplicar consultas.
  */
 
 const envPath = [
@@ -26,6 +29,7 @@ config(envPath ? { path: envPath } : {});
 
 const logger = new Logger('IntelWorker');
 const HEARTBEAT_QUEUE = 'intel-heartbeat';
+const DIGEST_QUEUE = 'intel-digest';
 
 async function bootstrap() {
   const connectionString = process.env.DATABASE_URL;
@@ -34,11 +38,17 @@ async function bootstrap() {
     throw new Error('Falta DATABASE_URL para el worker de Intel');
   }
 
+  const app = await NestFactory.createApplicationContext(AppModule, {
+    logger: ['error', 'warn', 'log'],
+  });
+  const digest = app.get(IntelDigestService);
+
   const boss = new PgBoss(connectionString);
   boss.on('error', (error) => logger.error(error));
 
   await boss.start();
   await boss.createQueue(HEARTBEAT_QUEUE);
+  await boss.createQueue(DIGEST_QUEUE);
 
   await boss.work(HEARTBEAT_QUEUE, async (jobs) => {
     for (const job of jobs) {
@@ -48,20 +58,32 @@ async function bootstrap() {
     }
   });
 
+  await boss.work(DIGEST_QUEUE, async () => {
+    logger.log('Generando digest diario...');
+    const result = await digest.generateForAllOrganizations();
+    logger.log(
+      `Digest listo: ${result.organizations} organizaciones, ${result.notifications} notificaciones, ${result.emailed} correos.`,
+    );
+  });
+
   await boss.schedule(HEARTBEAT_QUEUE, '*/5 * * * *', {
     source: 'schedule',
   });
+  // 07:00 hora local del servidor (America/Mexico_City en producción).
+  await boss.schedule(DIGEST_QUEUE, '0 7 * * *', { source: 'schedule' });
 
   if (process.env.INTEL_WORKER_SELF_TEST === '1') {
     await boss.send(HEARTBEAT_QUEUE, { source: 'self-test' });
+    await boss.send(DIGEST_QUEUE, { source: 'self-test' });
     logger.log('Self-test encolado');
   }
 
-  logger.log(`Worker listo. Cola: ${HEARTBEAT_QUEUE}`);
+  logger.log(`Worker listo. Colas: ${HEARTBEAT_QUEUE}, ${DIGEST_QUEUE}`);
 
   const shutdown = async (signal: string) => {
     logger.log(`Cerrando worker por ${signal}...`);
     await boss.stop();
+    await app.close();
     process.exit(0);
   };
 

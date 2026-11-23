@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -6,6 +7,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Req,
   Res,
   UseGuards,
@@ -18,6 +20,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RequirePermissions } from '../common/decorators/require-permissions.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
+import { IntelDigestService } from './digest/intel-digest.service';
 import {
   IntelChatDto,
   IntelFeedbackDto,
@@ -29,7 +32,10 @@ import { IntelService } from './intel.service';
 @Controller('intel')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class IntelController {
-  constructor(private readonly intel: IntelService) {}
+  constructor(
+    private readonly intel: IntelService,
+    private readonly digest: IntelDigestService,
+  ) {}
 
   @ApiOperation({ summary: 'Configuración y consumo de Intel' })
   @RequirePermissions('intel:use')
@@ -80,6 +86,59 @@ export class IntelController {
   @Get('usage')
   getUsage(@CurrentUser() user: JwtUser) {
     return this.intel.getUsage(user);
+  }
+
+  @ApiOperation({ summary: 'Bandeja de notificaciones de Intel' })
+  @RequirePermissions('intel:use')
+  @Get('notifications')
+  listNotifications(
+    @CurrentUser() user: JwtUser,
+    @Query('unreadOnly') unreadOnly?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const parsed = Number(limit);
+    const take = Number.isFinite(parsed) ? parsed : 50;
+
+    return this.intel.listNotifications(
+      user,
+      unreadOnly === 'true' || unreadOnly === '1',
+      take,
+    );
+  }
+
+  @ApiOperation({ summary: 'Notificaciones no leídas' })
+  @RequirePermissions('intel:use')
+  @Get('notifications/unread-count')
+  unreadNotifications(@CurrentUser() user: JwtUser) {
+    return this.intel.unreadNotifications(user);
+  }
+
+  @ApiOperation({ summary: 'Marcar una notificación como leída' })
+  @RequirePermissions('intel:use')
+  @Patch('notifications/:id/read')
+  markNotificationRead(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+  ) {
+    return this.intel.markNotificationRead(user, id);
+  }
+
+  @ApiOperation({ summary: 'Marcar todas las notificaciones como leídas' })
+  @RequirePermissions('intel:use')
+  @Post('notifications/read-all')
+  markAllNotificationsRead(@CurrentUser() user: JwtUser) {
+    return this.intel.markAllNotificationsRead(user);
+  }
+
+  @ApiOperation({ summary: 'Generar el digest diario ahora (ADMIN)' })
+  @RequirePermissions('organization:manage')
+  @Post('digest')
+  runDigest(@CurrentUser() user: JwtUser) {
+    if (!user.organizationId) {
+      throw new BadRequestException('La sesión no tiene organización');
+    }
+
+    return this.digest.generateForOrganization(user.organizationId);
   }
 
   @ApiOperation({ summary: 'Chat del copiloto (SSE)' })

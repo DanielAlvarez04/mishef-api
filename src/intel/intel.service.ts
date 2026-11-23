@@ -225,6 +225,81 @@ export class IntelService {
     return { ok: true };
   }
 
+  async listNotifications(
+    user: JwtUser,
+    unreadOnly = false,
+    limit = 50,
+  ) {
+    const organization = await this.requireOrganization(user);
+
+    return this.prisma.aiNotification.findMany({
+      where: {
+        organizationId: organization.id,
+        OR: [{ userId: user.sub }, { userId: null }],
+        ...(unreadOnly ? { readAt: null } : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      take: Math.min(Math.max(limit, 1), 100),
+      select: {
+        id: true,
+        kind: true,
+        title: true,
+        body: true,
+        data: true,
+        readAt: true,
+        createdAt: true,
+      },
+    });
+  }
+
+  async unreadNotifications(user: JwtUser) {
+    const organization = await this.requireOrganization(user);
+
+    const count = await this.prisma.aiNotification.count({
+      where: {
+        organizationId: organization.id,
+        OR: [{ userId: user.sub }, { userId: null }],
+        readAt: null,
+      },
+    });
+
+    return { count };
+  }
+
+  async markNotificationRead(user: JwtUser, id: string) {
+    const organization = await this.requireOrganization(user);
+
+    const result = await this.prisma.aiNotification.updateMany({
+      where: {
+        id,
+        organizationId: organization.id,
+        OR: [{ userId: user.sub }, { userId: null }],
+      },
+      data: { readAt: new Date() },
+    });
+
+    if (result.count === 0) {
+      throw new NotFoundException('Notificación no encontrada');
+    }
+
+    return { ok: true };
+  }
+
+  async markAllNotificationsRead(user: JwtUser) {
+    const organization = await this.requireOrganization(user);
+
+    const result = await this.prisma.aiNotification.updateMany({
+      where: {
+        organizationId: organization.id,
+        OR: [{ userId: user.sub }, { userId: null }],
+        readAt: null,
+      },
+      data: { readAt: new Date() },
+    });
+
+    return { updated: result.count };
+  }
+
   /**
    * Chat por SSE con ciclo de herramientas.
    *
