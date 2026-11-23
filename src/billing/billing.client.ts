@@ -48,6 +48,15 @@ export interface MpAuthorizedPayment {
   payment_method_id?: string;
 }
 
+export interface MpAuthorizedPaymentSearch {
+  paging?: {
+    offset?: number;
+    limit?: number;
+    total?: number;
+  };
+  results: MpAuthorizedPayment[];
+}
+
 export class BillingProviderError extends Error {
   constructor(
     readonly status: number,
@@ -160,6 +169,26 @@ export class BillingClient {
   ): Promise<MpAuthorizedPayment> {
     return this.request<MpAuthorizedPayment>(
       `/authorized_payments/${encodeURIComponent(authorizedPaymentId)}`,
+    );
+  }
+
+  /**
+   * Historial de cobros de una suscripción.
+   *
+   * Se usa como respaldo cuando un webhook se pierde: el estado real de cada
+   * intento de cobro está en esta lista.
+   */
+  searchAuthorizedPayments(
+    preapprovalId: string,
+    limit = 100,
+  ): Promise<MpAuthorizedPaymentSearch> {
+    const query = new URLSearchParams({
+      preapproval_id: preapprovalId,
+      limit: String(limit),
+    });
+
+    return this.request<MpAuthorizedPaymentSearch>(
+      `/authorized_payments/search?${query.toString()}`,
     );
   }
 

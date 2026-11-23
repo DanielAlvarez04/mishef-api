@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { OrderRoundStatus, OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { isEmptyPatch, sameJson } from '../common/patch';
 import { normalizeGroupColors } from '../common/group-colors';
@@ -41,6 +41,23 @@ const GLOBAL_MENU_DESCRIPTION =
 const COMBO_GROUP = 'Combos';
 /** Grupo para artículos activos sin categoría. */
 const UNCATEGORIZED_GROUP = 'Sin categoría';
+
+/** Ventana del ranking de «Tendencia» del POS. */
+const TRENDING_DAYS = 30;
+/** Vigencia de la caché del ranking (por organización y sucursal). */
+const TRENDING_TTL_MS = 60_000;
+/** Tope de artículos devueltos; suficiente para el top 3 de cada grupo. */
+const TRENDING_LIMIT = 500;
+
+export interface TrendingMenuItem {
+  itemId: string;
+  quantity: number;
+}
+
+interface TrendingCacheEntry {
+  at: number;
+  items: TrendingMenuItem[];
+}
 
 type MenuRow = Prisma.MenuGetPayload<{ include: typeof menuInclude }>;
 
@@ -89,7 +106,62 @@ export function menuIsAvailableNow(
 
 @Injectable()
 export class MenusService {
+  private readonly trendingCache = new Map<string, TrendingCacheEntry>();
+
   constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Artículos más vendidos en pedidos cobrados de la ventana reciente.
+   *
+   * Alimenta el chip «Tendencia» del POS: el cliente lo agrupa por sección y
+   * se queda con los tres primeros de cada grupo. Solo cuenta pedidos
+   * cerrados (cobrados) y descarta rondas canceladas.
+   */
+  async trending(
+    organizationId: string | null,
+    branchId: string | null,
+    days = TRENDING_DAYS,
+  ): Promise<{ days: number; items: TrendingMenuItem[] }> {
+    if (!organizationId) return { days: TRENDING_DAYS, items: [] };
+
+    const windowDays = Number.isFinite(days)
+      ? Math.min(Math.max(Math.trunc(days), 1), 365)
+      : TRENDING_DAYS;
+    const key = `${organizationId}:${branchId ?? '*'}:${windowDays}`;
+    const cached = this.trendingCache.get(key);
+
+    if (cached && Date.now() - cached.at < TRENDING_TTL_MS) {
+      return { days: windowDays, items: cached.items };
+    }
+
+    const from = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
+    const rows = await this.prisma.orderItem.groupBy({
+      by: ['itemId'],
+      where: {
+        orderRound: {
+          status: { not: OrderRoundStatus.CANCELLED },
+          order: {
+            organizationId,
+            status: OrderStatus.CLOSED,
+            createdAt: { gte: from },
+            ...(branchId ? { branchId } : {}),
+          },
+        },
+      },
+      _sum: { quantity: true },
+      orderBy: { _sum: { quantity: 'desc' } },
+      take: TRENDING_LIMIT,
+    });
+
+    const items = rows.map((row) => ({
+      itemId: row.itemId,
+      quantity: row._sum.quantity ?? 0,
+    }));
+
+    this.trendingCache.set(key, { at: Date.now(), items });
+
+    return { days: windowDays, items };
+  }
 
   async list(organizationId: string | null, includeInactive = false) {
     await this.ensureGlobalMenu(organizationId);
@@ -176,16 +248,19 @@ export class MenusService {
       (item) => !item.isCombo && !item.category?.name,
     );
 
-    // Todos los grupos, incluidos Combos y Sin categoría, en orden alfabético.
-    const groups = [
+    // Combos siempre primero; el resto en orden alfabético (incluido
+    // «Sin categoría»). Así el POS muestra primero la sección de combos y
+    // después las categorías, sin depender del `sortOrder` de la categoría.
+    const sortedGroups = [
       ...new Set([
-        ...(hasCombos ? [COMBO_GROUP] : []),
         ...categoryNames,
         ...(hasUncategorized ? [UNCATEGORIZED_GROUP] : []),
       ]),
     ].sort((left, right) =>
       left.localeCompare(right, 'es', { sensitivity: 'base' }),
     );
+
+    const groups = [...(hasCombos ? [COMBO_GROUP] : []), ...sortedGroups];
 
     const groupColors = normalizeGroupColors(groups, existing?.groupColors);
 
