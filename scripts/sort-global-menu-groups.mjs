@@ -20,12 +20,21 @@ const menus = await prisma.menu.findMany({
   orderBy: [{ organizationId: 'asc' }, { name: 'asc' }],
 });
 
+/** Combos siempre primero; el resto en orden alfabético. */
+function orderGroups(groups) {
+  const rest = groups
+    .filter((group) => group !== 'Combos')
+    .sort((left, right) =>
+      left.localeCompare(right, 'es', { sensitivity: 'base' }),
+    );
+
+  return groups.includes('Combos') ? ['Combos', ...rest] : rest;
+}
+
 let updated = 0;
 
 for (const menu of menus) {
-  const groups = [...menu.groups].sort((left, right) =>
-    left.localeCompare(right, 'es', { sensitivity: 'base' }),
-  );
+  const groups = orderGroups(menu.groups);
 
   if (groups.join('\u0000') === menu.groups.join('\u0000')) continue;
 

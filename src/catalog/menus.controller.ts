@@ -16,6 +16,7 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtUser } from '../auth/auth.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { CurrentBranch } from '../common/decorators/current-branch.decorator';
 import { RequirePermissions } from '../common/decorators/require-permissions.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { MenusService } from './menus.service';
@@ -40,6 +41,24 @@ export class MenusController {
     return this.menus.list(
       user.organizationId,
       includeInactive === 'true',
+    );
+  }
+
+  @ApiOperation({
+    summary: 'Artículos más vendidos para el chip de tendencias del POS',
+  })
+  @Get('trending')
+  trending(
+    @CurrentUser() user: JwtUser,
+    @CurrentBranch() branchId: string | null,
+    @Query('days') days?: string,
+  ) {
+    const parsed = days ? Number.parseInt(days, 10) : undefined;
+
+    return this.menus.trending(
+      user.organizationId,
+      branchId,
+      Number.isFinite(parsed) ? parsed : undefined,
     );
   }
 

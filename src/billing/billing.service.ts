@@ -4,6 +4,8 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -48,6 +50,11 @@ import {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const GRACE_DAYS = 5;
+/** Primera conciliación tras arrancar: deja pasar el pico de inicio. */
+const RECONCILE_INITIAL_DELAY_MS = 2 * 60 * 1000;
+/** Respaldo del webhook: concilia suscripciones cada 6 horas. */
+const RECONCILE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const RECONCILE_BATCH = 200;
 
 export interface PlanView {
   id: string;
@@ -150,14 +157,41 @@ interface WebhookBody {
 }
 
 @Injectable()
-export class BillingService {
+export class BillingService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(BillingService.name);
+  private reconcileTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconcileInterval: ReturnType<typeof setInterval> | null = null;
+  private reconcileRunning = false;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly client: BillingClient,
     private readonly config: ConfigService,
   ) {}
+
+  onModuleInit() {
+    if (!this.client.isConfigured) return;
+
+    this.reconcileTimer = setTimeout(() => {
+      void this.reconcileSubscriptions();
+
+      this.reconcileInterval = setInterval(
+        () => void this.reconcileSubscriptions(),
+        RECONCILE_INTERVAL_MS,
+      );
+      this.reconcileInterval.unref?.();
+    }, RECONCILE_INITIAL_DELAY_MS);
+
+    this.reconcileTimer.unref?.();
+  }
+
+  onModuleDestroy() {
+    if (this.reconcileTimer) clearTimeout(this.reconcileTimer);
+    if (this.reconcileInterval) clearInterval(this.reconcileInterval);
+
+    this.reconcileTimer = null;
+    this.reconcileInterval = null;
+  }
 
   // --------------------------------------------------------------------------
   // Planes
@@ -721,6 +755,11 @@ export class BillingService {
       include: { plan: true },
     });
 
+    // También hay que apagar un checkout pendiente (aún no es la preapproval
+    // principal): si no, el usuario cancelaría aquí pero Mercado Pago podría
+    // cobrar y aplicar el plan igualmente.
+    await this.cancelPendingChanges(subscription.id);
+
     if (subscription.providerPreapprovalId) {
       try {
         await this.client.cancelPreapproval(
@@ -789,6 +828,66 @@ export class BillingService {
     return this.getSubscription(organizationId);
   }
 
+  /**
+   * Respaldo del webhook: revisa suscripciones con cobro automático y aplica
+   * los pagos autorizados que Mercado Pago tenga registrados.
+   *
+   * Es idempotente y corre cada 6 horas; si el webhook se pierde, el estado
+   * local se corrige en la siguiente pasada.
+   */
+  private async reconcileSubscriptions() {
+    if (this.reconcileRunning || !this.client.isConfigured) return;
+
+    this.reconcileRunning = true;
+
+    try {
+      const subscriptions = await this.prisma.organizationSubscription.findMany({
+        where: {
+          status: {
+            in: [
+              SubscriptionStatus.ACTIVE,
+              SubscriptionStatus.PAST_DUE,
+              SubscriptionStatus.TRIALING,
+              SubscriptionStatus.EXPIRED,
+            ],
+          },
+          OR: [
+            { providerPreapprovalId: { not: null } },
+            {
+              changes: {
+                some: {
+                  status: PlanChangeStatus.PENDING,
+                  providerPreapprovalId: { not: null },
+                },
+              },
+            },
+          ],
+        },
+        select: { organizationId: true },
+        orderBy: { lastSyncedAt: 'asc' },
+        take: RECONCILE_BATCH,
+      });
+
+      for (const subscription of subscriptions) {
+        try {
+          await this.sync(subscription.organizationId);
+        } catch (error) {
+          this.logger.warn(
+            `No se pudo conciliar la suscripción de ${subscription.organizationId}: ${
+              (error as Error).message
+            }`,
+          );
+        }
+      }
+    } catch (error) {
+      this.logger.error(
+        `Error al conciliar suscripciones: ${(error as Error).message}`,
+      );
+    } finally {
+      this.reconcileRunning = false;
+    }
+  }
+
   async sync(organizationId: string): Promise<SubscriptionView> {
     const subscription = await this.prisma.organizationSubscription.findUnique({
       where: { organizationId },
@@ -814,6 +913,51 @@ export class BillingService {
 
     const preapproval = await this.client.getPreapproval(preapprovalId);
     await this.applyPreapproval(organizationId, preapproval);
+
+    // Los webhooks son la vía principal; esto recupera pagos autorizados si
+    // una notificación se perdió. Se aplican del más antiguo al más reciente
+    // para que el último estado sea el que quede.
+    if (preapproval.status === 'authorized') {
+      const page = await this.client.searchAuthorizedPayments(preapprovalId);
+      const payments = [...(page.results ?? [])].sort(
+        (left, right) => paymentTime(left) - paymentTime(right),
+      );
+
+      for (const payment of payments) {
+        const paidAt = paymentTime(payment);
+
+        // Un cobro viejo descubierto tarde no debe retroceder el periodo
+        // actual ni reabrir una gracia ya consumida.
+        if (
+          subscription.currentPeriodStart &&
+          paidAt > 0 &&
+          paidAt < subscription.currentPeriodStart.getTime()
+        ) {
+          continue;
+        }
+
+        if (payment.id !== undefined) {
+          const { status } = authorizedPaymentState(payment);
+          const existing = await this.prisma.subscriptionPayment.findUnique({
+            where: { providerPaymentId: String(payment.id) },
+            select: { status: true },
+          });
+
+          // Ya procesado con el mismo estado: no se reaplica (evita mover el
+          // periodo o reiniciar la gracia en cada conciliación).
+          if (existing?.status === status) continue;
+        }
+
+        await this.applyAuthorizedPayment(payment);
+      }
+    }
+
+    // Marca el intento aunque no haya cambios: evita que la conciliación
+    // vuelva a tomar siempre las mismas suscripciones.
+    await this.prisma.organizationSubscription.update({
+      where: { id: subscription.id },
+      data: { lastSyncedAt: new Date() },
+    });
 
     return this.getSubscription(organizationId);
   }
@@ -1275,6 +1419,7 @@ export class BillingService {
     ).replace(/\/$/, '');
     const backUrl =
       this.config.get<string>('MP_BILLING_BACK_URL') ?? `${webOrigin}/billing`;
+    const notificationUrl = this.billingNotificationUrl();
     const startAt =
       params.startAt.getTime() > Date.now() + 60_000
         ? params.startAt
@@ -1286,6 +1431,7 @@ export class BillingService {
         external_reference: params.organizationId,
         payer_email: params.payerEmail,
         back_url: backUrl,
+        notification_url: notificationUrl,
         status: 'pending',
         metadata: params.metadata,
         auto_recurring: {
@@ -1429,6 +1575,26 @@ export class BillingService {
     }
 
     return point;
+  }
+
+  /**
+   * URL que recibe los webhooks de suscripciones.
+   *
+   * Mercado Pago para Suscripciones requiere indicar `notification_url` al
+   * crear el preapproval; no basta la configuración general de la aplicación.
+   */
+  private billingNotificationUrl(): string {
+    const configured = this.config
+      .get<string>('MP_BILLING_NOTIFICATION_URL')
+      ?.trim();
+
+    if (configured) return configured.replace(/\/+$/, '');
+
+    const apiOrigin = (
+      this.config.get<string>('API_PUBLIC_ORIGIN') ?? 'http://localhost:3001'
+    ).replace(/\/+$/, '');
+
+    return `${apiOrigin}/v1/webhooks/mercadopago-billing`;
   }
 
   private async applyPreapproval(
@@ -1601,15 +1767,7 @@ export class BillingService {
 
     if (!subscription) return;
 
-    const rejected =
-      payment.payment?.status === 'rejected' ||
-      payment.status === 'rejected' ||
-      payment.status === 'recycling';
-    const approved =
-      !rejected &&
-      (payment.payment?.status === 'approved' ||
-        payment.status === 'processed' ||
-        payment.status === 'approved');
+    const { approved, rejected, status } = authorizedPaymentState(payment);
 
     const now = new Date();
     const interval = pendingChange?.interval ?? subscription.interval;
@@ -1645,7 +1803,9 @@ export class BillingService {
         where: { id: subscription.id },
         data: {
           status: SubscriptionStatus.PAST_DUE,
-          graceEndsAt: new Date(now.getTime() + GRACE_DAYS * DAY_MS),
+          // La gracia corre desde el intento de cobro, no desde la
+          // conciliación: una notificación recuperada tarde no la extiende.
+          graceEndsAt: new Date(periodStart.getTime() + GRACE_DAYS * DAY_MS),
           lastSyncedAt: now,
         },
       });
@@ -1658,25 +1818,23 @@ export class BillingService {
           subscriptionId: subscription.id,
           organizationId: subscription.organizationId,
           kind: pendingChange ? 'PLAN_CHANGE' : 'SUBSCRIPTION',
-          status:
-            payment.payment?.status ??
-            payment.status ??
-            (approved ? 'approved' : 'unknown'),
+          status,
           amountCents,
           currency: payment.currency_id ?? subscription.currency,
           providerPaymentId: String(payment.id),
           periodStart,
           periodEnd,
-          paidAt: approved ? now : null,
+          // Fecha real del cobro, no la de la conciliación: así el historial
+          // no cambia cada vez que se sincroniza.
+          paidAt: approved ? periodStart : null,
           raw: payment as unknown as Prisma.InputJsonValue,
         },
         update: {
-          status:
-            payment.payment?.status ??
-            payment.status ??
-            (approved ? 'approved' : 'unknown'),
+          status,
           amountCents,
-          paidAt: approved ? now : null,
+          periodStart,
+          periodEnd,
+          paidAt: approved ? periodStart : null,
           raw: payment as unknown as Prisma.InputJsonValue,
         },
       });
@@ -1881,6 +2039,38 @@ function toPlanView(plan: Plan): PlanView {
     sortOrder: plan.sortOrder,
     features: plan.features,
   };
+}
+
+function paymentTime(payment: MpAuthorizedPayment): number {
+  const value = payment.debit_date ?? payment.date_created;
+  const time = value ? new Date(value).getTime() : 0;
+
+  return Number.isFinite(time) ? time : 0;
+}
+
+/**
+ * Estado de un cobro autorizado de Mercado Pago.
+ *
+ * La API puede reportar el estado en la factura o en el pago subyacente.
+ * Se normaliza una sola vez para que el webhook y la conciliación usen el
+ * mismo criterio.
+ */
+function authorizedPaymentState(payment: MpAuthorizedPayment) {
+  const rejected =
+    payment.payment?.status === 'rejected' ||
+    payment.status === 'rejected' ||
+    payment.status === 'recycling';
+  const approved =
+    !rejected &&
+    (payment.payment?.status === 'approved' ||
+      payment.status === 'processed' ||
+      payment.status === 'approved');
+  const status =
+    payment.payment?.status ??
+    payment.status ??
+    (approved ? 'approved' : 'unknown');
+
+  return { approved, rejected, status };
 }
 
 function canWrite(
