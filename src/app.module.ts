@@ -35,6 +35,8 @@ import { TenantScopeInterceptor } from './auth/tenant-scope.interceptor';
 import { FiscalModule } from './fiscal/fiscal.module';
 import { MediaModule } from './media/media.module';
 import { IntelModule } from './intel/intel.module';
+import { SuppliersModule } from './suppliers/suppliers.module';
+import { PurchasesModule } from './purchases/purchases.module';
 
 @Module({
   imports: [
@@ -71,6 +73,8 @@ import { IntelModule } from './intel/intel.module';
     MediaModule,
     FiscalModule,
     IntelModule,
+    SuppliersModule,
+    PurchasesModule,
     HealthModule,
   ],
   controllers: [],

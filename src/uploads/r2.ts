@@ -131,6 +131,14 @@ export function buildTempObjectKey(
   return `${organizationId}/tmp/${objectHash()}.${IMAGE_CONTENT_TYPES[contentType]}`;
 }
 
+/** Clave permanente de un ticket de compra (se conserva para auditoría). */
+export function buildTicketObjectKey(
+  organizationId: string,
+  contentType: ImageContentType,
+): string {
+  return `${organizationId}/tickets/${objectHash()}.${IMAGE_CONTENT_TYPES[contentType]}`;
+}
+
 /** `true` si la clave es una subida temporal de esa organización. */
 export function isTempObjectKey(
   organizationId: string,
@@ -204,6 +212,23 @@ export function publicUrlForKey(key: string): string {
 
 /** Segundos de validez de la URL firmada de subida. */
 export const UPLOAD_URL_EXPIRES_IN = 300;
+
+/** Segundos de validez de una URL firmada de lectura (tickets privados). */
+export const DOWNLOAD_URL_EXPIRES_IN = 3600;
+
+/**
+ * Firma una lectura temporal de un objeto privado.
+ *
+ * Los tickets de compra no se publican en el dominio de R2: la API entrega una
+ * URL firmada solo a la sesión que puede ver la compra.
+ */
+export function presignGetUrl(key: string, expiresIn = DOWNLOAD_URL_EXPIRES_IN) {
+  return getSignedUrl(
+    r2Client(),
+    new GetObjectCommand({ Bucket: r2Bucket(), Key: key }),
+    { expiresIn },
+  );
+}
 
 /**
  * Firma una subida directa del navegador a R2.

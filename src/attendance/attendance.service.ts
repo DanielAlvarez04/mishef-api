@@ -52,6 +52,7 @@ const DEFAULT_WEIGHTS: Record<Role, number> = {
   CASHIER: 1,
   KITCHEN: 0.6,
   INVENTORY_MANAGER: 0.6,
+  SUPERVISOR: 0.6,
 };
 
 const shiftInclude = {

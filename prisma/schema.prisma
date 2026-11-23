@@ -27,6 +27,7 @@ enum Role {
   KITCHEN
   CASHIER
   INVENTORY_MANAGER
+  SUPERVISOR
 }
 
 enum OrderStatus {
@@ -136,6 +137,7 @@ enum InventoryMovementType {
   CONSUMPTION
   RETURN
   PRODUCTION
+  PURCHASE
 }
 
 enum TwoFactorPurpose {
@@ -293,6 +295,8 @@ model Organization {
   payments             Payment[]
   inventoryMovements   InventoryMovement[]
   wastes               Waste[]
+  suppliers            Supplier[]
+  purchases            Purchase[]
   auditLogs            AuditLog[]
   categories           Category[]
   items                Item[]
@@ -449,6 +453,7 @@ model Branch {
   stock        BranchStock[]
   movements    InventoryMovement[]
   wastes       Waste[]
+  purchases    Purchase[]
   orders       Order[]
   payments     Payment[]
 
@@ -561,6 +566,8 @@ model Category {
   code           String?
   name           String
   description    String?
+  /// Color de la categoría en el catálogo y el POS (`red-400`, `sky-600`, …).
+  color          String?
   isCore         Boolean      @default(false) // true = parte del core, no editable
   kind           CategoryKind @default(ARTICLE)
   isActive       Boolean      @default(true)
@@ -1016,6 +1023,8 @@ model Ingredient {
   optionEffectsReplacing ItemOptionEffect[]          @relation("OptionEffectReplacesIngredient")
   branchStocks           BranchStock[]
   wastes                 Waste[]
+  purchaseItems          PurchaseItem[]
+  supplierProducts       SupplierProduct[]
 
   @@unique([organizationId, name])
   @@unique([organizationId, sku])
@@ -2539,5 +2548,111 @@ model AiDocument {
 
   @@index([organizationId, createdAt])
   @@index([purchaseId])
+}
+
+// ============================================================================
+// Compras y tickets
+// ============================================================================
+
+enum PurchaseStatus {
+  PROCESSING
+  NEEDS_REVIEW
+  APPROVED
+  REJECTED
+  FAILED
+}
+
+model Supplier {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  rfc            String?
+  aliases        String[] @default([])
+  defaultTaxRate Decimal? @db.Decimal(5, 4)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  products     SupplierProduct[]
+  purchases    Purchase[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+model SupplierProduct {
+  id                String    @id @default(cuid())
+  supplierId        String
+  rawName           String
+  normalizedName    String
+  ingredientId      String?
+  /// Cuánto del ingrediente aporta una unidad de este producto (1 caja = 12 L).
+  quantity          Decimal   @db.Decimal(12, 4)
+  unit              UnitCode
+  lastUnitCostGross Decimal?  @db.Decimal(12, 6)
+  timesSeen         Int       @default(0)
+  lastSeenAt        DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  supplier   Supplier    @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  ingredient Ingredient? @relation(fields: [ingredientId], references: [id], onDelete: SetNull)
+
+  @@unique([supplierId, normalizedName])
+  @@index([ingredientId])
+}
+
+model Purchase {
+  id             String         @id @default(cuid())
+  organizationId String
+  branchId       String?
+  supplierId     String?
+  folio          String?
+  purchasedAt    DateTime       @default(now())
+  total          Decimal        @default(0) @db.Decimal(12, 2)
+  status         PurchaseStatus @default(PROCESSING)
+  documentKey    String?
+  documentMime   String?
+  extractedJson  Json?
+  confidence     Decimal?       @db.Decimal(5, 4)
+  dedupeKey      String?        @unique
+  createdBy      String?
+  approvedBy     String?
+  approvedAt     DateTime?
+  notes          String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?        @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  supplier     Supplier?      @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  items        PurchaseItem[]
+
+  @@index([organizationId, status, purchasedAt])
+  @@index([branchId, purchasedAt])
+  @@index([supplierId, purchasedAt])
+}
+
+model PurchaseItem {
+  id             String   @id @default(cuid())
+  purchaseId     String
+  rawDescription String
+  ingredientId   String?
+  quantity       Decimal  @db.Decimal(12, 4)
+  unit           UnitCode
+  /// Costo por unidad capturada; la aprobación lo convierte a la unidad del ingrediente.
+  unitCostGross  Decimal  @db.Decimal(12, 6)
+  lineTotalGross Decimal  @db.Decimal(12, 2)
+  confidence     Decimal? @db.Decimal(5, 4)
+  mappingSource  String?
+  taxRate        Decimal? @db.Decimal(5, 4)
+  taxAmount      Decimal? @db.Decimal(12, 2)
+
+  purchase   Purchase    @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  ingredient Ingredient? @relation(fields: [ingredientId], references: [id], onDelete: SetNull)
+
+  @@index([purchaseId])
+  @@index([ingredientId])
 }
 

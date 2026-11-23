@@ -125,8 +125,73 @@ export class OpenAiCompatibleClient {
     };
   }
 
-  async *streamChat(params: {
+  async completeVision(params: {
     baseUrl: string;
+    apiKey: string;
+    model: string;
+    prompt: string;
+    imageDataUri: string;
+    maxTokens?: number;
+    signal?: AbortSignal;
+  }): Promise<IntelCompletion> {
+    const response = await fetch(`${params.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: params.model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: params.prompt },
+              { type: 'image_url', image_url: { url: params.imageDataUri } },
+            ],
+          },
+        ],
+        stream: false,
+        temperature: 0,
+        max_tokens: params.maxTokens ?? 1500,
+      }),
+      signal: params.signal,
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      this.logger.error(
+        `Proveedor de visión respondió ${response.status}: ${redactPii(body).slice(0, 300)}`,
+      );
+      throw new Error(`El proveedor de visión respondió ${response.status}`);
+    }
+
+    const json = (await response.json()) as {
+      choices?: Array<{
+        message?: { content?: string | null };
+        finish_reason?: string;
+      }>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+      };
+    };
+
+    const choice = json.choices?.[0];
+
+    return {
+      content:
+        typeof choice?.message?.content === 'string'
+          ? choice.message.content
+          : null,
+      toolCalls: [],
+      tokensIn: json.usage?.prompt_tokens,
+      tokensOut: json.usage?.completion_tokens,
+      finishReason: choice?.finish_reason,
+    };
+  }
+
+  async *streamChat(params: {    baseUrl: string;
     apiKey: string;
     model: string;
     messages: IntelChatMessage[];

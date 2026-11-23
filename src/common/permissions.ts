@@ -26,17 +26,22 @@ export const PERMISSIONS = {
   'cash:manage': ['ADMIN', 'CASHIER'],
   'inventory:manage': ['ADMIN', 'INVENTORY_MANAGER'],
   'inventory:adjust': ['ADMIN', 'INVENTORY_MANAGER'],
+  'suppliers:manage': ['ADMIN', 'SUPERVISOR', 'INVENTORY_MANAGER'],
+  'purchases:read': ['ADMIN', 'SUPERVISOR', 'INVENTORY_MANAGER'],
+  'purchases:manage': ['ADMIN', 'SUPERVISOR', 'INVENTORY_MANAGER'],
+  'purchases:review': ['ADMIN', 'SUPERVISOR', 'INVENTORY_MANAGER'],
   'reports:read': ['ADMIN', 'CASHIER'],
   'reports:read:operations': [
     'ADMIN',
     'WAITER',
     'KITCHEN',
     'INVENTORY_MANAGER',
+    'SUPERVISOR',
   ],
-  /** Costos y márgenes: ADMIN, CASHIER e INVENTORY_MANAGER. */
-  'costs:read': ['ADMIN', 'CASHIER', 'INVENTORY_MANAGER'],
-  /** Copiloto y capa Intel. El supervisor se agrega cuando exista el rol. */
-  'intel:use': ['ADMIN', 'INVENTORY_MANAGER'],
+  /** Costos y márgenes: ADMIN, CASHIER, INVENTORY_MANAGER y SUPERVISOR. */
+  'costs:read': ['ADMIN', 'CASHIER', 'INVENTORY_MANAGER', 'SUPERVISOR'],
+  /** Copiloto y capa Intel. */
+  'intel:use': ['ADMIN', 'INVENTORY_MANAGER', 'SUPERVISOR'],
   /** Checador: cualquier miembro activo puede marcar su entrada y salida. */
   'attendance:clock': [
     'ADMIN',
