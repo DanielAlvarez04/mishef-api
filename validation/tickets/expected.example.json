@@ -1,0 +1,15 @@
+[
+  {
+    "file": "ticket-001.jpg",
+    "supplier": "Walmart Supercenter",
+    "date": "2026-11-01",
+    "total": 350.5,
+    "lines": [
+      {
+        "description": "SALSA VERDE 1 L",
+        "quantity": 1,
+        "lineTotal": 35
+      }
+    ]
+  }
+]
