@@ -1,6 +1,33 @@
 import { BadRequestException } from '@nestjs/common';
+import { z } from 'zod';
 
 export type PeriodKey = 'today' | 'week' | 'month';
+
+export const periodSchema = z
+  .object({
+    period: z.enum(['today', 'week', 'month']).optional(),
+    from: z.string().optional(),
+    to: z.string().optional(),
+  })
+  .strict();
+
+export const periodParameters = {
+  period: {
+    type: 'string',
+    enum: ['today', 'week', 'month'],
+    description: 'Periodo a consultar. Por defecto, el mes actual.',
+  },
+  from: {
+    type: 'string',
+    description:
+      'Fecha ISO inicial. Solo se usa junto con `to` y cuando no se usa `period`.',
+  },
+  to: {
+    type: 'string',
+    description:
+      'Fecha ISO final. Solo se usa junto con `from` y cuando no se usa `period`.',
+  },
+};
 
 export interface PeriodInput {
   period?: PeriodKey;

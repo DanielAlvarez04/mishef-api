@@ -34,6 +34,7 @@ function registryWith(tool: IntelTool): IntelToolRegistry {
     { tools: [tool] } as never,
     { tools: [] } as never,
     { tools: [] } as never,
+    { tools: [] } as never,
   );
 }
 

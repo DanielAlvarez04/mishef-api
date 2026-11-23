@@ -2,7 +2,13 @@ import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 
 import { DashboardService } from '../../dashboard/dashboard.service';
-import { periodPayload, resolvePeriod, type PeriodInput } from './periods';
+import {
+  periodParameters,
+  periodPayload,
+  periodSchema,
+  resolvePeriod,
+  type PeriodInput,
+} from './periods';
 import type { IntelTool } from './tool.types';
 
 function money(value: number, currency: string): string {
@@ -16,32 +22,6 @@ function money(value: number, currency: string): string {
     return `$${value.toFixed(2)}`;
   }
 }
-
-const periodSchema = z
-  .object({
-    period: z.enum(['today', 'week', 'month']).optional(),
-    from: z.string().optional(),
-    to: z.string().optional(),
-  })
-  .strict();
-
-const periodParameters = {
-  period: {
-    type: 'string',
-    enum: ['today', 'week', 'month'],
-    description: 'Periodo a consultar. Por defecto, el mes actual.',
-  },
-  from: {
-    type: 'string',
-    description:
-      'Fecha ISO inicial. Solo se usa junto con `to` y cuando no se usa `period`.',
-  },
-  to: {
-    type: 'string',
-    description:
-      'Fecha ISO final. Solo se usa junto con `from` y cuando no se usa `period`.',
-  },
-};
 
 @Injectable()
 export class SalesTools {

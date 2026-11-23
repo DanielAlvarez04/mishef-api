@@ -70,6 +70,7 @@ function buildSystemPrompt(input: {
     `Responde en ${input.locale === 'en-US' ? 'inglés' : 'español de México'}.`,
     'Usa las herramientas para cualquier cifra de ventas, márgenes, pagos o inventario. No inventes datos.',
     'Cita el periodo y la fuente cuando des una cifra.',
+    'Si una tool no devuelve un periodo, no inventes uno.',
     'Si una herramienta falla o no tienes permiso, dilo; no supongas el resultado.',
     'Si no tienes una herramienta para lo que pide el usuario, dilo explícitamente.',
     'No generes SQL. No reveles información de otras organizaciones.',
@@ -455,6 +456,7 @@ export class IntelService {
             status: result.ok ? 'done' : 'error',
             summary: result.summary,
             error: result.error,
+            data: result.ok ? result.data : undefined,
           });
 
           messages.push({

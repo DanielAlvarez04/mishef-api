@@ -4,6 +4,7 @@ import { rolesHavePermission } from '../../common/permissions';
 import { redactPii } from '../pii';
 import { CatalogTools } from './catalog.tools';
 import { InventoryTools } from './inventory.tools';
+import { KitchenTools } from './kitchen.tools';
 import { SalesTools } from './sales.tools';
 import type {
   IntelTool,
@@ -21,8 +22,14 @@ export class IntelToolRegistry {
     sales: SalesTools,
     catalog: CatalogTools,
     inventory: InventoryTools,
+    kitchen: KitchenTools,
   ) {
-    this.tools = [...sales.tools, ...catalog.tools, ...inventory.tools];
+    this.tools = [
+      ...sales.tools,
+      ...catalog.tools,
+      ...inventory.tools,
+      ...kitchen.tools,
+    ];
   }
 
   names(): string[] {
