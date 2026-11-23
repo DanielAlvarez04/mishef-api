@@ -299,6 +299,7 @@ model Organization {
   purchases            Purchase[]
   auditLogs            AuditLog[]
   categories           Category[]
+  categoryOverrides    CategoryOverride[]
   items                Item[]
   ingredients          Ingredient[]
   recipes              Recipe[]
@@ -317,6 +318,8 @@ model Organization {
   aiRuns           AiRun[]
   aiNotifications  AiNotification[]
   aiDocuments      AiDocument[]
+  aiCatalogProposals AiCatalogProposal[]
+  aiSuggestionEvents AiSuggestionEvent[]
 
   mercadoPagoConnection MercadoPagoConnection?
   mercadoPagoTerminals  MercadoPagoTerminal[]
@@ -578,11 +581,30 @@ model Category {
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   items        Item[]
   recipes      Recipe[]
+  overrides    CategoryOverride[]
 
   @@unique([organizationId, kind, name])
   @@unique([kind, code])
   @@index([organizationId])
   @@index([kind, isCore])
+}
+
+/// Personalización por negocio de una categoría core (nombre global, lo demás propio).
+model CategoryOverride {
+  id             String   @id @default(cuid())
+  organizationId String
+  categoryId     String
+  /// `null` = hereda la descripción core; `""` = el negocio la dejó vacía.
+  description    String?
+  color          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category     Category     @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, categoryId])
+  @@index([organizationId])
 }
 
 /// Identidad global de un elemento del catálogo (artículo, receta o ambos).
@@ -666,6 +688,12 @@ model Item {
   catalogEntryId String?  @unique
   name           String
   description    String?
+  /// Alérgenos declarados del artículo (texto libre controlado por el negocio).
+  allergens      String[] @default([])
+  /// Traducciones del nombre y la descripción (`{ "en": { "name": "...", "description": "..." } }`).
+  translations   Json?
+  /// Copy corto para menús, redes o carta (nunca se publica sin aprobación).
+  marketingCopy  String?
   sku            String? // Código interno / importación CSV
   price          Decimal  @db.Decimal(12, 2) // Precio final con IVA incluido
   taxRate        Decimal? @db.Decimal(5, 4) // Tasa aplicable; null = no configurada (no se asume ninguna)
@@ -698,6 +726,8 @@ model Item {
   comboComponents        ComboComponent[]          @relation("ComboComponents")
   componentOf            ComboComponent[]          @relation("ComboPartOf")
   menuItems              MenuItem[]
+
+  aiCatalogProposals     AiCatalogProposal[]
 
   @@unique([organizationId, sku])
   @@index([organizationId, isActive])
@@ -2654,5 +2684,58 @@ model PurchaseItem {
 
   @@index([purchaseId])
   @@index([ingredientId])
+}
+
+// ============================================================================
+// Catálogo con IA y sugerencias
+// ============================================================================
+
+enum AiProposalStatus {
+  PROPOSED
+  APPLIED
+  DISMISSED
+}
+
+/// Propuesta editable de la IA para un artículo del catálogo.
+///
+/// Nunca se escribe en `Item` automáticamente: la persona elige qué campos
+/// aplicar. `hash` cachea la propuesta por artículo + campos para no volver a
+/// gastar tokens en la misma entrada.
+model AiCatalogProposal {
+  id             String           @id @default(cuid())
+  organizationId String
+  itemId         String
+  hash           String
+  fields         Json
+  status         AiProposalStatus @default(PROPOSED)
+  model          String?
+  tokensIn       Int?
+  tokensOut      Int?
+  createdBy      String?
+  appliedAt      DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  item         Item         @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([itemId, hash])
+  @@index([organizationId, status, createdAt])
+}
+
+/// Feedback de pronósticos y sugerencias de compra (aceptada o ajustada).
+model AiSuggestionEvent {
+  id             String   @id @default(cuid())
+  organizationId String
+  kind           String
+  payload        Json?
+  accepted       Boolean
+  adjustments    Json?
+  createdBy      String?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, kind, createdAt])
 }
 

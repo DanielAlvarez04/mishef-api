@@ -4,11 +4,14 @@ import { CatalogModule } from '../catalog/catalog.module';
 import { DashboardModule } from '../dashboard/dashboard.module';
 import { InventoryModule } from '../inventory/inventory.module';
 import { WasteModule } from '../waste/waste.module';
+import { CatalogAiModule } from './catalog-ai/catalog-ai.module';
 import { IntelDigestService } from './digest/intel-digest.service';
+import { ForecastModule } from './forecast/forecast.module';
 import { IntelController } from './intel.controller';
 import { IntelService } from './intel.service';
 import { OpenAiCompatibleClient } from './providers/openai-compatible.client';
 import { CatalogTools } from './tools/catalog.tools';
+import { ForecastTools } from './tools/forecast.tools';
 import { InventoryTools } from './tools/inventory.tools';
 import { KitchenTools } from './tools/kitchen.tools';
 import { SalesTools } from './tools/sales.tools';
@@ -20,6 +23,8 @@ import { IntelToolRegistry } from './tools/tool.registry';
     CatalogModule,
     InventoryModule,
     WasteModule,
+    ForecastModule,
+    CatalogAiModule,
   ],
   controllers: [IntelController],
   providers: [
@@ -30,6 +35,7 @@ import { IntelToolRegistry } from './tools/tool.registry';
     CatalogTools,
     InventoryTools,
     KitchenTools,
+    ForecastTools,
     IntelDigestService,
   ],
   exports: [IntelDigestService],

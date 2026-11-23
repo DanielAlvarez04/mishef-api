@@ -3,6 +3,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { rolesHavePermission } from '../../common/permissions';
 import { redactPii } from '../pii';
 import { CatalogTools } from './catalog.tools';
+import { ForecastTools } from './forecast.tools';
 import { InventoryTools } from './inventory.tools';
 import { KitchenTools } from './kitchen.tools';
 import { SalesTools } from './sales.tools';
@@ -23,12 +24,14 @@ export class IntelToolRegistry {
     catalog: CatalogTools,
     inventory: InventoryTools,
     kitchen: KitchenTools,
+    forecast: ForecastTools,
   ) {
     this.tools = [
       ...sales.tools,
       ...catalog.tools,
       ...inventory.tools,
       ...kitchen.tools,
+      ...forecast.tools,
     ];
   }
 
