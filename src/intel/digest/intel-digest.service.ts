@@ -273,7 +273,9 @@ export class IntelDigestService {
       where: {
         organizationId,
         isActive: true,
-        roles: { hasSome: [Role.ADMIN, Role.INVENTORY_MANAGER] },
+        roles: {
+          hasSome: [Role.ADMIN, Role.INVENTORY_MANAGER, Role.SUPERVISOR],
+        },
         user: { is: { isActive: true, email: { not: null } } },
       },
       select: {

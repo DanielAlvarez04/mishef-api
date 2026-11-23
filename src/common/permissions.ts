@@ -49,6 +49,7 @@ export const PERMISSIONS = {
     'KITCHEN',
     'CASHIER',
     'INVENTORY_MANAGER',
+    'SUPERVISOR',
   ],
   /** Ver turnos del equipo y reparto de propinas. */
   'attendance:read': ['ADMIN', 'CASHIER'],
