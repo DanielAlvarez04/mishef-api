@@ -3,6 +3,7 @@ import {
   ArrayMinSize,
   IsArray,
   IsIn,
+  IsObject,
   IsOptional,
   IsString,
 } from 'class-validator';
@@ -37,4 +38,9 @@ export class ApplyCatalogProposalDto {
   @ArrayMaxSize(CATALOG_AI_FIELDS.length)
   @IsIn(CATALOG_AI_FIELDS, { each: true })
   fields!: CatalogAiField[];
+
+  /** Valores corregidos por la persona antes de aplicar (opcional). */
+  @IsOptional()
+  @IsObject()
+  values?: Record<string, unknown>;
 }

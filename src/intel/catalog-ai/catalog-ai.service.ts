@@ -41,6 +41,20 @@ const proposalSchema = z
   })
   .strict();
 
+/** Valores corregidos por una persona: se permiten textos más cortos. */
+const editSchema = z
+  .object({
+    description: z.string().trim().min(1).max(600).optional(),
+    allergens: z
+      .array(z.string().trim().min(1).max(40))
+      .max(20)
+      .optional(),
+    categoryName: z.string().trim().min(1).max(80).optional(),
+    translations: translationSchema.optional(),
+    marketingCopy: z.string().trim().max(600).optional(),
+  })
+  .strict();
+
 type ProposalFields = z.infer<typeof proposalSchema>;
 
 function stripJson(content: string): string {
@@ -317,6 +331,7 @@ export class CatalogAiService {
     userId: string,
     proposalId: string,
     fields: CatalogAiField[],
+    edits?: Record<string, unknown>,
   ) {
     const proposal = await this.prisma.aiCatalogProposal.findFirst({
       where: { id: proposalId, organizationId },
@@ -327,7 +342,19 @@ export class CatalogAiService {
       throw new NotFoundException('Propuesta no encontrada');
     }
 
-    const values = proposal.fields as ProposalFields;
+    const stored = proposal.fields as ProposalFields;
+    let values = stored;
+
+    if (edits && Object.keys(edits).length > 0) {
+      const parsed = editSchema.safeParse(edits);
+
+      if (!parsed.success) {
+        throw new BadRequestException('Los valores editados no son válidos');
+      }
+
+      values = { ...stored, ...parsed.data };
+    }
+
     const data: Prisma.ItemUpdateInput = {};
 
     if (fields.includes('description') && values.description) {

@@ -66,7 +66,13 @@ export class CatalogAiController {
     @Param('id') id: string,
     @Body() dto: ApplyCatalogProposalDto,
   ) {
-    return this.catalogAi.apply(organizationId(user), user.sub, id, dto.fields);
+    return this.catalogAi.apply(
+      organizationId(user),
+      user.sub,
+      id,
+      dto.fields,
+      dto.values,
+    );
   }
 
   @ApiOperation({ summary: 'Descartar una propuesta' })
