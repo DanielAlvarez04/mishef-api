@@ -9,6 +9,7 @@
  * producción):
  *   npm run demo:seed
  *   DEMO_PASSWORD="..." npm run demo:seed
+ *   node scripts/seed-demo-org.mjs --stock-only   (solo rellena el stock)
  *
  * `demo` es una palabra reservada para altas normales, pero la API la resuelve
  * como tenant de demostración mediante `DEMO_TENANT_SLUGS` (por defecto
@@ -154,9 +155,98 @@ const FEATURE_KEYS = [
   'users',
 ];
 
+async function ensureDemoBranch(organizationId) {
+  return prisma.branch.upsert({
+    where: {
+      organizationId_name: {
+        organizationId,
+        name: 'Sucursal demo',
+      },
+    },
+    create: {
+      organizationId,
+      name: 'Sucursal demo',
+      address: 'Calle Demo 123',
+      isActive: true,
+    },
+    update: { isActive: true },
+  });
+}
+
+/**
+ * Copia el stock consolidado del insumo a la sucursal.
+ *
+ * El inventario con sucursal activa lee `BranchStock`, no
+ * `Ingredient.currentStock`. Sin estas filas, todo aparece en 0.
+ */
+async function syncBranchStock(organizationId, branchId) {
+  const ingredients = await prisma.ingredient.findMany({
+    where: { organizationId },
+    select: { id: true, currentStock: true },
+  });
+
+  for (const ingredient of ingredients) {
+    await prisma.branchStock.upsert({
+      where: {
+        branchId_ingredientId: {
+          branchId,
+          ingredientId: ingredient.id,
+        },
+      },
+      create: {
+        branchId,
+        ingredientId: ingredient.id,
+        quantity: ingredient.currentStock,
+      },
+      update: {
+        quantity: ingredient.currentStock,
+      },
+    });
+  }
+
+  return { ingredients: ingredients.length, stockRows: ingredients.length };
+}
+
 async function main() {
   if (!process.env.DATABASE_URL) {
     throw new Error('Falta DATABASE_URL en api/.env');
+  }
+
+  if (process.argv.includes('--stock-only')) {
+    const organization = await prisma.organization.findUnique({
+      where: { slug: SLUG },
+      select: { id: true, name: true },
+    });
+
+    if (!organization) {
+      throw new Error(`No existe la organización ${SLUG}`);
+    }
+
+    const branch = await ensureDemoBranch(organization.id);
+
+    await prisma.membership.updateMany({
+      where: { organizationId: organization.id },
+      data: { branchId: branch.id },
+    });
+
+    const result = await syncBranchStock(organization.id, branch.id);
+
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          tenant: SLUG,
+          organizationId: organization.id,
+          branchId: branch.id,
+          ...result,
+          stockOnly: true,
+        },
+        null,
+        2,
+      ),
+    );
+
+    return;
   }
 
   const tsNodeBin = prepareSeed();
@@ -277,26 +367,14 @@ async function main() {
     },
   );
 
-  const branch = await prisma.branch.upsert({
-    where: {
-      organizationId_name: {
-        organizationId: organization.id,
-        name: 'Sucursal demo',
-      },
-    },
-    create: {
-      organizationId: organization.id,
-      name: 'Sucursal demo',
-      address: 'Calle Demo 123',
-      isActive: true,
-    },
-    update: { isActive: true },
-  });
+  const branch = await ensureDemoBranch(organization.id);
 
   await prisma.membership.updateMany({
     where: { userId: user.id, organizationId: organization.id },
     data: { branchId: branch.id },
   });
+
+  const stock = await syncBranchStock(organization.id, branch.id);
 
   console.log(
     JSON.stringify(
@@ -310,6 +388,7 @@ async function main() {
         branchId: branch.id,
         allFeatures: true,
         seeded: true,
+        ...stock,
       },
       null,
       2,
