@@ -18,6 +18,7 @@ import { RequirePermissions } from '../common/decorators/require-permissions.dec
 import { RolesGuard } from '../common/guards/roles.guard';
 import { rolesHavePermission } from '../common/permissions';
 import { PaymentsService } from './payments.service';
+import { RequireFeature } from '../features/require-feature.decorator';
 import {
   CreatePaymentDto,
   ListPaymentsQueryDto,
@@ -28,6 +29,7 @@ import {
 
 @ApiTags('payments')
 @Controller()
+@RequireFeature('pos.payments')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class PaymentsController {
   constructor(private readonly payments: PaymentsService) {}

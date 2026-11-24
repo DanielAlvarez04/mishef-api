@@ -16,9 +16,11 @@ import { RequirePermissions } from '../common/decorators/require-permissions.dec
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CreateOrderSplitDto } from './dto/order-splits.dto';
 import { OrderSplitsService } from './order-splits.service';
+import { RequireFeature } from '../features/require-feature.decorator';
 
 @ApiTags('orders')
 @Controller('orders')
+@RequireFeature('pos')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class OrderSplitsController {
   constructor(private readonly splits: OrderSplitsService) {}

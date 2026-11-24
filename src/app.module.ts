@@ -29,6 +29,8 @@ import { PublicModule } from './public/public.module';
 import { StorageModule } from './storage/storage.module';
 import { BillingModule } from './billing/billing.module';
 import { BillingAccessInterceptor } from './billing/billing-access.interceptor';
+import { FeaturesModule } from './features/features.module';
+import { FeatureAccessInterceptor } from './features/feature-access.interceptor';
 import { ImpersonationWritePolicyInterceptor } from './auth/impersonation-write-policy.interceptor';
 import { PasswordChangeInterceptor } from './auth/password-change.interceptor';
 import { TenantScopeInterceptor } from './auth/tenant-scope.interceptor';
@@ -67,6 +69,7 @@ import { MediaModule } from './media/media.module';
     PublicModule,
     StorageModule,
     BillingModule,
+    FeaturesModule,
     MediaModule,
     FiscalModule,
     HealthModule,
@@ -88,6 +91,10 @@ import { MediaModule } from './media/media.module';
     {
       provide: APP_INTERCEPTOR,
       useClass: BillingAccessInterceptor,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: FeatureAccessInterceptor,
     },
     {
       provide: APP_INTERCEPTOR,

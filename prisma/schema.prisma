@@ -285,6 +285,10 @@ model Organization {
   /// Correo para facturación de la suscripción de la plataforma.
   billingEmail String?
 
+  /// Overrides de funciones por organización: `{ "inventory": false }`.
+  /// Los defaults viven en `src/common/features.ts`.
+  featureOverrides Json @default("{}")
+
   memberships          Membership[]
   branches             Branch[]
   orders               Order[]

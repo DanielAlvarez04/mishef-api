@@ -17,9 +17,11 @@ import { RequirePermissions } from '../common/decorators/require-permissions.dec
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CreateWasteDto, PresignWastePhotoDto } from './dto/waste.dto';
 import { WasteService } from './waste.service';
+import { RequireFeature } from '../features/require-feature.decorator';
 
 @ApiTags('waste')
 @Controller('waste')
+@RequireFeature('waste')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class WasteController {
   constructor(private readonly waste: WasteService) {}

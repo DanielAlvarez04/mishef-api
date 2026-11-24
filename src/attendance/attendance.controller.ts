@@ -21,6 +21,7 @@ import { CurrentBranch } from '../common/decorators/current-branch.decorator';
 import { RequirePermissions } from '../common/decorators/require-permissions.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { AttendanceService } from './attendance.service';
+import { RequireFeature } from '../features/require-feature.decorator';
 import {
   AttendanceAdjustmentDto,
   AttendanceQueryDto,
@@ -39,6 +40,7 @@ import {
 
 @ApiTags('attendance')
 @Controller('attendance')
+@RequireFeature('attendance')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class AttendanceController {
   constructor(private readonly attendance: AttendanceService) {}

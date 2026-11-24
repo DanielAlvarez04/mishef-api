@@ -18,6 +18,7 @@
     "webhooks:prune": "node scripts/prune-webhook-payloads.mjs",
     "storage:recount": "node scripts/storage-recount.mjs",
     "plans:seed": "node scripts/seed-plans.mjs",
+    "demo:seed": "node scripts/seed-demo-org.mjs",
     "mp:check": "node scripts/check-mercadopago.mjs",
     "images:optimize": "ts-node --transpile-only scripts/optimize-existing-images.ts",
     "images:seed": "ts-node --transpile-only scripts/upload-food-images.ts",

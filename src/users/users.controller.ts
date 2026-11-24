@@ -18,12 +18,14 @@ import { JwtUser } from '../auth/auth.service';
 import { RequirePermissions } from '../common/decorators/require-permissions.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { UsersService } from './users.service';
+import { RequireFeature } from '../features/require-feature.decorator';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { DeleteMembershipsDto } from './dto/delete-memberships.dto';
 
 @ApiTags('users')
 @Controller('users')
+@RequireFeature('users')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @RequirePermissions('users:manage')
 export class UsersController {

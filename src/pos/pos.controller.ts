@@ -31,6 +31,7 @@ import {
   UpdatePosDisplayStateDto,
 } from './dto/pos.dto';
 import { PosService } from './pos.service';
+import { RequireFeature } from '../features/require-feature.decorator';
 
 const ACCESS_TOKEN_COOKIE = 'np_at';
 const REFRESH_TOKEN_COOKIE = 'np_rt';
@@ -40,6 +41,7 @@ const DEVICE_COOKIE_MAX_AGE = 180 * 24 * 60 * 60 * 1000;
 
 @ApiTags('pos')
 @Controller('pos')
+@RequireFeature('pos')
 export class PosController {
   constructor(
     private readonly pos: PosService,

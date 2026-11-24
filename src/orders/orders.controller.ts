@@ -19,6 +19,7 @@ import { JwtUser } from '../auth/auth.service';
 import { RequirePermissions } from '../common/decorators/require-permissions.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { OrdersService } from './orders.service';
+import { RequireFeature } from '../features/require-feature.decorator';
 import {
   CancelOrderDto,
   CreateOrderDto,
@@ -29,6 +30,7 @@ import {
 
 @ApiTags('orders')
 @Controller('orders')
+@RequireFeature('pos')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class OrdersController {
   constructor(private readonly orders: OrdersService) {}

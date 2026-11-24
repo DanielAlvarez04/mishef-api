@@ -19,9 +19,11 @@ import { OrdersService } from './orders.service';
 import { OrdersEventsService, type OrderEvent } from './orders.events';
 import { KitchenService } from '../kitchen/kitchen.service';
 import { UpdateKitchenSettingsDto } from '../kitchen/dto/update-kitchen-settings.dto';
+import { RequireFeature } from '../features/require-feature.decorator';
 
 @ApiTags('kitchen')
 @Controller('kitchen')
+@RequireFeature('kitchen')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class KitchenController {
   constructor(
