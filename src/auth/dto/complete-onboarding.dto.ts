@@ -10,4 +10,11 @@ export class CompleteOnboardingDto {
   @MinLength(3)
   @MaxLength(32)
   slug?: string;
+
+  /** Nombre de la primera sucursal; se crea si aún no existe. */
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  @MaxLength(80)
+  branchName?: string;
 }

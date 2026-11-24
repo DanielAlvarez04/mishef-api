@@ -1373,8 +1373,12 @@ export class AuthService {
     };
   }
 
-  /** Marca el onboarding como completado y fija la dirección definitiva. */
-  async completeOnboarding(userId: string, rawSlug?: string) {
+  /** Marca el onboarding como completado, fija la dirección y crea la sucursal. */
+  async completeOnboarding(
+    userId: string,
+    rawSlug?: string,
+    rawBranchName?: string,
+  ) {
     const [user, membership] = await Promise.all([
       this.prisma.user.findUnique({
         where: { id: userId },
@@ -1401,19 +1405,32 @@ export class AuthService {
     const organization = membership?.organization ?? null;
     const organizationId = membership?.organizationId ?? null;
 
+    // La sucursal se crea aquí si el paso 2 no la creó. Si el cliente no manda
+    // nombre, el nombre del negocio es un respaldo razonable.
+    const branchName = (
+      rawBranchName?.trim() ||
+      organization?.name?.trim() ||
+      ''
+    ).slice(0, 80);
+    const validBranchName = branchName.length >= 2 ? branchName : null;
+
     // Si el cliente no manda dirección y la organización sigue con el
     // placeholder, se genera aquí con el nombre definitivo del negocio.
     if (!slug && organization && isPendingSlug(organization.slug)) {
       slug = await this.availableOrganizationSlug(organization.name);
     }
 
-    if (
+    const slugChanged = Boolean(
       membership &&
-      organizationId &&
-      organization &&
-      slug &&
-      slug !== organization.slug
-    ) {
+        organizationId &&
+        organization &&
+        slug &&
+        slug !== organization.slug,
+    );
+
+    let firstSetup = false;
+
+    if (slugChanged && slug && organizationId && organization) {
       if (!isValidSlug(slug)) {
         throw new BadRequestException(
           'La dirección del negocio no es válida o está reservada',
@@ -1441,14 +1458,15 @@ export class AuthService {
 
       // La primera configuración no consume el cambio único; una repetición
       // del asistente sí respeta la regla de Configuración.
-      const firstSetup =
-        !user.onboardedAt || isPendingSlug(organization.slug);
+      firstSetup = !user.onboardedAt || isPendingSlug(organization.slug);
 
       if (!firstSetup && organization.slugChanges >= 1) {
         throw new ForbiddenException('Ya usaste tu cambio de dirección');
       }
+    }
 
-      await this.prisma.$transaction(async (tx) => {
+    await this.prisma.$transaction(async (tx) => {
+      if (slugChanged && slug && organizationId && organization) {
         if (!firstSetup && !isPendingSlug(organization.slug)) {
           await tx.slugAlias.upsert({
             where: { slug: organization.slug },
@@ -1467,22 +1485,53 @@ export class AuthService {
             ...(firstSetup ? {} : { slugChanges: { increment: 1 } }),
           },
         });
+      }
 
-        await tx.user.update({
-          where: { id: userId },
-          data: { onboardedAt: user.onboardedAt ?? new Date() },
+      if (organizationId && validBranchName) {
+        const activeBranches = await tx.branch.count({
+          where: { organizationId, isActive: true },
         });
+
+        if (activeBranches === 0) {
+          const existing = await tx.branch.findUnique({
+            where: {
+              organizationId_name: {
+                organizationId,
+                name: validBranchName,
+              },
+            },
+            select: { id: true },
+          });
+
+          if (existing) {
+            await tx.branch.update({
+              where: { id: existing.id },
+              data: { isActive: true },
+            });
+          } else {
+            await tx.branch.create({
+              data: { organizationId, name: validBranchName },
+            });
+          }
+
+          const totalActive = await tx.branch.count({
+            where: { organizationId, isActive: true },
+          });
+
+          await tx.organization.update({
+            where: { id: organizationId },
+            data: { hasBranches: totalActive > 1 },
+          });
+        }
+      }
+
+      await tx.user.update({
+        where: { id: userId },
+        data: { onboardedAt: user.onboardedAt ?? new Date() },
       });
-
-      return { onboarded: true, slug };
-    }
-
-    await this.prisma.user.update({
-      where: { id: userId },
-      data: { onboardedAt: user.onboardedAt ?? new Date() },
     });
 
-    return { onboarded: true, slug: organization?.slug ?? null };
+    return { onboarded: true, slug: slug ?? organization?.slug ?? null };
   }
 
   /** Primera dirección libre a partir del nombre del negocio. */

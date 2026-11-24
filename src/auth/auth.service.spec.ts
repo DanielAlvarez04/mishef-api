@@ -26,7 +26,21 @@ function createMocks() {
       update: jest.fn(),
       count: jest.fn(),
     },
-    organization: { create: jest.fn() },
+    organization: {
+      create: jest.fn(),
+      findUnique: jest.fn(),
+      update: jest.fn(),
+    },
+    branch: {
+      count: jest.fn(),
+      findUnique: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+    },
+    slugAlias: {
+      findUnique: jest.fn(),
+      upsert: jest.fn(),
+    },
     authSession: {
       findUnique: jest.fn(),
       create: jest.fn(),
@@ -723,6 +737,42 @@ describe('AuthService', () => {
         data: { onboardedAt: expect.any(Date) },
       });
       expect(result).toEqual({ onboarded: true, slug: null });
+    });
+
+    it('crea la primera sucursal al completar el onboarding', async () => {
+      const { service, prisma } = createMocks();
+      prisma.user.findUnique.mockResolvedValue({ onboardedAt: null });
+      prisma.membership.findFirst.mockResolvedValue({
+        organizationId: 'org-1',
+        organization: {
+          name: 'Naranja Pimienta',
+          slug: 'pending-0123456789abcdef',
+          slugChanges: 0,
+        },
+      });
+      prisma.organization.findUnique.mockResolvedValue(null);
+      prisma.slugAlias.findUnique.mockResolvedValue(null);
+      prisma.branch.count
+        .mockResolvedValueOnce(0)
+        .mockResolvedValueOnce(1);
+      prisma.branch.findUnique.mockResolvedValue(null);
+      prisma.branch.create.mockResolvedValue({});
+      prisma.organization.update.mockResolvedValue({});
+      prisma.user.update.mockResolvedValue({});
+
+      await service.completeOnboarding(
+        'user-1',
+        'naranja-pimienta',
+        'Centro',
+      );
+
+      expect(prisma.branch.create).toHaveBeenCalledWith({
+        data: { organizationId: 'org-1', name: 'Centro' },
+      });
+      expect(prisma.organization.update).toHaveBeenCalledWith({
+        where: { id: 'org-1' },
+        data: { hasBranches: false },
+      });
     });
 
     it('me expone si el onboarding está completo', async () => {

@@ -399,7 +399,7 @@ export class AuthController {
     @CurrentUser() user: JwtUser,
     @Body() dto: CompleteOnboardingDto,
   ) {
-    return this.auth.completeOnboarding(user.sub, dto?.slug);
+    return this.auth.completeOnboarding(user.sub, dto?.slug, dto?.branchName);
   }
 
   @ApiOperation({ summary: 'Permisos del usuario autenticado' })
