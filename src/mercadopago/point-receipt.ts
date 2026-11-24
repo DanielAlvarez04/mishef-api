@@ -3,7 +3,12 @@
  *
  * Mercado Pago recibe texto con etiquetas propias (`{b}`, `{w}`, `{s}`,
  * `{br}`, `{left}`, `{center}`). El contenido debe medir entre 100 y 4096
- * caracteres y el papel imprimible es de 32 columnas en letra normal.
+ * caracteres y el papel imprimible es de 32 columnas.
+ *
+ * El firmware de Point no respeta `{left}` de forma fiable (las líneas salen
+ * centradas o corridas a la derecha), así que las líneas del ticket se arman
+ * con espacios y se rellenan exactamente a 32 columnas. Así la posición no
+ * depende de la alineación que aplique la terminal.
  */
 
 import { z } from 'zod';
@@ -222,6 +227,8 @@ export interface ReceiptRenderResult {
 }
 
 const LINE_WIDTH = 32;
+/** Columnas que ocupa la letra grande (`{w}`). */
+const LARGE_WIDTH = 18;
 const MAX_CONTENT = 4096;
 const CONTENT_BUDGET = 3700;
 const MAX_ITEM_LINES = 25;
@@ -308,6 +315,25 @@ function truncate(value: string, max: number): string {
   return `${value.slice(0, Math.max(1, max - 3))}...`;
 }
 
+/**
+ * Línea de ancho completo con el texto a la izquierda.
+ *
+ * El relleno de espacios hace que la línea mida exactamente 32 columnas, de
+ * modo que se vea como se vea la alineación del firmware, el texto arranca en
+ * el margen izquierdo.
+ */
+function fillLine(text: string, width = LINE_WIDTH): string {
+  return truncate(text, width).padEnd(width, ' ');
+}
+
+/** Línea de ancho completo con el texto centrado. */
+function centerLine(text: string, width = LINE_WIDTH): string {
+  const value = truncate(text, width);
+  const offset = Math.floor((width - value.length) / 2);
+
+  return `${' '.repeat(offset)}${value}`.padEnd(width, ' ');
+}
+
 /** Línea de dos columnas (concepto a la izquierda, importe a la derecha). */
 function pad(left: string, right: string): string {
   const maxLeft = Math.max(1, LINE_WIDTH - right.length - 1);
@@ -370,21 +396,32 @@ function wrapText(text: string, width: number): string[] {
   return lines.length > 0 ? lines : [''];
 }
 
+/**
+ * Da formato a una línea.
+ *
+ * En tamaño normal la posición se resuelve con espacios y no con etiquetas:
+ * `{left}` no funciona en la terminal y las líneas terminaban a la derecha.
+ * Para tamaños pequeños/grandes se conservan las etiquetas de Mercado Pago.
+ */
 function styledLine(
   text: string,
   align: ReceiptAlign,
   size: ReceiptSize,
   bold: boolean,
 ): string {
-  let styled = text;
+  if (size === 'normal') {
+    const line = align === 'center' ? centerLine(text) : fillLine(text);
 
-  if (bold) styled = `{b}${styled}{/b}`;
-  if (size === 'small') styled = `{s}${styled}{/s}`;
-  if (size === 'large') styled = `{w}${styled}{/w}`;
+    return bold ? `{b}${line}{/b}` : line;
+  }
 
-  return align === 'center'
-    ? `{center}${styled}{/center}`
-    : `{left}${styled}{/left}`;
+  const width = size === 'large' ? LARGE_WIDTH : LINE_WIDTH;
+  const line =
+    align === 'center' ? centerLine(text, width) : truncate(text, width);
+  const sized = size === 'large' ? `{w}${line}{/w}` : `{s}${line}{/s}`;
+  const styled = bold ? `{b}${sized}{/b}` : sized;
+
+  return align === 'center' ? `{center}${styled}{/center}` : styled;
 }
 
 /** Caracteres que el editor debe evitar (emojis, comillas tipográficas...). */
@@ -428,7 +465,7 @@ class ReceiptTextBuilder {
     size: ReceiptSize,
     bold: boolean,
   ): void {
-    const width = size === 'large' ? 18 : LINE_WIDTH;
+    const width = size === 'large' ? LARGE_WIDTH : LINE_WIDTH;
 
     for (const line of wrapText(text, width)) {
       this.push(styledLine(line, align, size, bold));
@@ -450,7 +487,7 @@ class ReceiptTextBuilder {
 
       content = `${
         cut > 0 ? safe.slice(0, cut) : safe
-      }{br}{center}{s}Ticket incompleto{/s}{/center}{br}`;
+      }{br}${centerLine('Ticket incompleto')}{br}`;
       this.warnings.push('El ticket superó 4096 caracteres y se recortó.');
     }
 
@@ -477,11 +514,8 @@ function renderBusinessBlock(
   );
 
   if (block.showName) {
-    const line = truncate(organizationName.toUpperCase(), 18);
     builder.push(
-      block.align === 'center'
-        ? `{center}{w}${line}{/w}{/center}`
-        : `{left}{w}${line}{/w}{/left}`,
+      styledLine(organizationName.toUpperCase(), block.align, 'normal', true),
     );
   }
 
@@ -490,11 +524,11 @@ function renderBusinessBlock(
     branchName &&
     branchName.toUpperCase() !== organizationName.toUpperCase()
   ) {
-    builder.push(styledLine(branchName, block.align, 'small', false));
+    builder.push(styledLine(branchName, block.align, 'normal', false));
   }
 
   if (block.showAddress && address) {
-    builder.push(styledLine(address, block.align, 'small', false));
+    builder.push(styledLine(address, block.align, 'normal', false));
   }
 }
 
@@ -522,7 +556,7 @@ function renderTicketBlock(
       styledLine(
         truncate(parts.join(' - '), LINE_WIDTH),
         block.align,
-        'small',
+        'normal',
         false,
       ),
     );
@@ -544,10 +578,10 @@ function renderOrderBlock(
       line += ` - ${order.partySize} personas`;
     }
 
-    builder.push(styledLine(line, block.align, 'small', false));
+    builder.push(styledLine(line, block.align, 'normal', false));
   } else if (fields.has('partySize') && order.partySize > 1) {
     builder.push(
-      styledLine(`${order.partySize} personas`, block.align, 'small', false),
+      styledLine(`${order.partySize} personas`, block.align, 'normal', false),
     );
   }
 
@@ -556,7 +590,7 @@ function renderOrderBlock(
       styledLine(
         `Cliente: ${truncate(sanitize(order.customerName), LINE_WIDTH - 9)}`,
         block.align,
-        'small',
+        'normal',
         false,
       ),
     );
@@ -585,15 +619,15 @@ function renderItemsBlock(
 
       if (label.length + amount.length + 1 > LINE_WIDTH) {
         // El nombre y el precio no caben en 32 columnas: el precio va en su
-        // propia línea, alineado a la derecha.
+        // propia línea, alineado al borde derecho con espacios.
         pushed =
-          builder.push(`{s}${truncate(label, LINE_WIDTH)}{/s}`) &&
-          builder.push(`{s}${pad('', amount)}{/s}`);
+          builder.push(fillLine(label)) &&
+          builder.push(pad('', amount));
       } else {
-        pushed = builder.push(`{s}${pad(label, amount)}{/s}`);
+        pushed = builder.push(pad(label, amount));
       }
     } else {
-      pushed = builder.push(`{s}${truncate(label, LINE_WIDTH)}{/s}`);
+      pushed = builder.push(fillLine(label));
     }
 
     if (!pushed) break;
@@ -602,9 +636,7 @@ function renderItemsBlock(
   }
 
   if (rendered < input.order.items.length) {
-    builder.push(
-      `{s}... y ${input.order.items.length - rendered} más{/s}`,
-    );
+    builder.push(`... y ${input.order.items.length - rendered} más`);
   }
 }
 
@@ -692,11 +724,11 @@ function renderPaymentsBlock(
     const amount = money(payment.amount, input.currency);
 
     if (block.showMethod && block.showAmount) {
-      builder.push(`{s}${pad(label, amount)}{/s}`);
+      builder.push(pad(label, amount));
     } else if (block.showMethod) {
-      builder.push(`{s}${label}{/s}`);
+      builder.push(fillLine(label));
     } else if (block.showAmount) {
-      builder.push(`{s}${amount}{/s}`);
+      builder.push(pad('', amount));
     }
   }
 }
@@ -775,7 +807,7 @@ export function buildPointReceipt(input: PointReceiptInput): string {
   return renderReceiptText(defaultReceiptTemplate(), input).content;
 }
 
-/** HTML seguro para la vista previa del editor (58 mm). */
+/** HTML seguro para la vista previa del editor (32 columnas). */
 export function renderReceiptPreviewHtml(content: string): string {
   const escape = (value: string) =>
     value

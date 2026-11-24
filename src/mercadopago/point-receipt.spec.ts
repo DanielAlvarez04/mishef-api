@@ -73,6 +73,33 @@ describe('buildPointReceipt', () => {
     }
   });
 
+  it('arma las líneas con espacios y sin etiquetas de alineación', () => {
+    const content = buildPointReceipt(base);
+    const lines = content
+      .split('{br}')
+      .map((line) => line.replace(/\{[^}]*\}/g, ''));
+
+    expect(content).not.toContain('{left}');
+    expect(content).not.toContain('{center}');
+
+    expect(lines).toContain(
+      'Mesa 4 - 2 personas'.padEnd(32, ' '),
+    );
+    expect(lines).toContain('Cliente: Ana'.padEnd(32, ' '));
+    expect(lines).toContain('PRODUCTOS'.padEnd(32, ' '));
+    expect(lines).toContain('PAGOS'.padEnd(32, ' '));
+
+    const subtotal = lines.find((line) => line.startsWith('Subtotal'));
+    expect(subtotal).toBeDefined();
+    expect(subtotal?.endsWith('$120.00')).toBe(true);
+    expect(subtotal?.length).toBe(32);
+
+    const payment = lines.find((line) => line.startsWith('Efectivo'));
+    expect(payment).toBeDefined();
+    expect(payment?.endsWith('$120.00')).toBe(true);
+    expect(payment?.length).toBe(32);
+  });
+
   it('quita llaves de los nombres para no romper las etiquetas', () => {
     const content = buildPointReceipt({
       ...base,
