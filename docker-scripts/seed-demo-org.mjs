@@ -62,6 +62,15 @@ const SEED_DEPS_DIR = '.seed-deps';
 const SEED_TS_NODE = 'ts-node@10.9.2';
 const SEED_TYPESCRIPT = 'typescript@5.6.3';
 
+// La imagen de producción no copia `tsconfig.json`. Sin estas opciones ts-node
+// usa `module: NodeNext` por defecto y falla con TS5109.
+const TS_NODE_COMPILER_OPTIONS = JSON.stringify({
+  module: 'commonjs',
+  moduleResolution: 'node',
+  target: 'ES2022',
+  esModuleInterop: true,
+});
+
 function prepareSeed() {
   if (!existsSync('src') && existsSync('dist/src')) {
     try {
@@ -261,7 +270,11 @@ async function main() {
   execFileSync(
     process.execPath,
     [tsNodeBin, '--transpile-only', seedTestUser, EMAIL],
-    { stdio: 'inherit', cwd: process.cwd(), env: process.env },
+    {
+      stdio: 'inherit',
+      cwd: process.cwd(),
+      env: { ...process.env, TS_NODE_COMPILER_OPTIONS },
+    },
   );
 
   const branch = await prisma.branch.upsert({
