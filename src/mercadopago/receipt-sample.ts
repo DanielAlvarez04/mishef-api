@@ -4,7 +4,7 @@ import type { PointReceiptInput } from './point-receipt';
 /**
  * Orden de ejemplo para la vista previa y la prueba de impresión del editor.
  *
- * Representa un ticket en efectivo sin propina capturada: así se ve el bloque
+ * Representa la cuenta que se lleva antes de cobrar: sin pagos, con el bloque
  * de «Propina sugerida» y el folio de reclamos.
  */
 export function sampleReceiptInput(business: {
@@ -58,13 +58,7 @@ export function sampleReceiptInput(business: {
           subtotal: '45.00',
         },
       ],
-      payments: [
-        {
-          method: 'CASH',
-          amount: '200.00',
-          tipAmount: '0.00',
-        },
-      ],
+      payments: [],
     },
   };
 }

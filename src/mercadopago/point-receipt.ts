@@ -126,7 +126,12 @@ export const receiptBlockSchema = z.discriminatedUnion('type', [
 
 export const receiptTemplateSchema = z
   .object({
-    version: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+    version: z.union([
+      z.literal(1),
+      z.literal(2),
+      z.literal(3),
+      z.literal(4),
+    ]),
     /** Imprime el logo como una acción `image` antes del ticket de texto. */
     printLogo: z.boolean(),
     blocks: z.array(receiptBlockSchema).min(1).max(40),
@@ -136,7 +141,7 @@ export const receiptTemplateSchema = z
 export type ReceiptBlock = z.infer<typeof receiptBlockSchema>;
 
 export type ReceiptTemplate = {
-  version: 1 | 2 | 3;
+  version: 1 | 2 | 3 | 4;
   printLogo: boolean;
   blocks: ReceiptBlock[];
 };
@@ -146,9 +151,10 @@ export type ReceiptTemplate = {
  *
  * v1 → v2: agrega «Descuento» a los totales.
  * v2 → v3: inserta el bloque «Propina sugerida» antes del pie de página.
+ * v3 → v4: quita el bloque de pagos; la cuenta se imprime antes de cobrar.
  *
- * Solo se aplica una vez por plantilla: al guardarla queda en versión 3 y, si
- * el usuario quita un bloque o apaga el descuento, ya no se vuelve a agregar.
+ * Solo se aplica una vez por plantilla: al guardarla queda en la versión
+ * actual y, si el usuario quita un bloque, ya no se vuelve a agregar.
  */
 function upgradeTemplate(template: ReceiptTemplate): ReceiptTemplate {
   let blocks = template.blocks;
@@ -179,7 +185,19 @@ function upgradeTemplate(template: ReceiptTemplate): ReceiptTemplate {
     blocks = insertTipSuggestions(blocks);
   }
 
-  return { ...template, version: 3, blocks };
+  if (template.version < 4) {
+    blocks = blocks.filter(
+      (block) =>
+        block.type !== 'payments' &&
+        !(
+          block.type === 'text' &&
+          (block.id === 'payments-title' ||
+            block.text.trim().toUpperCase() === 'PAGOS')
+        ),
+    );
+  }
+
+  return { ...template, version: 4, blocks };
 }
 
 /** Id estable para los bloques que agrega la migración. */
@@ -234,7 +252,7 @@ function insertTipSuggestions(blocks: ReceiptBlock[]): ReceiptBlock[] {
 }
 
 export const DEFAULT_RECEIPT_TEMPLATE: ReceiptTemplate = {
-  version: 3,
+  version: 4,
   printLogo: false,
   blocks: [
     {
@@ -280,20 +298,6 @@ export const DEFAULT_RECEIPT_TEMPLATE: ReceiptTemplate = {
       id: 'totals',
       type: 'totals',
       fields: ['subtotal', 'tax', 'discount', 'delivery', 'tip', 'total'],
-    },
-    {
-      id: 'payments-title',
-      type: 'text',
-      text: 'PAGOS',
-      align: 'left',
-      size: 'normal',
-      bold: true,
-    },
-    {
-      id: 'payments',
-      type: 'payments',
-      showMethod: true,
-      showAmount: true,
     },
     { id: 'divider-3', type: 'divider' },
     { id: 'tip-suggestions', type: 'tipSuggestions' },
@@ -905,7 +909,11 @@ function renderTotalsBlock(
     0,
   );
 
-  if (fields.has('total') && paidCents < totalCents) {
+  if (
+    fields.has('total') &&
+    input.order.payments.length > 0 &&
+    paidCents < totalCents
+  ) {
     builder.push(
       pad('Pagado', money((paidCents / 100).toFixed(2), input.currency)),
     );
@@ -942,28 +950,22 @@ function renderPaymentsBlock(
 const TIP_SUGGESTION_PERCENTAGES = [10, 15, 20] as const;
 
 /**
- * Sugerencias de propina para pagos en efectivo o transferencia.
+ * Sugerencias de propina para la cuenta impresa antes de cobrar.
  *
- * Solo se imprimen cuando todavía no hay propina registrada: en México es
- * común que el cliente deje la propina en la mesa y el ticket solo la sugiera.
+ * Se imprimen siempre que todavía no haya una propina registrada. La cuenta se
+ * lleva al cliente antes del pago, así que el ticket es también la sugerencia.
  */
 function renderTipSuggestionsBlock(
   _block: Extract<ReceiptBlock, { type: 'tipSuggestions' }>,
   input: PointReceiptInput,
   builder: ReceiptTextBuilder,
 ): void {
-  const payments = input.order.payments;
-  const tipCents = payments.reduce(
+  const tipCents = input.order.payments.reduce(
     (sum, payment) => sum + cents(payment.tipAmount),
     0,
   );
-  const cashOrTransfer =
-    payments.length > 0 &&
-    payments.every(
-      (payment) => payment.method === 'CASH' || payment.method === 'TRANSFER',
-    );
 
-  if (tipCents > 0 || !cashOrTransfer) return;
+  if (tipCents > 0) return;
 
   builder.push(styledLine('Propina sugerida', 'left', 'normal', true));
 

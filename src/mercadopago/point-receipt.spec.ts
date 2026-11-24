@@ -57,7 +57,8 @@ describe('buildPointReceipt', () => {
     expect(content).toContain('2 x Tacos al pastor Orden');
     expect(content).toContain('TOTAL COBRADO');
     expect(content).toContain('Propina');
-    expect(content).toContain('Efectivo');
+    expect(content).not.toContain('PAGOS');
+    expect(content).not.toContain('Efectivo');
     expect(content).toContain('#20261124042');
     expect(content).toContain('Gracias por su visita');
   });
@@ -93,7 +94,6 @@ describe('buildPointReceipt', () => {
     );
     expect(lines).toContain('Cliente: Ana'.padEnd(32, ' '));
     expect(lines).toContain('PRODUCTOS'.padEnd(32, ' '));
-    expect(lines).toContain('PAGOS'.padEnd(32, ' '));
 
     const subtotal = lines.find((line) => line.startsWith('Subtotal'));
     expect(subtotal).toBeDefined();
@@ -104,11 +104,6 @@ describe('buildPointReceipt', () => {
     expect(tax).toBeDefined();
     expect(tax?.endsWith('$16.55')).toBe(true);
     expect(tax?.length).toBe(32);
-
-    const payment = lines.find((line) => line.startsWith('Efectivo'));
-    expect(payment).toBeDefined();
-    expect(payment?.endsWith('$120.00')).toBe(true);
-    expect(payment?.length).toBe(32);
   });
 
   it('muestra la sucursal aunque se llame igual que el negocio', () => {
@@ -172,7 +167,7 @@ describe('buildPointReceipt', () => {
     ).toBe(true);
   });
 
-  it('sugiere propina en efectivo cuando todavía no hay propina', () => {
+  it('sugiere propina cuando la cuenta todavía no tiene propina', () => {
     const content = buildPointReceipt({
       ...base,
       order: {
@@ -206,7 +201,7 @@ describe('buildPointReceipt', () => {
     expect(lines.at(-1)).toContain('#20261124042');
   });
 
-  it('no sugiere propina si ya hay propina o el pago no es efectivo/transferencia', () => {
+  it('no sugiere propina si ya hay propina registrada', () => {
     const withTip = buildPointReceipt({
       ...base,
       order: {
@@ -216,7 +211,7 @@ describe('buildPointReceipt', () => {
         ],
       },
     });
-    const withCard = buildPointReceipt({
+    const withoutTip = buildPointReceipt({
       ...base,
       order: {
         ...base.order,
@@ -227,7 +222,7 @@ describe('buildPointReceipt', () => {
     });
 
     expect(withTip).not.toContain('Propina sugerida');
-    expect(withCard).not.toContain('Propina sugerida');
+    expect(withoutTip).toContain('Propina sugerida');
   });
 
   it('desglosa subtotal sin IVA, IVA, descuento, propina y total', () => {
@@ -280,7 +275,7 @@ describe('buildPointReceipt', () => {
     const parsed = receiptTemplateSchema.parse(legacy);
     const totals = parsed.blocks.find((block) => block.type === 'totals');
 
-    expect(parsed.version).toBe(3);
+    expect(parsed.version).toBe(4);
     expect(totals?.type).toBe('totals');
     expect(totals?.type === 'totals' ? totals.fields : []).toEqual([
       'subtotal',
