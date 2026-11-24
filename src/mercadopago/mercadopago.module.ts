@@ -8,6 +8,7 @@ import { MercadoPagoLinkService } from './mercadopago-link.service';
 import { MercadoPagoPointController } from './mercadopago-point.controller';
 import { MercadoPagoPointService } from './mercadopago-point.service';
 import { PointReceiptPrintService } from './point-receipt-print.service';
+import { ReceiptTemplateSettingsService } from './receipt-template-settings.service';
 import { MercadoPagoRefundHandler } from './mercadopago-refund.handler';
 import { MercadoPagoService } from './mercadopago.service';
 import { MercadoPagoTokenService } from './mercadopago-token.service';
@@ -30,6 +31,7 @@ import { TokenCipher } from './token-cipher';
     MercadoPagoService,
     MercadoPagoPointService,
     PointReceiptPrintService,
+    ReceiptTemplateSettingsService,
     MercadoPagoLinkService,
     MercadoPagoRefundHandler,
     MercadoPagoWebhookService,
@@ -41,6 +43,7 @@ import { TokenCipher } from './token-cipher';
     MercadoPagoService,
     MercadoPagoPointService,
     PointReceiptPrintService,
+    ReceiptTemplateSettingsService,
     MercadoPagoLinkService,
     MercadoPagoWebhookService,
   ],

@@ -331,6 +331,15 @@ model Organization {
   attendanceAdjustments AttendanceAdjustment[]
 }
 
+/// Configuración global de la plataforma. El valor es JSON validado por el
+/// servicio que lo usa; por ejemplo, la plantilla global del ticket.
+model PlatformSetting {
+  key         String   @id
+  value       Json
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+}
+
 model User {
   id               String    @id @default(cuid())
   email            String?   @unique

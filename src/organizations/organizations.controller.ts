@@ -63,6 +63,15 @@ export class OrganizationsController {
     return this.organizations.removeLogo(user.organizationId);
   }
 
+  @ApiOperation({
+    summary: 'Generar el JPEG de recibo desde el logo existente',
+  })
+  @RequirePermissions('organization:manage')
+  @Post('current/logo/receipt')
+  generateReceiptLogo(@CurrentUser() user: JwtUser) {
+    return this.organizations.generateReceiptLogo(user.organizationId);
+  }
+
   @ApiOperation({ summary: 'Comprobar disponibilidad de un dominio' })
   @RequirePermissions('organization:manage')
   @Get('domain-available')

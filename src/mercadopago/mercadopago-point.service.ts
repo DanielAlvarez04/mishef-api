@@ -20,7 +20,7 @@ import { MercadoPagoClient } from './mercadopago.client';
 import { MercadoPagoService } from './mercadopago.service';
 import { MercadoPagoTokenService } from './mercadopago-token.service';
 import { PointReceiptPrintService } from './point-receipt-print.service';
-import { receiptTemplateOrDefault } from './point-receipt';
+import { ReceiptTemplateSettingsService } from './receipt-template-settings.service';
 import {
   isPointPdvTerminal,
   POINT_MIN_AMOUNT,
@@ -73,6 +73,7 @@ export class MercadoPagoPointService {
     private readonly mercadoPago: MercadoPagoService,
     private readonly tokens: MercadoPagoTokenService,
     private readonly receiptPrint: PointReceiptPrintService,
+    private readonly receiptSettings: ReceiptTemplateSettingsService,
     private readonly payments: PaymentsService,
     private readonly config: ConfigService,
   ) {}
@@ -450,10 +451,14 @@ export class MercadoPagoPointService {
       order.createdAt,
     );
 
+    const template = await this.receiptSettings.getForBranch(
+      order.branch?.receiptTemplate,
+    );
+
     const result = await this.receiptPrint.print({
       organizationId,
       branchId: order.branchId,
-      template: receiptTemplateOrDefault(order.branch?.receiptTemplate),
+      template,
       receipt: {
         organizationName: order.organization?.name ?? 'Naranja Pimienta',
         organizationAddress: order.organization?.address ?? null,

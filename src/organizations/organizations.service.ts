@@ -25,7 +25,7 @@ import {
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
 import { CloudflareHostnamesService } from './cloudflare-hostnames.service';
 import { StorageService } from '../storage/storage.service';
-import { imageAssetObjectKeys, imageFallbackUrl } from '../uploads/image-assets';
+import { imageAssetObjectKeys, imageFallbackUrl, imageMainObjectKey } from '../uploads/image-assets';
 import {
   storeOptimizedImage,
   storeReceiptLogo,
@@ -40,6 +40,8 @@ import {
   isTempObjectKey,
   maxUploadBytes,
   presignPutUrl,
+  publicUrlForKey,
+  r2PublicBaseUrl,
 } from '../uploads/r2';
 
 /** Resultado de una búsqueda de dirección (Nominatim/OpenStreetMap). */
@@ -92,6 +94,9 @@ export class OrganizationsService {
       brandColor: organization.brandColor ?? null,
       theme: organization.theme ?? 'default',
       logoUrl: organization.logoUrl ?? null,
+      logoReceiptUrl: organization.logoReceiptKey
+        ? publicUrlForKey(organization.logoReceiptKey)
+        : null,
       address: organization.address ?? null,
       latitude: organization.latitude?.toString() ?? null,
       longitude: organization.longitude?.toString() ?? null,
@@ -274,6 +279,73 @@ export class OrganizationsService {
     }
 
     return { ok: true };
+  }
+
+  /**
+   * Genera el JPEG de recibo a partir de un logo existente.
+   *
+   * Sirve para negocios que tenían el logo como URL antes del nuevo upload.
+   * Solo funciona si el archivo está en nuestro R2 (`img.mishef.co`); si es
+   * una URL externa, hay que volver a subir el logo.
+   */
+  async generateReceiptLogo(organizationId: string | null) {
+    if (!organizationId) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    const organization = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { logoUrl: true, logoKey: true, logoReceiptKey: true },
+    });
+
+    if (!organization) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    if (organization.logoReceiptKey) {
+      return {
+        logoReceiptKey: organization.logoReceiptKey,
+        logoReceiptUrl: publicUrlForKey(organization.logoReceiptKey),
+      };
+    }
+
+    const baseUrl = r2PublicBaseUrl();
+    let sourceKey: string | null = null;
+
+    if (organization.logoKey) {
+      sourceKey = imageMainObjectKey(organization.logoKey);
+    } else if (organization.logoUrl?.startsWith(`${baseUrl}/`)) {
+      sourceKey = organization.logoUrl.slice(baseUrl.length + 1);
+    }
+
+    if (!sourceKey) {
+      throw new BadRequestException(
+        'El logo actual no está en R2. Vuelve a subirlo con el formulario.',
+      );
+    }
+
+    const buffer = await getR2Object(sourceKey);
+
+    if (!buffer) {
+      throw new NotFoundException('No se encontró el archivo del logo.');
+    }
+
+    const receipt = await storeReceiptLogo(
+      `${organizationId}/branding/receipt`,
+      buffer,
+    );
+
+    await this.prisma.organization.update({
+      where: { id: organizationId },
+      data: { logoReceiptKey: receipt.key },
+    });
+
+    await this.storage.add(organizationId, receipt.bytes);
+
+    return {
+      logoReceiptKey: receipt.key,
+      logoReceiptUrl: receipt.url,
+    };
   }
 
   /**
