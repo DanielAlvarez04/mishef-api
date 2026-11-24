@@ -196,9 +196,9 @@ export class MercadoPagoClient {
       method: 'PATCH',
       accessToken,
       body: {
-        terminals: [
-          { terminal_id: terminalId, operating_mode: operatingMode },
-        ],
+        // `/terminals/v1/setup` espera `id` (el del listado de terminales).
+        // `terminal_id` es el campo de la Orders API y aquí devuelve 400.
+        terminals: [{ id: terminalId, operating_mode: operatingMode }],
       },
     });
   }
@@ -356,8 +356,12 @@ export class MercadoPagoClient {
       if (!response.ok) {
         const body = payload as MercadoPagoApiErrorBody | null;
         const cause = body?.cause?.[0];
+        const firstError = body?.errors?.[0];
+        const details = firstError?.details?.filter(Boolean).join('; ');
         const message =
           cause?.description ??
+          details ??
+          firstError?.message ??
           body?.message ??
           `Mercado Pago respondió con ${response.status}`;
 
@@ -365,7 +369,7 @@ export class MercadoPagoClient {
           throw new HttpRetrySignal(
             response.status,
             message,
-            cause?.code ?? body?.error,
+            cause?.code ?? firstError?.code ?? body?.error,
             payload,
           );
         }
@@ -373,7 +377,7 @@ export class MercadoPagoClient {
         throw new MercadoPagoApiError(
           response.status,
           message,
-          cause?.code ?? body?.error,
+          cause?.code ?? firstError?.code ?? body?.error,
           payload,
         );
       }

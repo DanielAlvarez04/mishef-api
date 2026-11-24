@@ -120,6 +120,8 @@ export interface MercadoPagoApiErrorBody {
   error?: string;
   status?: number;
   cause?: Array<{ code?: string; description?: string }>;
+  /** Formato de error de `/terminals/v1/setup` y otros endpoints nuevos. */
+  errors?: Array<{ message?: string; code?: string; details?: string[] }>;
 }
 
 /** Error de la API de MP con el status HTTP y el detalle del proveedor. */

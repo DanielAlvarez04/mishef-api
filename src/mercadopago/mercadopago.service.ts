@@ -1,4 +1,5 @@
 import {
+  BadGatewayException,
   BadRequestException,
   Injectable,
   Logger,
@@ -512,11 +513,23 @@ export class MercadoPagoService {
 
     const accessToken = await this.tokens.getAccessToken(organizationId);
 
-    await this.client.setTerminalMode(
-      accessToken,
-      terminal.terminalId,
-      operatingMode,
-    );
+    try {
+      await this.client.setTerminalMode(
+        accessToken,
+        terminal.terminalId,
+        operatingMode,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `No se pudo cambiar el modo de la terminal ${terminal.terminalId} (org=${organizationId}): ${
+          (error as Error).message
+        }`,
+      );
+
+      throw new BadGatewayException(
+        `Mercado Pago no aceptó el cambio de modo: ${(error as Error).message}`,
+      );
+    }
 
     const updated = await this.prisma.mercadoPagoTerminal.update({
       where: { id },
