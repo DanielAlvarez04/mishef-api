@@ -19,5 +19,7 @@ scripts/*
 !scripts/create-platform-admin.mjs
 !scripts/seed-plans.mjs
 !scripts/check-mercadopago.mjs
+!scripts/seed-demo-org.mjs
+!scripts/seed-test-user.ts
 Dockerfile
 .dockerignore
