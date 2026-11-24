@@ -8,10 +8,14 @@ function build(existing: Record<string, unknown> | null) {
       findUnique: jest.fn().mockResolvedValue(existing),
       create: jest.fn(),
     },
+    branch: {
+      findMany: jest.fn().mockResolvedValue([{ id: 'branch-1' }]),
+    },
   };
 
   const service = new OrdersService(
     prisma as unknown as PrismaService,
+    {} as never,
     {} as never,
     {} as never,
     {} as never,

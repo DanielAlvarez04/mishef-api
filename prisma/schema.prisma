@@ -1312,6 +1312,8 @@ model Order {
   scheduledAt     DateTime?
   /// Consecutivo diario por sucursal (control antifraude).
   ticketNumber    Int?
+  /// Identificador legible para reclamos: AAAAMMDD + consecutivo de 3 dígitos.
+  ticketUid       String?
   status         OrderStatus @default(OPEN)
   subtotal       Decimal     @default(0.0000) @db.Decimal(12, 2)
   taxTotal       Decimal     @default(0.0000) @db.Decimal(12, 2)
@@ -1334,6 +1336,8 @@ model Order {
   @@index([organizationId, status, createdAt])
   @@index([branchId, status, createdAt])
   @@index([branchId, createdAt])
+  @@unique([branchId, ticketUid])
+  @@index([organizationId, ticketUid])
 }
 
 /// Persona dentro de una cuenta (opcional). Permite pedir por comensal.

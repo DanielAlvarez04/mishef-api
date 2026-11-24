@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { PaymentsModule } from '../payments/payments.module';
+import { TicketSequenceModule } from '../tickets/ticket-sequence.module';
 import { MercadoPagoClient } from './mercadopago.client';
 import { MercadoPagoController } from './mercadopago.controller';
 import { MercadoPagoLinkController } from './mercadopago-link.controller';
@@ -17,7 +18,7 @@ import { MercadoPagoWebhookService } from './mercadopago-webhook.service';
 import { TokenCipher } from './token-cipher';
 
 @Module({
-  imports: [PaymentsModule],
+  imports: [PaymentsModule, TicketSequenceModule],
   controllers: [
     MercadoPagoController,
     MercadoPagoPointController,

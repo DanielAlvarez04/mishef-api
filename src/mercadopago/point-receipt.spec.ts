@@ -10,11 +10,13 @@ import {
 const base: PointReceiptInput = {
   organizationName: 'Naranja Pimienta',
   organizationAddress: 'Calle Demo 123, CDMX',
+  organizationRfc: 'XAXX010101000',
   branchName: 'Sucursal Centro',
   branchAddress: null,
   currency: 'MXN',
   order: {
     ticketNumber: 42,
+    ticketUid: '20261124042',
     tableNumber: '4',
     partySize: 2,
     isTakeaway: false,
@@ -50,11 +52,13 @@ describe('buildPointReceipt', () => {
 
     expect(content).toContain('NARANJA PIMIENTA');
     expect(content).toContain('Sucursal Centro');
-    expect(content).toContain('Ticket #42');
-    expect(content).toContain('2 x Tacos al pastor (Orden)');
+    expect(content).toContain('RFC: XAXX010101000');
+    expect(content).toContain('Ticket #042');
+    expect(content).toContain('2 x Tacos al pastor Orden');
     expect(content).toContain('TOTAL COBRADO');
     expect(content).toContain('Propina');
     expect(content).toContain('Efectivo');
+    expect(content).toContain('#20261124042');
     expect(content).toContain('Gracias por su visita');
   });
 
@@ -81,7 +85,8 @@ describe('buildPointReceipt', () => {
       .map((line) => line.replace(/\{[^}]*\}/g, ''));
 
     expect(content).not.toContain('{left}');
-    expect(content).not.toContain('{center}');
+    const body = content.split('{br}').slice(0, -1).join('{br}');
+    expect(body).not.toContain('{center}');
 
     expect(lines).toContain(
       'Mesa 4 - 2 personas'.padEnd(32, ' '),
@@ -104,6 +109,125 @@ describe('buildPointReceipt', () => {
     expect(payment).toBeDefined();
     expect(payment?.endsWith('$120.00')).toBe(true);
     expect(payment?.length).toBe(32);
+  });
+
+  it('muestra la sucursal aunque se llame igual que el negocio', () => {
+    const content = buildPointReceipt({
+      ...base,
+      branchName: 'Naranja Pimienta',
+      organizationRfc: null,
+    });
+    const lines = content
+      .split('{br}')
+      .map((line) => line.replace(/\{[^}]*\}/g, ''));
+
+    expect(lines.some((line) => line.trim() === 'Naranja Pimienta')).toBe(
+      true,
+    );
+    expect(content).not.toContain('RFC:');
+  });
+
+  it('agrupa artículos iguales de distintas rondas', () => {
+    const content = buildPointReceipt({
+      ...base,
+      order: {
+        ...base.order,
+        items: [
+          {
+            name: 'Café',
+            variant: 'Latte',
+            quantity: 1,
+            subtotal: '50.00',
+          },
+          {
+            name: 'Café',
+            variant: 'Latte',
+            quantity: 2,
+            subtotal: '100.00',
+          },
+          {
+            name: 'Café',
+            variant: 'Americano',
+            quantity: 1,
+            subtotal: '40.00',
+          },
+        ],
+        payments: [
+          { method: 'CARD', amount: '190.00', tipAmount: '0.00' },
+        ],
+      },
+    });
+    const lines = content
+      .split('{br}')
+      .map((line) => line.replace(/\{[^}]*\}/g, ''));
+    const latte = lines.find((line) => line.startsWith('3 x Café Latte'));
+
+    expect(latte).toBeDefined();
+    expect(latte?.endsWith('$150.00')).toBe(true);
+    expect(lines.some((line) => line.startsWith('2 x Café Latte'))).toBe(false);
+    expect(
+      lines.some(
+        (line) => line.startsWith('1 x Café Americano') && line.endsWith('$40.00'),
+      ),
+    ).toBe(true);
+  });
+
+  it('sugiere propina en efectivo cuando todavía no hay propina', () => {
+    const content = buildPointReceipt({
+      ...base,
+      order: {
+        ...base.order,
+        subtotal: '172.41',
+        taxTotal: '27.59',
+        total: '200.00',
+        payments: [
+          { method: 'CASH', amount: '200.00', tipAmount: '0.00' },
+        ],
+      },
+    });
+    const lines = content
+      .split('{br}')
+      .map((line) => line.replace(/\{[^}]*\}/g, ''));
+
+    expect(lines).toContain('Propina sugerida'.padEnd(32));
+    expect(lines.find((line) => line.startsWith('10%'))?.endsWith('$20.00')).toBe(
+      true,
+    );
+    expect(lines.find((line) => line.startsWith('15%'))?.endsWith('$30.00')).toBe(
+      true,
+    );
+    expect(lines.find((line) => line.startsWith('20%'))?.endsWith('$40.00')).toBe(
+      true,
+    );
+
+    const total = lines.find((line) => line.startsWith('TOTAL'));
+    expect(total?.endsWith('$200.00')).toBe(true);
+    expect(total?.startsWith('TOTAL COBRADO')).toBe(false);
+    expect(lines.at(-1)).toContain('#20261124042');
+  });
+
+  it('no sugiere propina si ya hay propina o el pago no es efectivo/transferencia', () => {
+    const withTip = buildPointReceipt({
+      ...base,
+      order: {
+        ...base.order,
+        payments: [
+          { method: 'CASH', amount: '120.00', tipAmount: '20.00' },
+        ],
+      },
+    });
+    const withCard = buildPointReceipt({
+      ...base,
+      order: {
+        ...base.order,
+        payments: [
+          { method: 'CARD', amount: '120.00', tipAmount: '0.00' },
+        ],
+      },
+    });
+
+    expect(withTip).not.toContain('Propina sugerida');
+    expect(withCard).not.toContain('Propina sugerida');
   });
 
   it('desglosa subtotal sin IVA, IVA, descuento, propina y total', () => {
@@ -156,7 +280,7 @@ describe('buildPointReceipt', () => {
     const parsed = receiptTemplateSchema.parse(legacy);
     const totals = parsed.blocks.find((block) => block.type === 'totals');
 
-    expect(parsed.version).toBe(2);
+    expect(parsed.version).toBe(3);
     expect(totals?.type).toBe('totals');
     expect(totals?.type === 'totals' ? totals.fields : []).toEqual([
       'subtotal',

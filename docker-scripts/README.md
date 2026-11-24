@@ -13,6 +13,8 @@ Por eso los comandos dentro del contenedor siguen siendo:
 node scripts/seed-plans.mjs
 node scripts/seed-demo-org.mjs
 node scripts/storage-recount.mjs
+node scripts/backfill-ticket-uids.mjs          # simulación de folios
+node scripts/backfill-ticket-uids.mjs --apply  # aplica folios
 ```
 
 Los scripts de desarrollo (migraciones de datos, optimización de imágenes,

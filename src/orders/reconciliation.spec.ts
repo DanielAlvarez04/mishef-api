@@ -11,6 +11,9 @@ function build(options: {
       findFirst: jest.fn().mockResolvedValue(options.openOrder ?? null),
       create: jest.fn(),
     },
+    branch: {
+      findMany: jest.fn().mockResolvedValue([{ id: 'branch-1' }]),
+    },
     $transaction: jest
       .fn()
       .mockRejectedValue(options.transactionError ?? new Error('stop')),
@@ -18,6 +21,7 @@ function build(options: {
 
   const service = new OrdersService(
     prisma as unknown as PrismaService,
+    {} as never,
     {} as never,
     {} as never,
     {} as never,

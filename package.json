@@ -19,6 +19,7 @@
     "storage:recount": "node docker-scripts/storage-recount.mjs",
     "plans:seed": "node docker-scripts/seed-plans.mjs",
     "demo:seed": "node docker-scripts/seed-demo-org.mjs",
+    "tickets:backfill": "node docker-scripts/backfill-ticket-uids.mjs",
     "mp:check": "node docker-scripts/check-mercadopago.mjs",
     "images:optimize": "ts-node --transpile-only scripts/optimize-existing-images.ts",
     "images:seed": "ts-node --transpile-only scripts/upload-food-images.ts",

@@ -39,6 +39,7 @@ import {
 } from './dto/orders.dto';
 import { OrdersEventsService } from './orders.events';
 import { OrderSplitsService } from './order-splits.service';
+import { TicketSequenceService } from '../tickets/ticket-sequence.service';
 
 /** Estados a los que puede pasar cada estado de ronda (plan.md §6.6). */
 const ALLOWED_TRANSITIONS: Record<OrderRoundStatus, OrderRoundStatus[]> = {
@@ -129,6 +130,7 @@ const kitchenInclude: Prisma.OrderRoundInclude = {
       status: true,
       total: true,
       createdAt: true,
+      ticketNumber: true,
       branch: { select: { id: true, name: true } },
     },
   },
@@ -154,6 +156,7 @@ export class OrdersService {
     private readonly analytics: AnalyticsService,
     private readonly kitchen: KitchenService,
     private readonly splits: OrderSplitsService,
+    private readonly tickets: TicketSequenceService,
   ) {}
 
   // --------------------------------------------------------------------------
@@ -183,6 +186,18 @@ export class OrdersService {
       }
     }
 
+    // La sucursal es obligatoria para abrir una cuenta: de ella dependen el
+    // consecutivo diario, la caja y los reportes. Si la petición no trae
+    // sucursal, se resuelve la única activa del negocio.
+    const scopedBranchId =
+      branchId ?? (await this.resolveSingleBranch(organizationId));
+
+    if (!scopedBranchId) {
+      throw new BadRequestException(
+        'Selecciona una sucursal para abrir la cuenta.',
+      );
+    }
+
     // Reconciliación offline: dos dispositivos pueden haber abierto una cuenta
     // para la misma mesa sin red. Al sincronizar, la ronda se une a la cuenta
     // que ya está abierta en el servidor en lugar de abrir una segunda.
@@ -200,7 +215,7 @@ export class OrdersService {
       const openOrder = await this.prisma.order.findFirst({
         where: {
           organizationId,
-          ...(branchId ? { branchId } : {}),
+          branchId: scopedBranchId,
           status: OrderStatus.OPEN,
           channel: OrderChannel.DINE_IN,
           tableNumber: requestedTable,
@@ -235,7 +250,7 @@ export class OrdersService {
         );
       }
 
-      const ticketNumber = await this.nextTicketNumber(tx, branchId);
+      const ticket = await this.tickets.next(scopedBranchId, new Date(), tx);
       const deliveryFee = new Prisma.Decimal(dto.deliveryFee ?? 0).toDecimalPlaces(
         2,
       );
@@ -271,7 +286,7 @@ export class OrdersService {
       const order = await tx.order.create({
         data: {
           organizationId: organizationId ?? undefined,
-          branchId: branchId ?? undefined,
+          branchId: scopedBranchId,
           userId,
           channel,
           partySize,
@@ -289,7 +304,8 @@ export class OrdersService {
           deliveryAddress: dto.deliveryAddress?.trim() || null,
           deliveryFee,
           scheduledAt: dto.scheduledAt ? new Date(dto.scheduledAt) : null,
-          ticketNumber,
+          ticketNumber: ticket.number,
+          ticketUid: ticket.uid,
           total: deliveryFee,
           subtotal: deliveryFee,
           idempotencyKey,
@@ -1862,29 +1878,22 @@ export class OrdersService {
   }
 
   /**
-   * Consecutivo diario de tickets por sucursal.
+   * Sucursal única activa del negocio.
    *
-   * El `INSERT ... ON CONFLICT` es atómico en PostgreSQL, así que dos cajas
-   * abriendo cuentas a la vez no repiten número.
+   * Es el respaldo para sesiones que aún no eligieron sucursal (por ejemplo,
+   * el dueño con una sola sucursal). Con varias sucursales se exige elegir
+   * una para no abrir cuentas huérfanas.
    */
-  private async nextTicketNumber(
-    tx: Prisma.TransactionClient,
-    branchId: string | null,
-  ) {
-    if (!branchId) return null;
+  private async resolveSingleBranch(organizationId: string | null) {
+    if (!organizationId) return null;
 
-    const date = new Date();
-    date.setHours(0, 0, 0, 0);
+    const branches = await this.prisma.branch.findMany({
+      where: { organizationId, isActive: true },
+      select: { id: true },
+      take: 2,
+    });
 
-    const rows = await tx.$queryRaw<Array<{ lastNumber: number }>>`
-      INSERT INTO "BranchDailySequence" ("id", "branchId", "date", "lastNumber")
-      VALUES (gen_random_uuid()::text, ${branchId}, ${date}::date, 1)
-      ON CONFLICT ("branchId", "date")
-      DO UPDATE SET "lastNumber" = "BranchDailySequence"."lastNumber" + 1
-      RETURNING "lastNumber"
-    `;
-
-    return rows[0]?.lastNumber ?? null;
+    return branches.length === 1 ? branches[0].id : null;
   }
 
   /** Recalcula los totales de la cuenta ignorando las rondas canceladas. */

@@ -13,6 +13,8 @@
 
 import { z } from 'zod';
 
+import { formatTicketNumber } from '../tickets/ticket-code';
+
 export type ReceiptAlign = 'left' | 'center';
 export type ReceiptSize = 'small' | 'normal' | 'large';
 
@@ -50,6 +52,7 @@ const businessBlockSchema = z.object({
   type: z.literal('business'),
   showName: z.boolean(),
   showBranch: z.boolean(),
+  showRfc: z.boolean().default(true),
   showAddress: z.boolean(),
   align: receiptAlignSchema,
 });
@@ -104,6 +107,11 @@ const dividerBlockSchema = z.object({
   type: z.literal('divider'),
 });
 
+const tipSuggestionsBlockSchema = z.object({
+  ...blockBase,
+  type: z.literal('tipSuggestions'),
+});
+
 export const receiptBlockSchema = z.discriminatedUnion('type', [
   businessBlockSchema,
   ticketBlockSchema,
@@ -113,11 +121,12 @@ export const receiptBlockSchema = z.discriminatedUnion('type', [
   paymentsBlockSchema,
   textBlockSchema,
   dividerBlockSchema,
+  tipSuggestionsBlockSchema,
 ]);
 
 export const receiptTemplateSchema = z
   .object({
-    version: z.union([z.literal(1), z.literal(2)]),
+    version: z.union([z.literal(1), z.literal(2), z.literal(3)]),
     /** Imprime el logo como una acción `image` antes del ticket de texto. */
     printLogo: z.boolean(),
     blocks: z.array(receiptBlockSchema).min(1).max(40),
@@ -127,26 +136,26 @@ export const receiptTemplateSchema = z
 export type ReceiptBlock = z.infer<typeof receiptBlockSchema>;
 
 export type ReceiptTemplate = {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   printLogo: boolean;
   blocks: ReceiptBlock[];
 };
 
 /**
- * Migra las plantillas de la versión 1 (sin «Descuento») a la 2.
+ * Migra las plantillas al contrato actual.
  *
- * Solo se aplica una vez por plantilla: al guardarla queda en versión 2 y, si
- * el usuario apaga el descuento, ya no se vuelve a agregar.
+ * v1 → v2: agrega «Descuento» a los totales.
+ * v2 → v3: inserta el bloque «Propina sugerida» antes del pie de página.
+ *
+ * Solo se aplica una vez por plantilla: al guardarla queda en versión 3 y, si
+ * el usuario quita un bloque o apaga el descuento, ya no se vuelve a agregar.
  */
 function upgradeTemplate(template: ReceiptTemplate): ReceiptTemplate {
-  const legacy = template.version === 1;
+  let blocks = template.blocks;
 
-  return {
-    ...template,
-    version: 2,
-    blocks: template.blocks.map((block) => {
+  if (template.version < 2) {
+    blocks = blocks.map((block) => {
       if (
-        !legacy ||
         block.type !== 'totals' ||
         block.fields.includes('discount')
       ) {
@@ -163,12 +172,69 @@ function upgradeTemplate(template: ReceiptTemplate): ReceiptTemplate {
       );
 
       return { ...block, fields };
-    }),
+    });
+  }
+
+  if (template.version < 3) {
+    blocks = insertTipSuggestions(blocks);
+  }
+
+  return { ...template, version: 3, blocks };
+}
+
+/** Id estable para los bloques que agrega la migración. */
+function uniqueBlockId(blocks: ReceiptBlock[], base: string): string {
+  let id = base;
+  let suffix = 2;
+
+  while (blocks.some((block) => block.id === id)) {
+    id = `${base}-${suffix}`;
+    suffix += 1;
+  }
+
+  return id;
+}
+
+/**
+ * Inserta «Propina sugerida» entre dos separadores antes del texto libre.
+ *
+ * Si ya hay un separador justo antes del pie, se reutiliza como separador de
+ * entrada y solo se agrega el de salida.
+ */
+function insertTipSuggestions(blocks: ReceiptBlock[]): ReceiptBlock[] {
+  if (blocks.some((block) => block.type === 'tipSuggestions')) {
+    return blocks;
+  }
+
+  const tipBlock: ReceiptBlock = {
+    id: uniqueBlockId(blocks, 'tip-suggestions'),
+    type: 'tipSuggestions',
   };
+  const divider: ReceiptBlock = {
+    id: uniqueBlockId([...blocks, tipBlock], 'divider-tip'),
+    type: 'divider',
+  };
+  const footerIndex = blocks
+    .map((block) => block.type)
+    .lastIndexOf('text');
+
+  if (footerIndex < 0) {
+    return [...blocks, divider, tipBlock];
+  }
+
+  const hasLeadingDivider =
+    footerIndex > 0 && blocks[footerIndex - 1].type === 'divider';
+  const insertion = hasLeadingDivider ? [tipBlock] : [divider, tipBlock];
+
+  return [
+    ...blocks.slice(0, footerIndex),
+    ...insertion,
+    ...blocks.slice(footerIndex),
+  ];
 }
 
 export const DEFAULT_RECEIPT_TEMPLATE: ReceiptTemplate = {
-  version: 2,
+  version: 3,
   printLogo: false,
   blocks: [
     {
@@ -176,6 +242,7 @@ export const DEFAULT_RECEIPT_TEMPLATE: ReceiptTemplate = {
       type: 'business',
       showName: true,
       showBranch: true,
+      showRfc: true,
       showAddress: true,
       align: 'center',
     },
@@ -229,6 +296,7 @@ export const DEFAULT_RECEIPT_TEMPLATE: ReceiptTemplate = {
       showAmount: true,
     },
     { id: 'divider-3', type: 'divider' },
+    { id: 'tip-suggestions', type: 'tipSuggestions' },
     {
       id: 'footer',
       type: 'text',
@@ -256,11 +324,15 @@ export interface PointReceiptPayment {
 export interface PointReceiptInput {
   organizationName: string;
   organizationAddress: string | null;
+  /** RFC del negocio (FiscalProfile); se imprime solo si existe. */
+  organizationRfc: string | null;
   branchName: string | null;
   branchAddress: string | null;
   currency: string;
   order: {
     ticketNumber: number | null;
+    /** AAAAMMDD + consecutivo, para reclamos. */
+    ticketUid: string | null;
     tableNumber: string | null;
     partySize: number;
     isTakeaway: boolean;
@@ -568,6 +640,9 @@ function renderBusinessBlock(
 ): void {
   const organizationName = sanitize(input.organizationName || 'Naranja Pimienta');
   const branchName = input.branchName ? sanitize(input.branchName) : null;
+  const rfc = input.organizationRfc
+    ? sanitize(input.organizationRfc).toUpperCase()
+    : null;
   const address = sanitize(
     input.branchAddress ?? input.organizationAddress ?? '',
   );
@@ -578,12 +653,14 @@ function renderBusinessBlock(
     );
   }
 
-  if (
-    block.showBranch &&
-    branchName &&
-    branchName.toUpperCase() !== organizationName.toUpperCase()
-  ) {
+  if (block.showBranch && branchName) {
     builder.push(styledLine(branchName, block.align, 'normal', false));
+  }
+
+  if (block.showRfc && rfc) {
+    builder.push(
+      styledLine(`RFC: ${rfc}`, block.align, 'normal', false),
+    );
   }
 
   if (block.showAddress && address) {
@@ -601,7 +678,7 @@ function renderTicketBlock(
   if (block.showTicket) {
     parts.push(
       input.order.ticketNumber
-        ? `Ticket #${input.order.ticketNumber}`
+        ? `Ticket #${formatTicketNumber(input.order.ticketNumber)}`
         : 'Cuenta',
     );
   }
@@ -656,25 +733,69 @@ function renderOrderBlock(
   }
 }
 
+interface GroupedReceiptItem {
+  name: string;
+  variant: string | null;
+  quantity: number;
+  subtotalCents: number;
+}
+
+/**
+ * Agrupa líneas iguales aunque vengan de rondas distintas.
+ *
+ * La clave es nombre + presentación normalizados, que es justo lo que se
+ * imprime. El subtotal se suma en centavos para no arrastrar decimales.
+ */
+function groupItems(
+  items: PointReceiptInput['order']['items'],
+  showVariant: boolean,
+): GroupedReceiptItem[] {
+  const groups = new Map<string, GroupedReceiptItem>();
+
+  for (const item of items) {
+    const name = sanitize(item.name);
+    const variant =
+      showVariant && item.variant ? sanitize(item.variant) : null;
+    const key = `${name.toLowerCase()}::${(variant ?? '').toLowerCase()}`;
+    const current = groups.get(key);
+
+    if (current) {
+      current.quantity += item.quantity;
+      current.subtotalCents += cents(item.subtotal);
+    } else {
+      groups.set(key, {
+        name,
+        variant,
+        quantity: item.quantity,
+        subtotalCents: cents(item.subtotal),
+      });
+    }
+  }
+
+  return [...groups.values()];
+}
+
 function renderItemsBlock(
   block: Extract<ReceiptBlock, { type: 'items' }>,
   input: PointReceiptInput,
   builder: ReceiptTextBuilder,
 ): void {
-  const visibleItems = input.order.items.slice(0, MAX_ITEM_LINES);
+  const grouped = groupItems(input.order.items, block.showVariant);
+  const visibleItems = grouped.slice(0, MAX_ITEM_LINES);
   let rendered = 0;
 
   for (const item of visibleItems) {
-    const name = sanitize(item.name);
-    const variant =
-      block.showVariant && item.variant ? ` (${sanitize(item.variant)})` : '';
+    const variant = item.variant ? ` ${item.variant}` : '';
     const label = block.showQuantity
-      ? `${item.quantity} x ${name}${variant}`
-      : `${name}${variant}`;
+      ? `${item.quantity} x ${item.name}${variant}`
+      : `${item.name}${variant}`;
     let pushed = false;
 
     if (block.showLineTotal) {
-      const amount = money(item.subtotal, input.currency);
+      const amount = money(
+        (item.subtotalCents / 100).toFixed(2),
+        input.currency,
+      );
 
       if (label.length + amount.length + 1 > LINE_WIDTH) {
         // El nombre y el precio no caben en 32 columnas: el precio va en su
@@ -694,8 +815,8 @@ function renderItemsBlock(
     rendered += 1;
   }
 
-  if (rendered < input.order.items.length) {
-    builder.push(`... y ${input.order.items.length - rendered} más`);
+  if (rendered < grouped.length) {
+    builder.push(`... y ${grouped.length - rendered} más`);
   }
 }
 
@@ -817,6 +938,53 @@ function renderPaymentsBlock(
   }
 }
 
+/** Porcentajes de propina que se imprimen en el ticket. */
+const TIP_SUGGESTION_PERCENTAGES = [10, 15, 20] as const;
+
+/**
+ * Sugerencias de propina para pagos en efectivo o transferencia.
+ *
+ * Solo se imprimen cuando todavía no hay propina registrada: en México es
+ * común que el cliente deje la propina en la mesa y el ticket solo la sugiera.
+ */
+function renderTipSuggestionsBlock(
+  _block: Extract<ReceiptBlock, { type: 'tipSuggestions' }>,
+  input: PointReceiptInput,
+  builder: ReceiptTextBuilder,
+): void {
+  const payments = input.order.payments;
+  const tipCents = payments.reduce(
+    (sum, payment) => sum + cents(payment.tipAmount),
+    0,
+  );
+  const cashOrTransfer =
+    payments.length > 0 &&
+    payments.every(
+      (payment) => payment.method === 'CASH' || payment.method === 'TRANSFER',
+    );
+
+  if (tipCents > 0 || !cashOrTransfer) return;
+
+  builder.push(styledLine('Propina sugerida', 'left', 'normal', true));
+
+  const totalCents = cents(input.order.total);
+
+  for (const percent of TIP_SUGGESTION_PERCENTAGES) {
+    const amountCents = Math.round((totalCents * percent) / 100);
+
+    builder.push(
+      pad(
+        `${percent}%`,
+        money((amountCents / 100).toFixed(2), input.currency),
+      ),
+    );
+  }
+
+  // Separador de salida: solo aparece cuando el bloque se imprime, así no
+  // quedan dos líneas seguidas cuando no hay sugerencias.
+  builder.push('-'.repeat(LINE_WIDTH));
+}
+
 /**
  * Construye el contenido del ticket a partir de la plantilla y los datos.
  *
@@ -850,6 +1018,9 @@ export function renderReceiptText(
       case 'payments':
         renderPaymentsBlock(block, input, builder);
         break;
+      case 'tipSuggestions':
+        renderTipSuggestionsBlock(block, input, builder);
+        break;
       case 'text':
         builder.pushText(block.text, block.align, block.size, block.bold);
         break;
@@ -863,6 +1034,7 @@ export function renderReceiptText(
 
   for (const line of [
     input.organizationName,
+    input.organizationRfc ?? '',
     input.branchName ?? '',
     input.organizationAddress ?? '',
     input.branchAddress ?? '',
@@ -883,7 +1055,28 @@ export function renderReceiptText(
     );
   }
 
-  return { content: builder.content, warnings };
+  let content = builder.content;
+
+  // Folio de reclamos: siempre al final, pequeño y centrado. Va fuera de la
+  // plantilla para que ningún bloque lo desplace.
+  if (input.order.ticketUid) {
+    const uidLine = `{center}{s}#${input.order.ticketUid}{/s}{/center}`;
+    const next = `${content}{br}${uidLine}`;
+
+    if (next.length <= MAX_CONTENT) {
+      content = next;
+    } else {
+      const cut = content.slice(0, MAX_CONTENT - uidLine.length - 4);
+      const lastBreak = cut.lastIndexOf('{br}');
+
+      content = `${
+        lastBreak > 0 ? cut.slice(0, lastBreak) : cut
+      }{br}${uidLine}`;
+      warnings.push('El ticket se recortó para incluir el folio.');
+    }
+  }
+
+  return { content, warnings };
 }
 
 /** Compatibilidad con el ticket clásico. */

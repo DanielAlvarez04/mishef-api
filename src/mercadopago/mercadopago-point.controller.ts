@@ -12,6 +12,7 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { JwtUser } from '../auth/auth.service';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { CurrentBranch } from '../common/decorators/current-branch.decorator';
 import { RequirePermissions } from '../common/decorators/require-permissions.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CreatePointChargeDto } from './dto/create-point-charge.dto';
@@ -53,8 +54,16 @@ export class MercadoPagoPointController {
   })
   @RequirePermissions('payments:register')
   @Post('orders/:id/receipt')
-  printReceipt(@CurrentUser() user: JwtUser, @Param('id') orderId: string) {
-    return this.point.printReceipt(organizationId(user), orderId);
+  printReceipt(
+    @CurrentUser() user: JwtUser,
+    @Param('id') orderId: string,
+    @CurrentBranch() branchId: string | null,
+  ) {
+    return this.point.printReceipt(
+      organizationId(user),
+      orderId,
+      branchId,
+    );
   }
 
   @ApiOperation({ summary: 'Conciliar un cobro con Mercado Pago' })

@@ -184,6 +184,7 @@ export class ReceiptsService {
     const receipt = sampleReceiptInput({
       organizationName: branch.organization.name,
       organizationAddress: branch.organization.address,
+      rfc: branch.organization.fiscalProfile?.rfc ?? null,
       branchName: branch.name,
       branchAddress: branch.address,
       currency: branch.organization.currency,
@@ -210,6 +211,7 @@ export class ReceiptsService {
     const receipt = sampleReceiptInput({
       organizationName: branch.organization.name,
       organizationAddress: branch.organization.address,
+      rfc: branch.organization.fiscalProfile?.rfc ?? null,
       branchName: branch.name,
       branchAddress: branch.address,
       currency: branch.organization.currency,
@@ -278,6 +280,7 @@ export class ReceiptsService {
             address: true,
             currency: true,
             logoReceiptKey: true,
+            fiscalProfile: { select: { rfc: true } },
           },
         },
       },

@@ -64,6 +64,19 @@ export class BranchContextInterceptor implements NestInterceptor {
     }
 
     if (!requested) {
+      // Con una sola sucursal activa no tiene sentido obligar a elegirla: la
+      // API y la UI resuelven la misma. Con varias, la petición sigue en
+      // contexto de organización y el POS exige seleccionar una.
+      const branches = await this.prisma.branch.findMany({
+        where: { organizationId, isActive: true },
+        select: { id: true },
+        take: 2,
+      });
+
+      if (branches.length === 1) {
+        request.branchId = branches[0].id;
+      }
+
       return next.handle();
     }
 

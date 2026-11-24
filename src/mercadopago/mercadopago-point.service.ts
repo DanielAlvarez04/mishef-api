@@ -16,6 +16,7 @@ import {
 
 import { PaymentsService, type PaymentActor } from '../payments/payments.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { TicketSequenceService } from '../tickets/ticket-sequence.service';
 import { MercadoPagoClient } from './mercadopago.client';
 import { MercadoPagoService } from './mercadopago.service';
 import { MercadoPagoTokenService } from './mercadopago-token.service';
@@ -76,6 +77,7 @@ export class MercadoPagoPointService {
     private readonly receiptSettings: ReceiptTemplateSettingsService,
     private readonly payments: PaymentsService,
     private readonly config: ConfigService,
+    private readonly tickets: TicketSequenceService,
   ) {}
 
   async getPointConfig(organizationId: string): Promise<PointConfig> {
@@ -374,6 +376,7 @@ export class MercadoPagoPointService {
   async printReceipt(
     organizationId: string,
     orderId: string,
+    contextBranchId: string | null = null,
   ): Promise<{
     ok: true;
     terminalId: string;
@@ -386,6 +389,7 @@ export class MercadoPagoPointService {
       select: {
         id: true,
         ticketNumber: true,
+        ticketUid: true,
         tableNumber: true,
         partySize: true,
         isTakeaway: true,
@@ -403,6 +407,7 @@ export class MercadoPagoPointService {
             address: true,
             currency: true,
             logoReceiptKey: true,
+            fiscalProfile: { select: { rfc: true } },
           },
         },
         branch: {
@@ -452,8 +457,35 @@ export class MercadoPagoPointService {
       order.createdAt,
     );
 
+    // Cuentas viejas sin sucursal: se repara con la sucursal activa del POS
+    // para que el ticket tenga nombre y folio.
+    let branch = order.branch;
+    let effectiveBranchId = order.branchId;
+
+    if (!effectiveBranchId && contextBranchId) {
+      const candidate = await this.prisma.branch.findFirst({
+        where: { id: contextBranchId, organizationId, isActive: true },
+        select: {
+          id: true,
+          name: true,
+          address: true,
+          receiptTemplate: true,
+        },
+      });
+
+      if (candidate) {
+        effectiveBranchId = candidate.id;
+        branch = candidate;
+
+        await this.prisma.order.update({
+          where: { id: order.id },
+          data: { branchId: candidate.id },
+        });
+      }
+    }
+
     const template = await this.receiptSettings.getForBranch(
-      order.branch?.receiptTemplate,
+      branch?.receiptTemplate,
     );
 
     const discountTotal = order.rounds
@@ -463,18 +495,23 @@ export class MercadoPagoPointService {
         new Prisma.Decimal(0),
       );
 
+    // Cuentas abiertas antes de este cambio: se les asigna folio al imprimir.
+    const ticket = await this.tickets.ensure(order.id);
+
     const result = await this.receiptPrint.print({
       organizationId,
-      branchId: order.branchId,
+      branchId: effectiveBranchId,
       template,
       receipt: {
         organizationName: order.organization?.name ?? 'Naranja Pimienta',
         organizationAddress: order.organization?.address ?? null,
-        branchName: order.branch?.name ?? null,
-        branchAddress: order.branch?.address ?? null,
+        organizationRfc: order.organization?.fiscalProfile?.rfc ?? null,
+        branchName: branch?.name ?? null,
+        branchAddress: branch?.address ?? null,
         currency: order.organization?.currency ?? 'MXN',
         order: {
-          ticketNumber: order.ticketNumber,
+          ticketNumber: ticket?.number ?? order.ticketNumber,
+          ticketUid: ticket?.uid ?? order.ticketUid,
           tableNumber: order.tableNumber,
           partySize: order.partySize,
           isTakeaway: order.isTakeaway,
