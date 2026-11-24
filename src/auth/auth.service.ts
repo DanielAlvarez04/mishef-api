@@ -18,9 +18,12 @@ import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import {
-  buildOrganizationSlug,
+  buildPendingOrganizationSlug,
+  isPendingSlug,
   isValidSlug,
+  MAX_SLUG_LENGTH,
   normalizeSlug,
+  slugify,
 } from '../common/slug';
 import { PRACTICE_WINDOW_MS } from '../common/practice';
 import { isValidUsername, normalizeUsername } from '../common/usernames';
@@ -677,7 +680,7 @@ export class AuthService {
         const organization = await tx.organization.create({
           data: {
             name: organizationName,
-            slug: buildOrganizationSlug(organizationName),
+            slug: buildPendingOrganizationSlug(),
             practiceMode: true,
             practiceUntil: new Date(Date.now() + PRACTICE_WINDOW_MS),
           },
@@ -1370,14 +1373,147 @@ export class AuthService {
     };
   }
 
-  /** Marca el onboarding como completado (idempotente). */
-  async completeOnboarding(userId: string) {
+  /** Marca el onboarding como completado y fija la dirección definitiva. */
+  async completeOnboarding(userId: string, rawSlug?: string) {
+    const [user, membership] = await Promise.all([
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { onboardedAt: true },
+      }),
+      this.prisma.membership.findFirst({
+        where: { userId },
+        orderBy: { createdAt: 'asc' },
+        select: {
+          organizationId: true,
+          organization: {
+            select: { name: true, slug: true, slugChanges: true },
+          },
+        },
+      }),
+    ]);
+
+    if (!user) {
+      throw new NotFoundException('Usuario no encontrado');
+    }
+
+    const requested = rawSlug?.trim();
+    let slug = requested ? normalizeSlug(requested) : null;
+    const organization = membership?.organization ?? null;
+    const organizationId = membership?.organizationId ?? null;
+
+    // Si el cliente no manda dirección y la organización sigue con el
+    // placeholder, se genera aquí con el nombre definitivo del negocio.
+    if (!slug && organization && isPendingSlug(organization.slug)) {
+      slug = await this.availableOrganizationSlug(organization.name);
+    }
+
+    if (
+      membership &&
+      organizationId &&
+      organization &&
+      slug &&
+      slug !== organization.slug
+    ) {
+      if (!isValidSlug(slug)) {
+        throw new BadRequestException(
+          'La dirección del negocio no es válida o está reservada',
+        );
+      }
+
+      const [takenOrg, takenAlias] = await Promise.all([
+        this.prisma.organization.findUnique({
+          where: { slug },
+          select: { id: true },
+        }),
+        this.prisma.slugAlias.findUnique({
+          where: { slug },
+          select: { organizationId: true },
+        }),
+      ]);
+
+      if (takenOrg && takenOrg.id !== organizationId) {
+        throw new ConflictException('Esa dirección de negocio ya está en uso');
+      }
+
+      if (takenAlias && takenAlias.organizationId !== organizationId) {
+        throw new ConflictException('Esa dirección de negocio ya está en uso');
+      }
+
+      // La primera configuración no consume el cambio único; una repetición
+      // del asistente sí respeta la regla de Configuración.
+      const firstSetup =
+        !user.onboardedAt || isPendingSlug(organization.slug);
+
+      if (!firstSetup && organization.slugChanges >= 1) {
+        throw new ForbiddenException('Ya usaste tu cambio de dirección');
+      }
+
+      await this.prisma.$transaction(async (tx) => {
+        if (!firstSetup && !isPendingSlug(organization.slug)) {
+          await tx.slugAlias.upsert({
+            where: { slug: organization.slug },
+            create: {
+              slug: organization.slug,
+              organizationId,
+            },
+            update: {},
+          });
+        }
+
+        await tx.organization.update({
+          where: { id: organizationId },
+          data: {
+            slug,
+            ...(firstSetup ? {} : { slugChanges: { increment: 1 } }),
+          },
+        });
+
+        await tx.user.update({
+          where: { id: userId },
+          data: { onboardedAt: user.onboardedAt ?? new Date() },
+        });
+      });
+
+      return { onboarded: true, slug };
+    }
+
     await this.prisma.user.update({
       where: { id: userId },
-      data: { onboardedAt: new Date() },
+      data: { onboardedAt: user.onboardedAt ?? new Date() },
     });
 
-    return { onboarded: true };
+    return { onboarded: true, slug: organization?.slug ?? null };
+  }
+
+  /** Primera dirección libre a partir del nombre del negocio. */
+  private async availableOrganizationSlug(name: string): Promise<string> {
+    const base = slugify(name) || 'mi-negocio';
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const candidate =
+        attempt === 0
+          ? base
+          : `${base.slice(0, MAX_SLUG_LENGTH - 4)}-${attempt + 1}`;
+
+      if (!isValidSlug(candidate)) continue;
+
+      const [organization, alias] = await Promise.all([
+        this.prisma.organization.findUnique({
+          where: { slug: candidate },
+          select: { id: true },
+        }),
+        this.prisma.slugAlias.findUnique({
+          where: { slug: candidate },
+          select: { slug: true },
+        }),
+      ]);
+
+      if (!organization && !alias) return candidate;
+    }
+
+    return `${base.slice(0, MAX_SLUG_LENGTH - 6)}-${randomBytes(2).toString(
+      'hex',
+    )}`;
   }
 
   // --------------------------------------------------------------------------
@@ -1428,7 +1564,7 @@ export class AuthService {
       const organization = await tx.organization.create({
         data: {
           name: organizationName,
-          slug: requestedSlug ?? buildOrganizationSlug(organizationName),
+          slug: requestedSlug ?? buildPendingOrganizationSlug(),
           practiceMode: true,
           practiceUntil: new Date(Date.now() + PRACTICE_WINDOW_MS),
         },

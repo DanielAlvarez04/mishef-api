@@ -18,6 +18,28 @@ export function buildOrganizationSlug(name: string): string {
   return `${slugify(name)}-${randomBytes(3).toString('hex')}`;
 }
 
+/**
+ * Prefijo de la dirección provisional del onboarding (`pending-` + 8 bytes).
+ *
+ * Se valida el formato completo para no bloquear direcciones legítimas que
+ * empiecen con la palabra «pending».
+ */
+const PENDING_SLUG_PATTERN = /^pending-[0-9a-f]{16}$/;
+
+export function isPendingSlug(slug: string): boolean {
+  return PENDING_SLUG_PATTERN.test(slug);
+}
+
+/**
+ * Dirección provisional mientras el negocio completa el onboarding.
+ *
+ * No resuelve como tenant público y se reemplaza por la dirección definitiva
+ * al terminar el asistente.
+ */
+export function buildPendingOrganizationSlug(): string {
+  return `pending-${randomBytes(8).toString('hex')}`;
+}
+
 /** Longitud máxima de una dirección elegida por el negocio (`mi-cafeteria`). */
 export const MAX_SLUG_LENGTH = 32;
 
@@ -166,6 +188,8 @@ export function isValidSlug(slug: string): boolean {
     return false;
   }
 
+  if (isPendingSlug(slug)) return false;
+
   if (RESERVED_SLUGS.has(slug)) return false;
 
   // Solo minúsculas, números y guiones; sin guion al inicio o al final y sin
@@ -181,6 +205,8 @@ export function isValidSlug(slug: string): boolean {
  */
 export function isResolvableTenantSlug(slug: string): boolean {
   if (!slug) return false;
+
+  if (isPendingSlug(slug)) return false;
 
   if (getResolvableReservedSlugs().has(slug)) {
     return (

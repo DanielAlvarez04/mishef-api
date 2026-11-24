@@ -26,6 +26,7 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { CompleteOnboardingDto } from './dto/complete-onboarding.dto';
 import {
   DisableTwoFactorDto,
   TotpCodeDto,
@@ -394,8 +395,11 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   @Post('onboarding/complete')
-  completeOnboarding(@CurrentUser() user: JwtUser) {
-    return this.auth.completeOnboarding(user.sub);
+  completeOnboarding(
+    @CurrentUser() user: JwtUser,
+    @Body() dto: CompleteOnboardingDto,
+  ) {
+    return this.auth.completeOnboarding(user.sub, dto?.slug);
   }
 
   @ApiOperation({ summary: 'Permisos del usuario autenticado' })

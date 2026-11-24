@@ -712,6 +712,8 @@ describe('AuthService', () => {
 
     it('marca el onboarding como completado', async () => {
       const { service, prisma } = createMocks();
+      prisma.user.findUnique.mockResolvedValue({ onboardedAt: null });
+      prisma.membership.findFirst.mockResolvedValue(null);
       prisma.user.update.mockResolvedValue({});
 
       const result = await service.completeOnboarding('user-1');
@@ -720,7 +722,7 @@ describe('AuthService', () => {
         where: { id: 'user-1' },
         data: { onboardedAt: expect.any(Date) },
       });
-      expect(result).toEqual({ onboarded: true });
+      expect(result).toEqual({ onboarded: true, slug: null });
     });
 
     it('me expone si el onboarding está completo', async () => {
