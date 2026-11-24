@@ -14,6 +14,7 @@ import {
   MpPayment,
   MpPaymentsSearch,
   MpPreference,
+  MpPrintAction,
   MpRefund,
   MpTerminal,
   MpTerminalsResponse,
@@ -200,6 +201,35 @@ export class MercadoPagoClient {
         // `terminal_id` es el campo de la Orders API y aquí devuelve 400.
         terminals: [{ id: terminalId, operating_mode: operatingMode }],
       },
+    });
+  }
+
+  /**
+   * Imprime contenido personalizado en una terminal Point Smart.
+   *
+   * Requiere que Mercado Pago haya habilitado la impresión personalizada en el
+   * equipo. El contenido usa las etiquetas propias de MP (`{b}`, `{br}`, ...).
+   */
+  createPrintAction(
+    accessToken: string,
+    action: {
+      type: 'print';
+      external_reference: string;
+      config: {
+        point: {
+          terminal_id: string;
+          subtype: 'custom';
+        };
+      };
+      content: string;
+    },
+    idempotencyKey: string,
+  ): Promise<MpPrintAction> {
+    return this.request<MpPrintAction>('/terminals/v1/actions', {
+      method: 'POST',
+      accessToken,
+      body: action,
+      idempotencyKey,
     });
   }
 

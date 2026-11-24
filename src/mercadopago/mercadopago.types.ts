@@ -41,6 +41,14 @@ export interface MpTerminalsResponse {
   };
 }
 
+/** Acción de impresión creada en `/terminals/v1/actions`. */
+export interface MpPrintAction {
+  id: string;
+  status: string;
+  external_reference?: string;
+  [key: string]: unknown;
+}
+
 export interface MpPreference {
   id: string;
   init_point?: string;

@@ -1,12 +1,15 @@
 import {
   BadRequestException,
+  BadGatewayException,
   Injectable,
   Logger,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { randomUUID } from 'node:crypto';
 import {
+  OrderRoundStatus,
   PaymentMethod,
   PaymentStatus,
   Prisma,
@@ -18,8 +21,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { MercadoPagoClient } from './mercadopago.client';
 import { MercadoPagoService } from './mercadopago.service';
 import { MercadoPagoTokenService } from './mercadopago-token.service';
+import { buildPointReceipt } from './point-receipt';
 import {
   isPointPdvTerminal,
+  POINT_MIN_AMOUNT,
+  supportsPointPrinting,
   supportsPointTips,
 } from './point-terminal';
 import {
@@ -38,6 +44,8 @@ export interface PointConfig {
   enabled: boolean;
   /** La cuenta está conectada y puede generar links de Checkout Pro. */
   linkEnabled: boolean;
+  /** Monto mínimo (MXN) que acepta Mercado Pago Point. */
+  minAmount: number;
   terminals: Array<{
     id: string;
     name: string | null;
@@ -81,7 +89,12 @@ export class MercadoPagoPointService {
       connection.status !== 'ACTIVE' ||
       connection.expiresAt.getTime() <= Date.now()
     ) {
-      return { enabled: false, linkEnabled: false, terminals: [] };
+      return {
+        enabled: false,
+        linkEnabled: false,
+        minAmount: POINT_MIN_AMOUNT,
+        terminals: [],
+      };
     }
 
     // Descubre terminales vinculadas después de la conexión sin exigir que el
@@ -103,6 +116,7 @@ export class MercadoPagoPointService {
     return {
       enabled: usable.length > 0,
       linkEnabled: true,
+      minAmount: POINT_MIN_AMOUNT,
       terminals: usable.map((terminal) => ({
         id: terminal.id,
         name: terminal.name,
@@ -138,6 +152,16 @@ export class MercadoPagoPointService {
 
     if (order.status !== 'OPEN') {
       throw new BadRequestException('La cuenta ya no está abierta');
+    }
+
+    // Mercado Pago Point México exige un mínimo de $5.00 por order. Se valida
+    // antes de registrar el pago para no dejar movimientos cancelados inútiles.
+    if (dto.amount < POINT_MIN_AMOUNT) {
+      throw new BadRequestException(
+        `El monto mínimo para cobrar con terminal es $${POINT_MIN_AMOUNT.toFixed(
+          2,
+        )}. Usa efectivo o transferencia.`,
+      );
     }
 
     // Libera el saldo de cobros anteriores que ya expiraron en la terminal.
@@ -337,6 +361,232 @@ export class MercadoPagoPointService {
       paymentId,
       { reason: 'Cancelado desde el punto de venta' },
       { providerHandled },
+    );
+  }
+
+  /**
+   * Imprime un ticket itemizado en la terminal Point.
+   *
+   * La impresión personalizada solo está disponible en Point Smart 1/2 y debe
+   * estar habilitada por Mercado Pago en el equipo. El botón del POS llama a
+   * este método para cualquier método de pago (efectivo, transferencia, etc.).
+   */
+  async printReceipt(
+    organizationId: string,
+    orderId: string,
+  ): Promise<{
+    ok: true;
+    actionId: string;
+    status: string;
+    terminalId: string;
+  }> {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, organizationId },
+      select: {
+        id: true,
+        ticketNumber: true,
+        tableNumber: true,
+        partySize: true,
+        isTakeaway: true,
+        channel: true,
+        customerName: true,
+        createdAt: true,
+        subtotal: true,
+        taxTotal: true,
+        deliveryFee: true,
+        total: true,
+        branchId: true,
+        organization: {
+          select: { name: true, address: true, currency: true },
+        },
+        branch: { select: { name: true, address: true } },
+        rounds: {
+          where: { status: { not: OrderRoundStatus.CANCELLED } },
+          orderBy: { createdAt: 'asc' },
+          select: {
+            items: {
+              select: {
+                itemName: true,
+                variantName: true,
+                quantity: true,
+                subtotal: true,
+              },
+            },
+          },
+        },
+        payments: {
+          where: { status: PaymentStatus.CONFIRMED },
+          orderBy: { createdAt: 'asc' },
+          select: {
+            method: true,
+            amount: true,
+            tipAmount: true,
+            terminalId: true,
+            confirmedAt: true,
+          },
+        },
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException('Cuenta no encontrada');
+    }
+
+    const terminal = await this.resolveReceiptTerminal(
+      organizationId,
+      order.branchId,
+      order.payments.map((payment) => payment.terminalId),
+    );
+
+    if (supportsPointPrinting(terminal.model) === false) {
+      throw new BadRequestException(
+        'Point Air 2 no tiene impresora. Usa una terminal Point Smart 1 o 2.',
+      );
+    }
+
+    // La fecha del ticket es la del último pago confirmado (la venta), no la
+    // de apertura de la cuenta.
+    const issuedAt = order.payments.reduce<Date>(
+      (latest, payment) =>
+        payment.confirmedAt &&
+        payment.confirmedAt.getTime() > latest.getTime()
+          ? payment.confirmedAt
+          : latest,
+      order.createdAt,
+    );
+
+    const content = buildPointReceipt({
+      organizationName: order.organization?.name ?? 'Naranja Pimienta',
+      organizationAddress: order.organization?.address ?? null,
+      branchName: order.branch?.name ?? null,
+      branchAddress: order.branch?.address ?? null,
+      currency: order.organization?.currency ?? 'MXN',
+      order: {
+        ticketNumber: order.ticketNumber,
+        tableNumber: order.tableNumber,
+        partySize: order.partySize,
+        isTakeaway: order.isTakeaway,
+        channel: order.channel,
+        customerName: order.customerName,
+        issuedAt,
+        subtotal: order.subtotal.toFixed(2),
+        taxTotal: order.taxTotal.toFixed(2),
+        deliveryFee: order.deliveryFee.toFixed(2),
+        total: order.total.toFixed(2),
+        items: order.rounds.flatMap((round) =>
+          round.items.map((item) => ({
+            name: item.itemName,
+            variant: item.variantName,
+            quantity: item.quantity,
+            subtotal: item.subtotal.toFixed(2),
+          })),
+        ),
+        payments: order.payments.map((payment) => ({
+          method: payment.method,
+          amount: payment.amount.toFixed(2),
+          tipAmount: payment.tipAmount.toFixed(2),
+        })),
+      },
+    });
+
+    const accessToken = await this.tokens.getAccessToken(organizationId);
+    const reference = `receipt-${order.id}-${randomUUID().slice(0, 8)}`.slice(
+      0,
+      64,
+    );
+
+    try {
+      const action = await this.client.createPrintAction(
+        accessToken,
+        {
+          type: 'print',
+          external_reference: reference,
+          config: {
+            point: {
+              terminal_id: terminal.terminalId,
+              subtype: 'custom',
+            },
+          },
+          content,
+        },
+        randomUUID(),
+      );
+
+      return {
+        ok: true,
+        actionId: action.id,
+        status: action.status,
+        terminalId: terminal.terminalId,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `No se pudo imprimir el ticket ${order.id} (org=${organizationId}, terminal=${
+          terminal.terminalId
+        }): ${(error as Error).message}`,
+      );
+
+      throw new BadGatewayException(
+        `No se pudo imprimir en la terminal: ${
+          (error as Error).message
+        }. Verifica que sea Point Smart 1/2 y que la impresión personalizada esté habilitada.`,
+      );
+    }
+  }
+
+  /**
+   * Terminal que debe imprimir el ticket.
+   *
+   * Prioriza la terminal que cobró con Point; si el pago fue en efectivo, usa
+   * la terminal PDV de la sucursal y, como respaldo, la predeterminada.
+   */
+  private async resolveReceiptTerminal(
+    organizationId: string,
+    branchId: string | null,
+    terminalIds: Array<string | null>,
+  ) {
+    const fromPayment = terminalIds.find(
+      (terminalId): terminalId is string => Boolean(terminalId),
+    );
+
+    if (fromPayment) {
+      const terminal = await this.prisma.mercadoPagoTerminal.findFirst({
+        where: {
+          organizationId,
+          terminalId: fromPayment,
+          isActive: true,
+        },
+      });
+
+      if (terminal) return terminal;
+    }
+
+    if (branchId) {
+      const branchTerminal = await this.prisma.mercadoPagoTerminal.findFirst({
+        where: {
+          organizationId,
+          branchId,
+          isActive: true,
+          operatingMode: 'PDV',
+        },
+        orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+      });
+
+      if (branchTerminal) return branchTerminal;
+    }
+
+    const terminal = await this.prisma.mercadoPagoTerminal.findFirst({
+      where: {
+        organizationId,
+        isActive: true,
+        operatingMode: 'PDV',
+      },
+      orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+    });
+
+    if (terminal) return terminal;
+
+    throw new BadRequestException(
+      'No hay una terminal Point en modo PDV para imprimir. Configúrala en Ajustes → Pagos.',
     );
   }
 

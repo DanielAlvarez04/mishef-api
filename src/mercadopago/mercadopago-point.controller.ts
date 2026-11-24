@@ -48,6 +48,15 @@ export class MercadoPagoPointController {
     );
   }
 
+  @ApiOperation({
+    summary: 'Imprimir el ticket de una cuenta en una terminal Point',
+  })
+  @RequirePermissions('payments:register')
+  @Post('orders/:id/receipt')
+  printReceipt(@CurrentUser() user: JwtUser, @Param('id') orderId: string) {
+    return this.point.printReceipt(organizationId(user), orderId);
+  }
+
   @ApiOperation({ summary: 'Conciliar un cobro con Mercado Pago' })
   @RequirePermissions('payments:register')
   @Post('payments/:id/sync')
