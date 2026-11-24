@@ -23,10 +23,23 @@ const orderFieldSchema = z.enum(['place', 'partySize', 'customer']);
 const totalFieldSchema = z.enum([
   'subtotal',
   'tax',
+  'discount',
   'delivery',
   'tip',
   'total',
 ]);
+
+type TotalField = z.infer<typeof totalFieldSchema>;
+
+/** Orden fijo de los conceptos del ticket: subtotal, IVA, descuento, propina. */
+const TOTAL_FIELD_ORDER = [
+  'subtotal',
+  'tax',
+  'discount',
+  'delivery',
+  'tip',
+  'total',
+] as const satisfies readonly TotalField[];
 
 const blockBase = {
   id: z.string().min(1).max(40),
@@ -67,7 +80,7 @@ const itemsBlockSchema = z.object({
 const totalsBlockSchema = z.object({
   ...blockBase,
   type: z.literal('totals'),
-  fields: z.array(totalFieldSchema).max(5),
+  fields: z.array(totalFieldSchema).max(6),
 });
 
 const paymentsBlockSchema = z.object({
@@ -102,18 +115,60 @@ export const receiptBlockSchema = z.discriminatedUnion('type', [
   dividerBlockSchema,
 ]);
 
-export const receiptTemplateSchema = z.object({
-  version: z.literal(1),
-  /** Imprime el logo como una acción `image` antes del ticket de texto. */
-  printLogo: z.boolean(),
-  blocks: z.array(receiptBlockSchema).min(1).max(40),
-});
+export const receiptTemplateSchema = z
+  .object({
+    version: z.union([z.literal(1), z.literal(2)]),
+    /** Imprime el logo como una acción `image` antes del ticket de texto. */
+    printLogo: z.boolean(),
+    blocks: z.array(receiptBlockSchema).min(1).max(40),
+  })
+  .transform((template) => upgradeTemplate(template));
 
 export type ReceiptBlock = z.infer<typeof receiptBlockSchema>;
-export type ReceiptTemplate = z.infer<typeof receiptTemplateSchema>;
+
+export type ReceiptTemplate = {
+  version: 1 | 2;
+  printLogo: boolean;
+  blocks: ReceiptBlock[];
+};
+
+/**
+ * Migra las plantillas de la versión 1 (sin «Descuento») a la 2.
+ *
+ * Solo se aplica una vez por plantilla: al guardarla queda en versión 2 y, si
+ * el usuario apaga el descuento, ya no se vuelve a agregar.
+ */
+function upgradeTemplate(template: ReceiptTemplate): ReceiptTemplate {
+  const legacy = template.version === 1;
+
+  return {
+    ...template,
+    version: 2,
+    blocks: template.blocks.map((block) => {
+      if (
+        !legacy ||
+        block.type !== 'totals' ||
+        block.fields.includes('discount')
+      ) {
+        return block;
+      }
+
+      const fields = [...block.fields];
+      const taxIndex = fields.indexOf('tax');
+
+      fields.splice(
+        taxIndex >= 0 ? taxIndex + 1 : fields.length,
+        0,
+        'discount',
+      );
+
+      return { ...block, fields };
+    }),
+  };
+}
 
 export const DEFAULT_RECEIPT_TEMPLATE: ReceiptTemplate = {
-  version: 1,
+  version: 2,
   printLogo: false,
   blocks: [
     {
@@ -157,7 +212,7 @@ export const DEFAULT_RECEIPT_TEMPLATE: ReceiptTemplate = {
     {
       id: 'totals',
       type: 'totals',
-      fields: ['subtotal', 'tax', 'delivery', 'tip', 'total'],
+      fields: ['subtotal', 'tax', 'discount', 'delivery', 'tip', 'total'],
     },
     {
       id: 'payments-title',
@@ -212,9 +267,13 @@ export interface PointReceiptInput {
     channel: string;
     customerName: string | null;
     issuedAt: Date;
+    /** Neto sin IVA, ya con los descuentos aplicados (como la comanda). */
     subtotal: string;
     taxTotal: string;
+    /** Suma de descuentos por promoción de las líneas. */
+    discountTotal: string;
     deliveryFee: string;
+    /** Total con IVA y descuentos; no incluye propina. */
     total: string;
     items: PointReceiptItem[];
     payments: PointReceiptPayment[];
@@ -649,14 +708,9 @@ function renderTotalsBlock(
 
   if (fields.size === 0) return;
 
-  const itemsGrossCents = input.order.items.reduce(
-    (sum, item) => sum + cents(item.subtotal),
-    0,
-  );
-  const subtotalCents =
-    itemsGrossCents > 0
-      ? itemsGrossCents
-      : cents(input.order.subtotal);
+  const taxCents = cents(input.order.taxTotal);
+  const discountCents = cents(input.order.discountTotal);
+  const deliveryCents = cents(input.order.deliveryFee);
   const tipCents = input.order.payments.reduce(
     (sum, payment) => sum + cents(payment.tipAmount),
     0,
@@ -664,19 +718,49 @@ function renderTotalsBlock(
   const totalCents = cents(input.order.total);
   const grandTotalCents = totalCents + tipCents;
 
-  for (const field of block.fields) {
+  // `order.subtotal` es el neto sin IVA que ya incluye el envío y los
+  // descuentos (igual que la comanda). Para el ticket se muestra el precio de
+  // lista sin IVA, de modo que la cuenta del SAT cierre:
+  // subtotal + IVA - descuento + envío + propina = total cobrado.
+  const storedNetCents = cents(input.order.subtotal) - deliveryCents;
+  const itemsGrossCents = input.order.items.reduce(
+    (sum, item) => sum + cents(item.subtotal),
+    0,
+  );
+  const netItemsCents =
+    cents(input.order.subtotal) > 0
+      ? Math.max(0, storedNetCents)
+      : Math.max(0, itemsGrossCents - taxCents);
+  const subtotalCents = netItemsCents + discountCents;
+
+  for (const field of TOTAL_FIELD_ORDER) {
+    if (!fields.has(field)) continue;
+
     if (field === 'subtotal') {
       builder.push(
         pad('Subtotal', money((subtotalCents / 100).toFixed(2), input.currency)),
       );
     }
 
-    if (field === 'tax' && cents(input.order.taxTotal) > 0) {
-      builder.push(pad('IVA incluido', money(input.order.taxTotal, input.currency)));
+    if (field === 'tax' && taxCents > 0) {
+      builder.push(
+        pad('IVA', money((taxCents / 100).toFixed(2), input.currency)),
+      );
     }
 
-    if (field === 'delivery' && cents(input.order.deliveryFee) > 0) {
-      builder.push(pad('Envío', money(input.order.deliveryFee, input.currency)));
+    if (field === 'discount' && discountCents > 0) {
+      builder.push(
+        pad(
+          'Descuento',
+          `-${money((discountCents / 100).toFixed(2), input.currency)}`,
+        ),
+      );
+    }
+
+    if (field === 'delivery' && deliveryCents > 0) {
+      builder.push(
+        pad('Envío', money((deliveryCents / 100).toFixed(2), input.currency)),
+      );
     }
 
     if (field === 'tip' && tipCents > 0) {

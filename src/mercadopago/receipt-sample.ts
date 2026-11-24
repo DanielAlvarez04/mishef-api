@@ -25,6 +25,7 @@ export function sampleReceiptInput(business: {
       issuedAt: new Date(),
       subtotal: '172.41',
       taxTotal: '27.59',
+      discountTotal: '0.00',
       deliveryFee: '0.00',
       total: '200.00',
       items: [

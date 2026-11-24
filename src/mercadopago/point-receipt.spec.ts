@@ -23,6 +23,7 @@ const base: PointReceiptInput = {
     issuedAt: new Date('2026-11-24T19:45:00Z'),
     subtotal: '103.45',
     taxTotal: '16.55',
+    discountTotal: '0.00',
     deliveryFee: '0.00',
     total: '120.00',
     items: [
@@ -91,13 +92,99 @@ describe('buildPointReceipt', () => {
 
     const subtotal = lines.find((line) => line.startsWith('Subtotal'));
     expect(subtotal).toBeDefined();
-    expect(subtotal?.endsWith('$120.00')).toBe(true);
+    expect(subtotal?.endsWith('$103.45')).toBe(true);
     expect(subtotal?.length).toBe(32);
+
+    const tax = lines.find((line) => line.startsWith('IVA'));
+    expect(tax).toBeDefined();
+    expect(tax?.endsWith('$16.55')).toBe(true);
+    expect(tax?.length).toBe(32);
 
     const payment = lines.find((line) => line.startsWith('Efectivo'));
     expect(payment).toBeDefined();
     expect(payment?.endsWith('$120.00')).toBe(true);
     expect(payment?.length).toBe(32);
+  });
+
+  it('desglosa subtotal sin IVA, IVA, descuento, propina y total', () => {
+    const content = buildPointReceipt({
+      ...base,
+      order: {
+        ...base.order,
+        subtotal: '155.17',
+        taxTotal: '24.83',
+        discountTotal: '20.00',
+        total: '180.00',
+        payments: [
+          { method: 'CASH', amount: '180.00', tipAmount: '10.00' },
+        ],
+      },
+    });
+    const lines = content
+      .split('{br}')
+      .map((line) => line.replace(/\{[^}]*\}/g, ''));
+    const find = (prefix: string) => {
+      const line = lines.find((entry) => entry.startsWith(prefix));
+      expect(line).toBeDefined();
+      return line as string;
+    };
+
+    expect(find('Subtotal').endsWith('$175.17')).toBe(true);
+    expect(find('IVA').endsWith('$24.83')).toBe(true);
+    expect(find('Descuento').endsWith('-$20.00')).toBe(true);
+    expect(find('Propina').endsWith('$10.00')).toBe(true);
+    expect(find('TOTAL COBRADO').endsWith('$190.00')).toBe(true);
+
+    // Orden fiscal: subtotal, IVA, descuento, propina y total.
+    const order = ['Subtotal', 'IVA', 'Descuento', 'Propina', 'TOTAL COBRADO'].map(
+      (prefix) => lines.indexOf(find(prefix)),
+    );
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+
+  it('agrega el descuento a las plantillas guardadas sin ese campo', () => {
+    const legacy = { ...defaultReceiptTemplate(), version: 1 as const };
+    legacy.blocks = legacy.blocks.map((block) =>
+      block.type === 'totals'
+        ? {
+            ...block,
+            fields: ['subtotal', 'tax', 'delivery', 'tip', 'total'],
+          }
+        : block,
+    );
+
+    const parsed = receiptTemplateSchema.parse(legacy);
+    const totals = parsed.blocks.find((block) => block.type === 'totals');
+
+    expect(parsed.version).toBe(2);
+    expect(totals?.type).toBe('totals');
+    expect(totals?.type === 'totals' ? totals.fields : []).toEqual([
+      'subtotal',
+      'tax',
+      'discount',
+      'delivery',
+      'tip',
+      'total',
+    ]);
+  });
+
+  it('respeta una plantilla versión 2 que apaga el descuento', () => {
+    const template = defaultReceiptTemplate();
+    template.blocks = template.blocks.map((block) =>
+      block.type === 'totals'
+        ? {
+            ...block,
+            fields: ['subtotal', 'tax', 'delivery', 'tip', 'total'],
+          }
+        : block,
+    );
+
+    const parsed = receiptTemplateSchema.parse(template);
+    const totals = parsed.blocks.find((block) => block.type === 'totals');
+
+    expect(totals?.type === 'totals' ? totals.fields : []).not.toContain(
+      'discount',
+    );
   });
 
   it('quita llaves de los nombres para no romper las etiquetas', () => {
@@ -171,7 +258,7 @@ describe('buildPointReceipt', () => {
     const result = renderReceiptText(template, base);
 
     expect(result.content).not.toContain('Cliente:');
-    expect(result.content).not.toContain('IVA incluido');
+    expect(result.content).not.toContain('IVA');
     expect(result.content).not.toContain('Propina');
   });
 

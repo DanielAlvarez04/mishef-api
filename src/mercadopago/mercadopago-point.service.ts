@@ -418,6 +418,7 @@ export class MercadoPagoPointService {
                 variantName: true,
                 quantity: true,
                 subtotal: true,
+                discountAmount: true,
               },
             },
           },
@@ -455,6 +456,13 @@ export class MercadoPagoPointService {
       order.branch?.receiptTemplate,
     );
 
+    const discountTotal = order.rounds
+      .flatMap((round) => round.items)
+      .reduce(
+        (sum, item) => sum.plus(item.discountAmount),
+        new Prisma.Decimal(0),
+      );
+
     const result = await this.receiptPrint.print({
       organizationId,
       branchId: order.branchId,
@@ -475,6 +483,7 @@ export class MercadoPagoPointService {
           issuedAt,
           subtotal: order.subtotal.toFixed(2),
           taxTotal: order.taxTotal.toFixed(2),
+          discountTotal: discountTotal.toFixed(2),
           deliveryFee: order.deliveryFee.toFixed(2),
           total: order.total.toFixed(2),
           items: order.rounds.flatMap((round) =>
