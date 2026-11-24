@@ -3,7 +3,7 @@
  *
  * Mercado Pago recibe texto con etiquetas propias (`{b}`, `{w}`, `{s}`,
  * `{br}`, `{left}`, `{center}`). El contenido debe medir entre 100 y 4096
- * caracteres y el papel imprimible es de 42 columnas en letra pequeña.
+ * caracteres y el papel imprimible es de 32 columnas en letra normal.
  */
 
 import { z } from 'zod';
@@ -221,10 +221,10 @@ export interface ReceiptRenderResult {
   warnings: string[];
 }
 
-const LINE_WIDTH = 42;
+const LINE_WIDTH = 32;
 const MAX_CONTENT = 4096;
 const CONTENT_BUDGET = 3700;
-const MAX_ITEM_LINES = 40;
+const MAX_ITEM_LINES = 25;
 
 const PAYMENT_METHOD_LABELS: Record<string, string> = {
   CASH: 'Efectivo',
@@ -428,8 +428,7 @@ class ReceiptTextBuilder {
     size: ReceiptSize,
     bold: boolean,
   ): void {
-    const width =
-      size === 'small' ? LINE_WIDTH : size === 'large' ? 18 : 32;
+    const width = size === 'large' ? 18 : LINE_WIDTH;
 
     for (const line of wrapText(text, width)) {
       this.push(styledLine(line, align, size, bold));
@@ -519,7 +518,14 @@ function renderTicketBlock(
   }
 
   if (parts.length > 0) {
-    builder.push(styledLine(parts.join(' - '), block.align, 'small', false));
+    builder.push(
+      styledLine(
+        truncate(parts.join(' - '), LINE_WIDTH),
+        block.align,
+        'small',
+        false,
+      ),
+    );
   }
 }
 
@@ -572,11 +578,25 @@ function renderItemsBlock(
     const label = block.showQuantity
       ? `${item.quantity} x ${name}${variant}`
       : `${name}${variant}`;
-    const line = block.showLineTotal
-      ? pad(label, money(item.subtotal, input.currency))
-      : label;
+    let pushed = false;
 
-    if (!builder.push(`{s}${line}{/s}`)) break;
+    if (block.showLineTotal) {
+      const amount = money(item.subtotal, input.currency);
+
+      if (label.length + amount.length + 1 > LINE_WIDTH) {
+        // El nombre y el precio no caben en 32 columnas: el precio va en su
+        // propia línea, alineado a la derecha.
+        pushed =
+          builder.push(`{s}${truncate(label, LINE_WIDTH)}{/s}`) &&
+          builder.push(`{s}${pad('', amount)}{/s}`);
+      } else {
+        pushed = builder.push(`{s}${pad(label, amount)}{/s}`);
+      }
+    } else {
+      pushed = builder.push(`{s}${truncate(label, LINE_WIDTH)}{/s}`);
+    }
+
+    if (!pushed) break;
 
     rendered += 1;
   }

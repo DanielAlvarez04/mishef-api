@@ -64,6 +64,15 @@ describe('buildPointReceipt', () => {
     expect(content.length).toBeLessThanOrEqual(4096);
   });
 
+  it('no excede las 32 columnas visibles del papel', () => {
+    const content = buildPointReceipt(base);
+
+    for (const line of content.split('{br}')) {
+      const visible = line.replace(/\{[^}]*\}/g, '');
+      expect(visible.length).toBeLessThanOrEqual(32);
+    }
+  });
+
   it('quita llaves de los nombres para no romper las etiquetas', () => {
     const content = buildPointReceipt({
       ...base,

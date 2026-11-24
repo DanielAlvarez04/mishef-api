@@ -7,7 +7,6 @@ import {
 import { randomUUID } from 'node:crypto';
 
 import { PrismaService } from '../prisma/prisma.service';
-import { getR2Object } from '../uploads/r2';
 import { MercadoPagoClient } from './mercadopago.client';
 import { MercadoPagoTokenService } from './mercadopago-token.service';
 import {
@@ -38,16 +37,14 @@ export interface PointReceiptPrintResult {
 }
 
 /**
- * Envía el ticket (y opcionalmente el logo) a una terminal Point Smart.
+ * Envía el ticket a una terminal Point Smart.
  *
- * El logo se manda como una acción `image` y el ticket como `custom`. Son dos
- * trabajos de impresión; el switch de la plantilla decide si se manda el logo.
+ * El ticket es una acción `custom` con texto y etiquetas. El logo ya no se
+ * imprime en el ticket; el logo del negocio se usa solo en la app.
  */
 @Injectable()
 export class PointReceiptPrintService {
   private readonly logger = new Logger(PointReceiptPrintService.name);
-  private readonly logoCache = new Map<string, string>();
-  private readonly maxLogoCacheEntries = 200;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -70,64 +67,10 @@ export class PointReceiptPrintService {
 
     const accessToken = await this.tokens.getAccessToken(input.organizationId);
     const warnings: string[] = [];
-    let logo: { printed: boolean; error?: string } | null = null;
     const uniqueReference = `${input.reference.slice(0, 50)}-${randomUUID().slice(
       0,
       8,
     )}`;
-
-    if (input.template.printLogo) {
-      const logoKey =
-        input.logoReceiptKey === undefined
-          ? await this.logoKey(input.organizationId)
-          : input.logoReceiptKey;
-
-      if (logoKey) {
-        try {
-          const base64 = await this.logoBase64(logoKey);
-
-          if (!base64) {
-            logo = { printed: false, error: 'El logo no está en R2.' };
-          } else if (base64.length > 1_000_000) {
-            logo = {
-              printed: false,
-              error: 'El JPEG del logo supera 1 MB.',
-            };
-          } else {
-            await this.client.createPrintAction(
-              accessToken,
-              {
-                type: 'print',
-                external_reference: this.reference(
-                  `logo-${uniqueReference}`,
-                ),
-                config: {
-                  point: {
-                    terminal_id: terminal.terminalId,
-                    subtype: 'image',
-                  },
-                },
-                content: base64,
-              },
-              randomUUID(),
-            );
-
-            logo = { printed: true };
-          }
-        } catch (error) {
-          logo = { printed: false, error: (error as Error).message };
-          this.logger.warn(
-            `No se pudo imprimir el logo (org=${input.organizationId}, terminal=${
-              terminal.terminalId
-            }): ${(error as Error).message}`,
-          );
-        }
-      } else {
-        logo = { printed: false, error: 'El negocio no tiene logo de recibo.' };
-      }
-    }
-
-    if (logo?.error) warnings.push(`Logo: ${logo.error}`);
 
     const rendered = renderReceiptText(input.template, input.receipt);
     warnings.push(...rendered.warnings);
@@ -151,7 +94,7 @@ export class PointReceiptPrintService {
 
       return {
         terminalId: terminal.terminalId,
-        logo,
+        logo: null,
         ticket: { actionId: action.id, status: action.status },
         warnings,
       };
@@ -168,33 +111,6 @@ export class PointReceiptPrintService {
         }. Verifica que sea Point Smart 1/2 y que la impresión personalizada esté habilitada.`,
       );
     }
-  }
-
-  private async logoKey(organizationId: string): Promise<string | null> {
-    const organization = await this.prisma.organization.findUnique({
-      where: { id: organizationId },
-      select: { logoReceiptKey: true },
-    });
-
-    return organization?.logoReceiptKey ?? null;
-  }
-
-  private async logoBase64(key: string): Promise<string | null> {
-    const cached = this.logoCache.get(key);
-    if (cached) return cached;
-
-    const buffer = await getR2Object(key);
-    if (!buffer) return null;
-
-    const base64 = buffer.toString('base64');
-    this.logoCache.set(key, base64);
-
-    if (this.logoCache.size > this.maxLogoCacheEntries) {
-      const oldest = this.logoCache.keys().next().value;
-      if (oldest) this.logoCache.delete(oldest);
-    }
-
-    return base64;
   }
 
   private reference(value: string): string {
