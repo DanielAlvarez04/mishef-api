@@ -24,8 +24,12 @@
  * de acumular pedidos, caja o asistencia.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, symlinkSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import {
+  existsSync,
+  mkdirSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { config } from 'dotenv';
 import { hash } from 'argon2';
@@ -51,8 +55,13 @@ const USERNAME = process.env.DEMO_USERNAME?.trim().toLowerCase() || 'admin';
  *
  * En local `src` y `ts-node` ya están. En el contenedor de producción no:
  * `src` se enlaza a `dist/src` (los archivos compilados) y `ts-node` se instala
- * temporalmente. El próximo deploy reinicia el contenedor y lo deja limpio.
+ * en `.seed-deps` para no tocar el `node_modules` de la API. El próximo deploy
+ * reinicia el contenedor y lo deja limpio.
  */
+const SEED_DEPS_DIR = '.seed-deps';
+const SEED_TS_NODE = 'ts-node@10.9.2';
+const SEED_TYPESCRIPT = 'typescript@5.6.3';
+
 function prepareSeed() {
   if (!existsSync('src') && existsSync('dist/src')) {
     try {
@@ -65,32 +74,49 @@ function prepareSeed() {
     }
   }
 
-  if (existsSync('node_modules/ts-node')) return;
+  // En local están las devDependencies: se usa el binario del proyecto.
+  const localBin = 'node_modules/ts-node/dist/bin.js';
+  if (existsSync(localBin)) return localBin;
 
-  if (process.env.NODE_ENV !== 'production') {
-    throw new Error(
-      'Falta ts-node. Ejecuta `npm install --legacy-peer-deps` en api/.',
-    );
+  const seedBin = `${SEED_DEPS_DIR}/node_modules/ts-node/dist/bin.js`;
+
+  if (!existsSync(seedBin)) {
+    mkdirSync(SEED_DEPS_DIR, { recursive: true });
+    writeFileSync(`${SEED_DEPS_DIR}/package.json`, '{"private":true}\n');
+
+    console.log('Instalando ts-node temporalmente dentro del contenedor…');
+    try {
+      execFileSync(
+        'npm',
+        [
+          'install',
+          '--prefix',
+          SEED_DEPS_DIR,
+          '--no-save',
+          '--legacy-peer-deps',
+          '--no-audit',
+          '--no-fund',
+          SEED_TS_NODE,
+          SEED_TYPESCRIPT,
+        ],
+        {
+          stdio: 'inherit',
+          // `NODE_ENV=production` haría que npm omitiera estas devDependencies.
+          env: { ...process.env, NODE_ENV: 'development' },
+        },
+      );
+    } catch {
+      throw new Error(
+        'No se pudo instalar ts-node. Ejecuta el contenedor como root: docker exec -u 0 ...',
+      );
+    }
   }
 
-  console.log('Instalando ts-node temporalmente dentro del contenedor…');
-  try {
-    execFileSync(
-      'npm',
-      [
-        'install',
-        '--no-save',
-        '--legacy-peer-deps',
-        'ts-node',
-        'typescript',
-      ],
-      { stdio: 'inherit' },
-    );
-  } catch {
-    throw new Error(
-      'No se pudo instalar ts-node. Ejecuta el contenedor como root: docker exec -u 0 ...',
-    );
+  if (!existsSync(seedBin)) {
+    throw new Error('ts-node no quedó instalado en .seed-deps');
   }
+
+  return seedBin;
 }
 
 // Se mantiene sincronizado con src/common/features.ts.
@@ -124,7 +150,7 @@ async function main() {
     throw new Error('Falta DATABASE_URL en api/.env');
   }
 
-  prepareSeed();
+  const tsNodeBin = prepareSeed();
 
   const featureOverrides = Object.fromEntries(
     FEATURE_KEYS.map((key) => [key, true]),
@@ -228,10 +254,6 @@ async function main() {
 
   // Llena catálogo, inventario y menús con el seed existente. Ese script borra
   // las sucursales de la organización, por eso la creamos después.
-  // Se ejecuta el binario de `ts-node` con el mismo Node para que funcione en
-  // Windows (los `.cmd` de npx fallan con `spawnSync` sin shell).
-  const require = createRequire(import.meta.url);
-  const tsNodeBin = require.resolve('ts-node/dist/bin.js');
   const seedTestUser = fileURLToPath(
     new URL('./seed-test-user.ts', import.meta.url),
   );
