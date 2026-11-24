@@ -5,20 +5,26 @@
  * - Usuario dueño, membresía ADMIN y sucursal principal.
  * - Ejecuta `seed-test-user.ts` para llenar catálogo, inventario y menús.
  *
- * Uso (desde api/, con devDependencies instaladas y DATABASE_URL de producción):
+ * Uso (desde api/, con devDependencies instaladas y DATABASE_URL local o de
+ * producción):
  *   npm run demo:seed
  *   DEMO_PASSWORD="..." npm run demo:seed
  *
- * No se ejecuta dentro del contenedor de producción: la imagen solo instala
- * dependencias de producción y no incluye `ts-node`. Usa un túnel SSH a la
- * base o ejecútalo desde tu máquina con la `DATABASE_URL` de producción.
+ * `demo` es una palabra reservada para altas normales, pero la API la resuelve
+ * como tenant de demostración mediante `DEMO_TENANT_SLUGS` (por defecto
+ * `demo`). El seed crea la organización directamente en la base.
+ *
+ * No se ejecuta dentro del contenedor de producción tal cual: la imagen solo
+ * instala dependencias de producción y no incluye `ts-node`. Usa un túnel SSH a
+ * la base o ejecútalo desde tu máquina con la `DATABASE_URL` de producción.
  *
  * Es idempotente para la organización, el usuario y la sucursal. El seed de
  * catálogo borra los datos de negocio, así que la demo debe reiniciarse antes
  * de acumular pedidos, caja o asistencia.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, symlinkSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { config } from 'dotenv';
 import { hash } from 'argon2';
 import { PrismaClient } from '@prisma/client';
@@ -37,6 +43,53 @@ const PASSWORD =
   `Demo-${Math.random().toString(36).slice(2, 10)}!`;
 const NAME = process.env.DEMO_NAME?.trim() || 'Negocio Demo';
 const USERNAME = process.env.DEMO_USERNAME?.trim().toLowerCase() || 'admin';
+
+/**
+ * Prepara las dependencias que solo existen en desarrollo.
+ *
+ * En local `src` y `ts-node` ya están. En el contenedor de producción no:
+ * `src` se enlaza a `dist/src` (los archivos compilados) y `ts-node` se instala
+ * temporalmente. El próximo deploy reinicia el contenedor y lo deja limpio.
+ */
+function prepareSeed() {
+  if (!existsSync('src') && existsSync('dist/src')) {
+    try {
+      symlinkSync('dist/src', 'src', 'dir');
+      console.log('Enlace src -> dist/src creado para el seed.');
+    } catch {
+      throw new Error(
+        'No se pudo crear el enlace src. Ejecuta el contenedor como root: docker exec -u 0 ...',
+      );
+    }
+  }
+
+  if (existsSync('node_modules/ts-node')) return;
+
+  if (process.env.NODE_ENV !== 'production') {
+    throw new Error(
+      'Falta ts-node. Ejecuta `npm install --legacy-peer-deps` en api/.',
+    );
+  }
+
+  console.log('Instalando ts-node temporalmente dentro del contenedor…');
+  try {
+    execFileSync(
+      'npm',
+      [
+        'install',
+        '--no-save',
+        '--legacy-peer-deps',
+        'ts-node',
+        'typescript',
+      ],
+      { stdio: 'inherit' },
+    );
+  } catch {
+    throw new Error(
+      'No se pudo instalar ts-node. Ejecuta el contenedor como root: docker exec -u 0 ...',
+    );
+  }
+}
 
 // Se mantiene sincronizado con src/common/features.ts.
 const FEATURE_KEYS = [
@@ -69,11 +122,7 @@ async function main() {
     throw new Error('Falta DATABASE_URL en api/.env');
   }
 
-  if (!existsSync(`${process.cwd()}/node_modules/ts-node`)) {
-    throw new Error(
-      'Este seed necesita ts-node (devDependencies). Ejecútalo desde api/ en tu máquina con la DATABASE_URL de producción, no dentro del contenedor.',
-    );
-  }
+  prepareSeed();
 
   const featureOverrides = Object.fromEntries(
     FEATURE_KEYS.map((key) => [key, true]),
@@ -177,10 +226,14 @@ async function main() {
 
   // Llena catálogo, inventario y menús con el seed existente. Ese script borra
   // las sucursales de la organización, por eso la creamos después.
+  // Se ejecuta el binario de `ts-node` con el mismo Node para que funcione en
+  // Windows (los `.cmd` de npx fallan con `spawnSync` sin shell).
+  const require = createRequire(import.meta.url);
+  const tsNodeBin = require.resolve('ts-node/dist/bin.js');
   console.log('Sembrando catálogo completo…');
   execFileSync(
-    process.platform === 'win32' ? 'npx.cmd' : 'npx',
-    ['ts-node', '--transpile-only', 'scripts/seed-test-user.ts', EMAIL],
+    process.execPath,
+    [tsNodeBin, '--transpile-only', 'scripts/seed-test-user.ts', EMAIL],
     { stdio: 'inherit', cwd: process.cwd(), env: process.env },
   );
 

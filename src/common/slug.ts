@@ -119,6 +119,32 @@ const RESERVED_WORDS = [
 export const RESERVED_SLUGS = new Set(RESERVED_WORDS);
 
 /**
+ * Slugs reservados que sí pueden resolver como negocio.
+ *
+ * Solo se usa para demos controladas (por defecto `demo`). Las altas normales
+ * siguen pasando por `isValidSlug`, así que un cliente no puede reclamar
+ * `demo`, `api` ni ningún otro reservado. Configurable con
+ * `DEMO_TENANT_SLUGS=demo,otra-demo`; vacío desactiva la excepción.
+ *
+ * Se lee en la primera petición, no al importar el módulo, para que `dotenv`
+ * ya haya cargado el `.env` en desarrollo.
+ */
+let resolvableReservedSlugs: Set<string> | null = null;
+
+function getResolvableReservedSlugs(): Set<string> {
+  if (!resolvableReservedSlugs) {
+    resolvableReservedSlugs = new Set(
+      (process.env.DEMO_TENANT_SLUGS ?? 'demo')
+        .split(',')
+        .map((value) => normalizeSlug(value))
+        .filter(Boolean),
+    );
+  }
+
+  return resolvableReservedSlugs;
+}
+
+/**
  * Normaliza una dirección escrita por el usuario: mayúsculas, acentos,
  * espacios y guiones repetidos.
  */
@@ -145,4 +171,24 @@ export function isValidSlug(slug: string): boolean {
   // Solo minúsculas, números y guiones; sin guion al inicio o al final y sin
   // guiones consecutivos (un subdominio con `--` es válido pero confuso).
   return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug);
+}
+
+/**
+ * `true` si el slug puede resolver un negocio, aunque esté reservado.
+ *
+ * Se usa al resolver el tenant (subdominio y Google), no al crear o cambiar la
+ * dirección de un negocio: esas rutas siguen usando `isValidSlug`.
+ */
+export function isResolvableTenantSlug(slug: string): boolean {
+  if (!slug) return false;
+
+  if (getResolvableReservedSlugs().has(slug)) {
+    return (
+      slug.length >= MIN_SLUG_LENGTH &&
+      slug.length <= MAX_SLUG_LENGTH &&
+      /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)
+    );
+  }
+
+  return isValidSlug(slug);
 }

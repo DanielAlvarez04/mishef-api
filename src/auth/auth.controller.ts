@@ -37,7 +37,7 @@ import { JwtUser } from './auth.service';
 import { ConfigService } from '@nestjs/config';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { permissionsForRoles } from '../common/permissions';
-import { isValidSlug, normalizeSlug } from '../common/slug';
+import { isResolvableTenantSlug, normalizeSlug } from '../common/slug';
 import { TurnstileService } from '../common/turnstile.service';
 
 const ACCESS_TOKEN_COOKIE = 'np_at';
@@ -109,7 +109,7 @@ export class AuthController {
 
     const tenantSlug = tenant ? normalizeSlug(tenant) : '';
 
-    if (tenantSlug && isValidSlug(tenantSlug)) {
+    if (tenantSlug && isResolvableTenantSlug(tenantSlug)) {
       res.cookie(
         OAUTH_TENANT_COOKIE,
         tenantSlug,
@@ -158,7 +158,7 @@ export class AuthController {
     const isLinkFlow = req.cookies?.[OAUTH_LINK_COOKIE] === '1';
     const rawTenant = req.cookies?.[OAUTH_TENANT_COOKIE];
     const tenant =
-      rawTenant && isValidSlug(normalizeSlug(rawTenant))
+      rawTenant && isResolvableTenantSlug(normalizeSlug(rawTenant))
         ? normalizeSlug(rawTenant)
         : null;
     const tenantDomain = (

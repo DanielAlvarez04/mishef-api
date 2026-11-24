@@ -18,6 +18,7 @@ import {
 import {
   MAX_SLUG_LENGTH,
   RESERVED_SLUGS,
+  isResolvableTenantSlug,
   isValidSlug,
   normalizeSlug,
 } from '../common/slug';
@@ -261,7 +262,7 @@ export class OrganizationsService {
   async tenant(rawSlug: string) {
     const slug = normalizeSlug(rawSlug ?? '');
 
-    if (!isValidSlug(slug)) {
+    if (!isResolvableTenantSlug(slug)) {
       throw new NotFoundException('Negocio no encontrado');
     }
 
