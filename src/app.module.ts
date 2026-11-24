@@ -36,6 +36,7 @@ import { PasswordChangeInterceptor } from './auth/password-change.interceptor';
 import { TenantScopeInterceptor } from './auth/tenant-scope.interceptor';
 import { FiscalModule } from './fiscal/fiscal.module';
 import { MediaModule } from './media/media.module';
+import { ReceiptsModule } from './receipts/receipts.module';
 
 @Module({
   imports: [
@@ -71,6 +72,7 @@ import { MediaModule } from './media/media.module';
     BillingModule,
     FeaturesModule,
     MediaModule,
+    ReceiptsModule,
     FiscalModule,
     HealthModule,
   ],

@@ -205,10 +205,11 @@ export class MercadoPagoClient {
   }
 
   /**
-   * Imprime contenido personalizado en una terminal Point Smart.
+   * Imprime contenido personalizado o una imagen en una terminal Point Smart.
    *
    * Requiere que Mercado Pago haya habilitado la impresión personalizada en el
-   * equipo. El contenido usa las etiquetas propias de MP (`{b}`, `{br}`, ...).
+   * equipo. `custom` usa las etiquetas propias de MP (`{b}`, `{br}`, ...);
+   * `image` recibe un PNG/JPEG en base64 de máximo 1 MB.
    */
   createPrintAction(
     accessToken: string,
@@ -218,7 +219,7 @@ export class MercadoPagoClient {
       config: {
         point: {
           terminal_id: string;
-          subtype: 'custom';
+          subtype: 'custom' | 'image';
         };
       };
       content: string;

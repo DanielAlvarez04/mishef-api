@@ -21,6 +21,8 @@ import { OrganizationsService } from './organizations.service';
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
 import { SetDomainDto } from './dto/set-domain.dto';
 import { ChangeSlugDto } from './dto/change-slug.dto';
+import { PresignImageDto } from '../uploads/dto/presign-image.dto';
+import { FinalizeImageDto } from '../uploads/dto/finalize-image.dto';
 
 @ApiTags('organizations')
 @Controller('organizations')
@@ -32,6 +34,33 @@ export class OrganizationsController {
   @Get('current')
   current(@CurrentUser() user: JwtUser) {
     return this.organizations.current(user.organizationId);
+  }
+
+  @ApiOperation({ summary: 'Firmar la subida del logo del negocio' })
+  @RequirePermissions('organization:manage')
+  @Post('current/logo')
+  presignLogo(
+    @CurrentUser() user: JwtUser,
+    @Body() dto: PresignImageDto,
+  ) {
+    return this.organizations.presignLogo(user.organizationId, dto);
+  }
+
+  @ApiOperation({ summary: 'Optimizar y guardar el logo del negocio' })
+  @RequirePermissions('organization:manage')
+  @Post('current/logo/finalize')
+  finalizeLogo(
+    @CurrentUser() user: JwtUser,
+    @Body() dto: FinalizeImageDto,
+  ) {
+    return this.organizations.finalizeLogo(user.organizationId, dto.key);
+  }
+
+  @ApiOperation({ summary: 'Quitar el logo del negocio' })
+  @RequirePermissions('organization:manage')
+  @Delete('current/logo')
+  removeLogo(@CurrentUser() user: JwtUser) {
+    return this.organizations.removeLogo(user.organizationId);
   }
 
   @ApiOperation({ summary: 'Comprobar disponibilidad de un dominio' })

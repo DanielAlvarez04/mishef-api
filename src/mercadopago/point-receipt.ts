@@ -1,11 +1,184 @@
 /**
- * Ticket itemizado para imprimir en una terminal Point Smart.
+ * Plantilla y renderer del ticket que se imprime en una terminal Point Smart.
  *
- * La API de impresión personalizada de Mercado Pago recibe texto con etiquetas
- * propias (`{b}`, `{w}`, `{s}`, `{br}`, `{center}`, ...). El contenido debe
- * medir entre 100 y 4096 caracteres, por eso se construye con presupuesto y se
- * recorta a un ancho de 42 columnas para el papel de 58 mm.
+ * Mercado Pago recibe texto con etiquetas propias (`{b}`, `{w}`, `{s}`,
+ * `{br}`, `{left}`, `{center}`). El contenido debe medir entre 100 y 4096
+ * caracteres y el papel imprimible es de 42 columnas en letra pequeña.
  */
+
+import { z } from 'zod';
+
+export type ReceiptAlign = 'left' | 'center';
+export type ReceiptSize = 'small' | 'normal' | 'large';
+
+const receiptAlignSchema = z.enum(['left', 'center']);
+const receiptSizeSchema = z.enum(['small', 'normal', 'large']);
+
+const orderFieldSchema = z.enum(['place', 'partySize', 'customer']);
+const totalFieldSchema = z.enum([
+  'subtotal',
+  'tax',
+  'delivery',
+  'tip',
+  'total',
+]);
+
+const blockBase = {
+  id: z.string().min(1).max(40),
+};
+
+const businessBlockSchema = z.object({
+  ...blockBase,
+  type: z.literal('business'),
+  showName: z.boolean(),
+  showBranch: z.boolean(),
+  showAddress: z.boolean(),
+  align: receiptAlignSchema,
+});
+
+const ticketBlockSchema = z.object({
+  ...blockBase,
+  type: z.literal('ticket'),
+  showTicket: z.boolean(),
+  showDate: z.boolean(),
+  align: receiptAlignSchema,
+});
+
+const orderBlockSchema = z.object({
+  ...blockBase,
+  type: z.literal('order'),
+  fields: z.array(orderFieldSchema).max(3),
+  align: receiptAlignSchema,
+});
+
+const itemsBlockSchema = z.object({
+  ...blockBase,
+  type: z.literal('items'),
+  showVariant: z.boolean(),
+  showQuantity: z.boolean(),
+  showLineTotal: z.boolean(),
+});
+
+const totalsBlockSchema = z.object({
+  ...blockBase,
+  type: z.literal('totals'),
+  fields: z.array(totalFieldSchema).max(5),
+});
+
+const paymentsBlockSchema = z.object({
+  ...blockBase,
+  type: z.literal('payments'),
+  showMethod: z.boolean(),
+  showAmount: z.boolean(),
+});
+
+const textBlockSchema = z.object({
+  ...blockBase,
+  type: z.literal('text'),
+  text: z.string().max(500),
+  align: receiptAlignSchema,
+  size: receiptSizeSchema,
+  bold: z.boolean(),
+});
+
+const dividerBlockSchema = z.object({
+  ...blockBase,
+  type: z.literal('divider'),
+});
+
+export const receiptBlockSchema = z.discriminatedUnion('type', [
+  businessBlockSchema,
+  ticketBlockSchema,
+  orderBlockSchema,
+  itemsBlockSchema,
+  totalsBlockSchema,
+  paymentsBlockSchema,
+  textBlockSchema,
+  dividerBlockSchema,
+]);
+
+export const receiptTemplateSchema = z.object({
+  version: z.literal(1),
+  /** Imprime el logo como una acción `image` antes del ticket de texto. */
+  printLogo: z.boolean(),
+  blocks: z.array(receiptBlockSchema).min(1).max(40),
+});
+
+export type ReceiptBlock = z.infer<typeof receiptBlockSchema>;
+export type ReceiptTemplate = z.infer<typeof receiptTemplateSchema>;
+
+export const DEFAULT_RECEIPT_TEMPLATE: ReceiptTemplate = {
+  version: 1,
+  printLogo: false,
+  blocks: [
+    {
+      id: 'business',
+      type: 'business',
+      showName: true,
+      showBranch: true,
+      showAddress: true,
+      align: 'center',
+    },
+    {
+      id: 'ticket',
+      type: 'ticket',
+      showTicket: true,
+      showDate: true,
+      align: 'center',
+    },
+    { id: 'divider-1', type: 'divider' },
+    {
+      id: 'order',
+      type: 'order',
+      fields: ['place', 'partySize', 'customer'],
+      align: 'left',
+    },
+    {
+      id: 'items-title',
+      type: 'text',
+      text: 'PRODUCTOS',
+      align: 'left',
+      size: 'normal',
+      bold: true,
+    },
+    {
+      id: 'items',
+      type: 'items',
+      showVariant: true,
+      showQuantity: true,
+      showLineTotal: true,
+    },
+    { id: 'divider-2', type: 'divider' },
+    {
+      id: 'totals',
+      type: 'totals',
+      fields: ['subtotal', 'tax', 'delivery', 'tip', 'total'],
+    },
+    {
+      id: 'payments-title',
+      type: 'text',
+      text: 'PAGOS',
+      align: 'left',
+      size: 'normal',
+      bold: true,
+    },
+    {
+      id: 'payments',
+      type: 'payments',
+      showMethod: true,
+      showAmount: true,
+    },
+    { id: 'divider-3', type: 'divider' },
+    {
+      id: 'footer',
+      type: 'text',
+      text: '¡Gracias por su visita!',
+      align: 'center',
+      size: 'normal',
+      bold: false,
+    },
+  ],
+};
 
 export interface PointReceiptItem {
   name: string;
@@ -43,9 +216,13 @@ export interface PointReceiptInput {
   };
 }
 
+export interface ReceiptRenderResult {
+  content: string;
+  warnings: string[];
+}
+
 const LINE_WIDTH = 42;
 const MAX_CONTENT = 4096;
-/** Se deja espacio para totales y pie antes de llegar al límite de MP. */
 const CONTENT_BUDGET = 3700;
 const MAX_ITEM_LINES = 40;
 
@@ -65,6 +242,25 @@ const DATE_FORMATTER = new Intl.DateTimeFormat('es-MX', {
 });
 
 const moneyFormatters = new Map<string, Intl.NumberFormat>();
+
+/** Plantilla por defecto clonada para que el editor pueda modificarla. */
+export function defaultReceiptTemplate(): ReceiptTemplate {
+  return JSON.parse(JSON.stringify(DEFAULT_RECEIPT_TEMPLATE)) as ReceiptTemplate;
+}
+
+/** Valida una plantilla. Lanza si no cumple el esquema. */
+export function parseReceiptTemplate(value: unknown): ReceiptTemplate {
+  return receiptTemplateSchema.parse(value);
+}
+
+/** Plantilla guardada o la default si está vacía/es inválida. */
+export function receiptTemplateOrDefault(value: unknown): ReceiptTemplate {
+  if (value === null || value === undefined) return defaultReceiptTemplate();
+
+  const parsed = receiptTemplateSchema.safeParse(value);
+
+  return parsed.success ? parsed.data : defaultReceiptTemplate();
+}
 
 function money(value: string, currency: string): string {
   const amount = Number(value);
@@ -125,7 +321,7 @@ function pad(left: string, right: string): string {
 }
 
 function placeLabel(order: PointReceiptInput['order']): string {
-  const place = order.tableNumber
+  return order.tableNumber
     ? `Mesa ${order.tableNumber}`
     : order.isTakeaway || order.channel === 'COUNTER'
       ? 'Mostrador'
@@ -134,178 +330,498 @@ function placeLabel(order: PointReceiptInput['order']): string {
         : order.channel === 'PHONE'
           ? 'Teléfono'
           : 'Mostrador';
-
-  if (order.isTakeaway || order.channel !== 'DINE_IN' || order.partySize <= 1) {
-    return place;
-  }
-
-  return `${place} - ${order.partySize} personas`;
 }
 
-/**
- * Construye el contenido del ticket.
- *
- * Es una función pura para poder probar el formato sin Mercado Pago ni la base
- * de datos.
- */
-export function buildPointReceipt(input: PointReceiptInput): string {
-  const { order } = input;
-  const currency = input.currency || 'MXN';
+function wrapText(text: string, width: number): string[] {
+  const normalized = sanitize(text);
+
+  if (!normalized) return [''];
+
+  const words = normalized.split(' ');
   const lines: string[] = [];
-  let length = 0;
+  let current = '';
 
-  const push = (line: string): boolean => {
-    const nextLength = length === 0 ? line.length : length + 4 + line.length;
+  for (const word of words) {
+    if (word.length > width) {
+      if (current) {
+        lines.push(current);
+        current = '';
+      }
 
-    if (nextLength > CONTENT_BUDGET) return false;
+      for (let index = 0; index < word.length; index += width) {
+        lines.push(word.slice(index, index + width));
+      }
 
-    lines.push(line);
-    length = nextLength;
+      continue;
+    }
+
+    const next = current ? `${current} ${word}` : word;
+
+    if (next.length > width) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = next;
+    }
+  }
+
+  if (current) lines.push(current);
+
+  return lines.length > 0 ? lines : [''];
+}
+
+function styledLine(
+  text: string,
+  align: ReceiptAlign,
+  size: ReceiptSize,
+  bold: boolean,
+): string {
+  let styled = text;
+
+  if (bold) styled = `{b}${styled}{/b}`;
+  if (size === 'small') styled = `{s}${styled}{/s}`;
+  if (size === 'large') styled = `{w}${styled}{/w}`;
+
+  return align === 'center'
+    ? `{center}${styled}{/center}`
+    : `{left}${styled}{/left}`;
+}
+
+/** Caracteres que el editor debe evitar (emojis, comillas tipográficas...). */
+export function unsupportedReceiptChars(text: string): string[] {
+  const found = new Set<string>();
+
+  for (const char of text) {
+    if (/[\p{L}\p{N}\s.,;:!¡?¿'"()\[\]\-_+*=@#%&$/]/u.test(char)) {
+      continue;
+    }
+
+    found.add(char);
+  }
+
+  return [...found];
+}
+
+class ReceiptTextBuilder {
+  private readonly lines: string[] = [];
+  private length = 0;
+  private skipped = false;
+  readonly warnings: string[] = [];
+
+  push(line: string): boolean {
+    const nextLength = this.length === 0 ? line.length : this.length + 4 + line.length;
+
+    if (nextLength > CONTENT_BUDGET) {
+      this.skipped = true;
+      return false;
+    }
+
+    this.lines.push(line);
+    this.length = nextLength;
     return true;
-  };
+  }
 
-  const organizationName = sanitize(
-    input.organizationName || 'Naranja Pimienta',
-  );
+  /** Agrega un bloque de texto con salto de línea y etiquetas. */
+  pushText(
+    text: string,
+    align: ReceiptAlign,
+    size: ReceiptSize,
+    bold: boolean,
+  ): void {
+    const width =
+      size === 'small' ? LINE_WIDTH : size === 'large' ? 18 : 32;
+
+    for (const line of wrapText(text, width)) {
+      this.push(styledLine(line, align, size, bold));
+    }
+  }
+
+  get content(): string {
+    let content = this.lines.join('{br}');
+
+    if (this.skipped) {
+      this.warnings.push(
+        'El ticket es muy largo: se omitieron bloques para no superar el límite de Mercado Pago.',
+      );
+    }
+
+    if (content.length > MAX_CONTENT) {
+      const safe = content.slice(0, MAX_CONTENT);
+      const cut = safe.lastIndexOf('{br}');
+
+      content = `${
+        cut > 0 ? safe.slice(0, cut) : safe
+      }{br}{center}{s}Ticket incompleto{/s}{/center}{br}`;
+      this.warnings.push('El ticket superó 4096 caracteres y se recortó.');
+    }
+
+    if (content.length < 100) {
+      content += '{br}'.repeat(Math.ceil((100 - content.length) / 4));
+      this.warnings.push(
+        'El ticket es muy corto; se rellenó para cumplir el mínimo de MP.',
+      );
+    }
+
+    return content;
+  }
+}
+
+function renderBusinessBlock(
+  block: Extract<ReceiptBlock, { type: 'business' }>,
+  input: PointReceiptInput,
+  builder: ReceiptTextBuilder,
+): void {
+  const organizationName = sanitize(input.organizationName || 'Naranja Pimienta');
   const branchName = input.branchName ? sanitize(input.branchName) : null;
   const address = sanitize(
     input.branchAddress ?? input.organizationAddress ?? '',
   );
-  const ticket = order.ticketNumber
-    ? `Ticket #${order.ticketNumber}`
-    : 'Cuenta';
-  const date = DATE_FORMATTER.format(order.issuedAt);
 
-  push(`{center}{w}${truncate(organizationName.toUpperCase(), 18)}{/w}{/center}`);
-
-  if (
-    branchName &&
-    branchName.toUpperCase() !== organizationName.toUpperCase()
-  ) {
-    push(`{center}{s}${truncate(branchName, LINE_WIDTH)}{/s}{/center}`);
-  }
-
-  if (address) {
-    push(`{center}{s}${truncate(address, LINE_WIDTH)}{/s}{/center}`);
-  }
-
-  push(`{center}{s}${ticket} - ${date}{/s}{/center}`);
-  push('-'.repeat(LINE_WIDTH));
-  push(`{left}{s}${truncate(placeLabel(order), LINE_WIDTH)}{/s}{/left}`);
-
-  if (order.customerName) {
-    push(
-      `{left}{s}Cliente: ${truncate(
-        sanitize(order.customerName),
-        LINE_WIDTH - 9,
-      )}{/s}{/left}`,
+  if (block.showName) {
+    const line = truncate(organizationName.toUpperCase(), 18);
+    builder.push(
+      block.align === 'center'
+        ? `{center}{w}${line}{/w}{/center}`
+        : `{left}{w}${line}{/w}{/left}`,
     );
   }
 
-  push(`{left}{b}PRODUCTOS{/b}{/left}`);
+  if (
+    block.showBranch &&
+    branchName &&
+    branchName.toUpperCase() !== organizationName.toUpperCase()
+  ) {
+    builder.push(styledLine(branchName, block.align, 'small', false));
+  }
 
-  const visibleItems = order.items.slice(0, MAX_ITEM_LINES);
+  if (block.showAddress && address) {
+    builder.push(styledLine(address, block.align, 'small', false));
+  }
+}
+
+function renderTicketBlock(
+  block: Extract<ReceiptBlock, { type: 'ticket' }>,
+  input: PointReceiptInput,
+  builder: ReceiptTextBuilder,
+): void {
+  const parts: string[] = [];
+
+  if (block.showTicket) {
+    parts.push(
+      input.order.ticketNumber
+        ? `Ticket #${input.order.ticketNumber}`
+        : 'Cuenta',
+    );
+  }
+
+  if (block.showDate) {
+    parts.push(DATE_FORMATTER.format(input.order.issuedAt));
+  }
+
+  if (parts.length > 0) {
+    builder.push(styledLine(parts.join(' - '), block.align, 'small', false));
+  }
+}
+
+function renderOrderBlock(
+  block: Extract<ReceiptBlock, { type: 'order' }>,
+  input: PointReceiptInput,
+  builder: ReceiptTextBuilder,
+): void {
+  const fields = new Set(block.fields);
+  const order = input.order;
+
+  if (fields.has('place')) {
+    let line = placeLabel(order);
+
+    if (fields.has('partySize') && order.partySize > 1) {
+      line += ` - ${order.partySize} personas`;
+    }
+
+    builder.push(styledLine(line, block.align, 'small', false));
+  } else if (fields.has('partySize') && order.partySize > 1) {
+    builder.push(
+      styledLine(`${order.partySize} personas`, block.align, 'small', false),
+    );
+  }
+
+  if (fields.has('customer') && order.customerName) {
+    builder.push(
+      styledLine(
+        `Cliente: ${truncate(sanitize(order.customerName), LINE_WIDTH - 9)}`,
+        block.align,
+        'small',
+        false,
+      ),
+    );
+  }
+}
+
+function renderItemsBlock(
+  block: Extract<ReceiptBlock, { type: 'items' }>,
+  input: PointReceiptInput,
+  builder: ReceiptTextBuilder,
+): void {
+  const visibleItems = input.order.items.slice(0, MAX_ITEM_LINES);
+  let rendered = 0;
 
   for (const item of visibleItems) {
     const name = sanitize(item.name);
-    const variant = item.variant ? ` (${sanitize(item.variant)})` : '';
-    const label = `${item.quantity} x ${name}${variant}`;
+    const variant =
+      block.showVariant && item.variant ? ` (${sanitize(item.variant)})` : '';
+    const label = block.showQuantity
+      ? `${item.quantity} x ${name}${variant}`
+      : `${name}${variant}`;
+    const line = block.showLineTotal
+      ? pad(label, money(item.subtotal, input.currency))
+      : label;
 
-    if (!push(`{s}${pad(label, money(item.subtotal, currency))}{/s}`)) break;
+    if (!builder.push(`{s}${line}{/s}`)) break;
+
+    rendered += 1;
   }
 
-  if (order.items.length > visibleItems.length) {
-    push(`{s}... y ${order.items.length - visibleItems.length} más{/s}`);
+  if (rendered < input.order.items.length) {
+    builder.push(
+      `{s}... y ${input.order.items.length - rendered} más{/s}`,
+    );
   }
+}
 
-  push('-'.repeat(LINE_WIDTH));
+function renderTotalsBlock(
+  block: Extract<ReceiptBlock, { type: 'totals' }>,
+  input: PointReceiptInput,
+  builder: ReceiptTextBuilder,
+): void {
+  const fields = new Set(block.fields);
 
-  // Los precios del catálogo ya incluyen IVA. Se muestra el subtotal de los
-  // productos y el IVA como dato informativo para que las sumas coincidan.
-  const itemsGrossCents = order.items.reduce(
+  if (fields.size === 0) return;
+
+  const itemsGrossCents = input.order.items.reduce(
     (sum, item) => sum + cents(item.subtotal),
     0,
   );
   const subtotalCents =
-    itemsGrossCents > 0 ? itemsGrossCents : cents(order.subtotal);
-
-  push(pad('Subtotal', money((subtotalCents / 100).toFixed(2), currency)));
-
-  if (cents(order.deliveryFee) > 0) {
-    push(pad('Envío', money(order.deliveryFee, currency)));
-  }
-
-  if (cents(order.taxTotal) > 0) {
-    push(pad('IVA incluido', money(order.taxTotal, currency)));
-  }
-
-  const tipCents = order.payments.reduce(
+    itemsGrossCents > 0
+      ? itemsGrossCents
+      : cents(input.order.subtotal);
+  const tipCents = input.order.payments.reduce(
     (sum, payment) => sum + cents(payment.tipAmount),
     0,
   );
-  const totalCents = cents(order.total);
+  const totalCents = cents(input.order.total);
   const grandTotalCents = totalCents + tipCents;
 
-  if (tipCents > 0) {
-    push(
-      pad(
-        'Propina',
-        money((tipCents / 100).toFixed(2), currency),
-      ),
-    );
+  for (const field of block.fields) {
+    if (field === 'subtotal') {
+      builder.push(
+        pad('Subtotal', money((subtotalCents / 100).toFixed(2), input.currency)),
+      );
+    }
+
+    if (field === 'tax' && cents(input.order.taxTotal) > 0) {
+      builder.push(pad('IVA incluido', money(input.order.taxTotal, input.currency)));
+    }
+
+    if (field === 'delivery' && cents(input.order.deliveryFee) > 0) {
+      builder.push(pad('Envío', money(input.order.deliveryFee, input.currency)));
+    }
+
+    if (field === 'tip' && tipCents > 0) {
+      builder.push(
+        pad('Propina', money((tipCents / 100).toFixed(2), input.currency)),
+      );
+    }
+
+    if (field === 'total') {
+      builder.push(
+        `{b}${pad(
+          tipCents > 0 ? 'TOTAL COBRADO' : 'TOTAL',
+          money((grandTotalCents / 100).toFixed(2), input.currency),
+        )}{/b}`,
+      );
+    }
   }
 
-  push(
-    `{b}${pad(
-      tipCents > 0 ? 'TOTAL COBRADO' : 'TOTAL',
-      money((grandTotalCents / 100).toFixed(2), currency),
-    )}{/b}`,
-  );
-
-  const paidCents = order.payments.reduce(
+  const paidCents = input.order.payments.reduce(
     (sum, payment) => sum + cents(payment.amount),
     0,
   );
 
-  if (paidCents < totalCents) {
-    push(pad('Pagado', money((paidCents / 100).toFixed(2), currency)));
-    push(
+  if (fields.has('total') && paidCents < totalCents) {
+    builder.push(
+      pad('Pagado', money((paidCents / 100).toFixed(2), input.currency)),
+    );
+    builder.push(
       pad(
         'Saldo',
-        money(((totalCents - paidCents) / 100).toFixed(2), currency),
+        money(((totalCents - paidCents) / 100).toFixed(2), input.currency),
       ),
     );
   }
+}
 
-  if (order.payments.length > 0) {
-    push(`{left}{b}PAGOS{/b}{/left}`);
+function renderPaymentsBlock(
+  block: Extract<ReceiptBlock, { type: 'payments' }>,
+  input: PointReceiptInput,
+  builder: ReceiptTextBuilder,
+): void {
+  for (const payment of input.order.payments) {
+    const label =
+      PAYMENT_METHOD_LABELS[payment.method] ?? sanitize(payment.method);
+    const amount = money(payment.amount, input.currency);
 
-    for (const payment of order.payments) {
-      const label =
-        PAYMENT_METHOD_LABELS[payment.method] ?? sanitize(payment.method);
+    if (block.showMethod && block.showAmount) {
+      builder.push(`{s}${pad(label, amount)}{/s}`);
+    } else if (block.showMethod) {
+      builder.push(`{s}${label}{/s}`);
+    } else if (block.showAmount) {
+      builder.push(`{s}${amount}{/s}`);
+    }
+  }
+}
 
-      push(`{s}${pad(label, money(payment.amount, currency))}{/s}`);
+/**
+ * Construye el contenido del ticket a partir de la plantilla y los datos.
+ *
+ * Es una función pura para poder probar el formato sin Mercado Pago ni la base
+ * de datos.
+ */
+export function renderReceiptText(
+  template: ReceiptTemplate,
+  input: PointReceiptInput,
+): ReceiptRenderResult {
+  const builder = new ReceiptTextBuilder();
+  const warnings = builder.warnings;
+
+  for (const block of template.blocks) {
+    switch (block.type) {
+      case 'business':
+        renderBusinessBlock(block, input, builder);
+        break;
+      case 'ticket':
+        renderTicketBlock(block, input, builder);
+        break;
+      case 'order':
+        renderOrderBlock(block, input, builder);
+        break;
+      case 'items':
+        renderItemsBlock(block, input, builder);
+        break;
+      case 'totals':
+        renderTotalsBlock(block, input, builder);
+        break;
+      case 'payments':
+        renderPaymentsBlock(block, input, builder);
+        break;
+      case 'text':
+        builder.pushText(block.text, block.align, block.size, block.bold);
+        break;
+      case 'divider':
+        builder.push('-'.repeat(LINE_WIDTH));
+        break;
     }
   }
 
-  push('-'.repeat(LINE_WIDTH));
-  push('{center}¡Gracias por su visita!{/center}');
-  push('{br}');
+  const unsupported = new Set<string>();
 
-  let content = lines.join('{br}');
-
-  if (content.length > MAX_CONTENT) {
-    const safe = content.slice(0, MAX_CONTENT);
-    const cut = safe.lastIndexOf('{br}');
-
-    content = `${
-      cut > 0 ? safe.slice(0, cut) : safe
-    }{br}{center}{s}Ticket incompleto{/s}{/center}{br}`;
+  for (const line of [
+    input.organizationName,
+    input.branchName ?? '',
+    input.organizationAddress ?? '',
+    input.branchAddress ?? '',
+    input.order.customerName ?? '',
+    ...input.order.items.flatMap((item) => [item.name, item.variant ?? '']),
+    ...template.blocks
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text),
+  ]) {
+    for (const char of unsupportedReceiptChars(line)) unsupported.add(char);
   }
 
-  if (content.length < 100) {
-    content += '{br}'.repeat(Math.ceil((100 - content.length) / 4));
+  if (unsupported.size > 0) {
+    warnings.push(
+      `Caracteres que la impresora podría no mostrar: ${[...unsupported].join(
+        ' ',
+      )}`,
+    );
   }
 
-  return content;
+  return { content: builder.content, warnings };
+}
+
+/** Compatibilidad con el ticket clásico. */
+export function buildPointReceipt(input: PointReceiptInput): string {
+  return renderReceiptText(defaultReceiptTemplate(), input).content;
+}
+
+/** HTML seguro para la vista previa del editor (58 mm). */
+export function renderReceiptPreviewHtml(content: string): string {
+  const escape = (value: string) =>
+    value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+
+  const inline = (value: string): string => {
+    const tokens = value.split(/(\{[^{}]*\})/g);
+    let html = '';
+
+    for (const token of tokens) {
+      switch (token) {
+        case '{b}':
+          html += '<strong>';
+          break;
+        case '{/b}':
+          html += '</strong>';
+          break;
+        case '{w}':
+          html += '<span style="font-size:1.25em">';
+          break;
+        case '{/w}':
+          html += '</span>';
+          break;
+        case '{s}':
+          html += '<span style="font-size:0.78em">';
+          break;
+        case '{/s}':
+          html += '</span>';
+          break;
+        default:
+          html += escape(token);
+      }
+    }
+
+    return html;
+  };
+
+  const lines = content.split('{br}');
+  let html = '';
+
+  for (const rawLine of lines) {
+    let line = rawLine;
+    let align: ReceiptAlign | null = null;
+
+    if (line.startsWith('{center}') && line.endsWith('{/center}')) {
+      align = 'center';
+      line = line.slice('{center}'.length, -'{/center}'.length);
+    } else if (line.startsWith('{left}') && line.endsWith('{/left}')) {
+      align = 'left';
+      line = line.slice('{left}'.length, -'{/left}'.length);
+    }
+
+    if (!line) {
+      html += '<br/>';
+      continue;
+    }
+
+    if (align) {
+      html += `<div style="text-align:${align}">${inline(line)}</div>`;
+    } else {
+      html += `${inline(line)}<br/>`;
+    }
+  }
+
+  return html;
 }

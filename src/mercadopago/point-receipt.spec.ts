@@ -1,4 +1,11 @@
-import { buildPointReceipt, type PointReceiptInput } from './point-receipt';
+import {
+  buildPointReceipt,
+  defaultReceiptTemplate,
+  receiptTemplateSchema,
+  renderReceiptPreviewHtml,
+  renderReceiptText,
+  type PointReceiptInput,
+} from './point-receipt';
 
 const base: PointReceiptInput = {
   organizationName: 'Naranja Pimienta',
@@ -101,5 +108,67 @@ describe('buildPointReceipt', () => {
 
     expect(content.length).toBeLessThanOrEqual(4096);
     expect(content).toContain('... y');
+  });
+
+  it('respeta los campos desactivados de la plantilla', () => {
+    const template = defaultReceiptTemplate();
+    template.blocks = template.blocks
+      .map((block) => {
+        if (block.type === 'order') {
+          return { ...block, fields: ['place'] as const };
+        }
+
+        if (block.type === 'totals') {
+          return { ...block, fields: ['subtotal', 'total'] as const };
+        }
+
+        return block;
+      })
+      .map((block) =>
+        block.type === 'order'
+          ? { ...block, fields: [...block.fields] }
+          : block.type === 'totals'
+            ? { ...block, fields: [...block.fields] }
+            : block
+      );
+
+    const result = renderReceiptText(template, base);
+
+    expect(result.content).not.toContain('Cliente:');
+    expect(result.content).not.toContain('IVA incluido');
+    expect(result.content).not.toContain('Propina');
+  });
+
+  it('no incluye el logo en el texto y avisa de caracteres no soportados', () => {
+    const template = { ...defaultReceiptTemplate(), printLogo: true };
+    const result = renderReceiptText(template, {
+      ...base,
+      order: { ...base.order, customerName: 'Ana 😀' },
+    });
+
+    expect(result.content).not.toContain('data:image');
+    expect(
+      result.warnings.some((warning) => warning.includes('Caracteres'))
+    ).toBe(true);
+  });
+
+  it('genera HTML seguro para la vista previa', () => {
+    const html = renderReceiptPreviewHtml(
+      '{center}{b}Hola <cliente>{/b}{/center}{br}{left}{s}Total $10{/s}{/left}'
+    );
+
+    expect(html).toContain('<strong>');
+    expect(html).toContain('&lt;cliente&gt;');
+    expect(html).toContain('text-align:center');
+    expect(html).toContain('text-align:left');
+  });
+
+  it('valida la plantilla antes de guardarla', () => {
+    const template = defaultReceiptTemplate();
+
+    expect(receiptTemplateSchema.safeParse(template).success).toBe(true);
+    expect(
+      receiptTemplateSchema.safeParse({ ...template, blocks: [] }).success
+    ).toBe(false);
   });
 });

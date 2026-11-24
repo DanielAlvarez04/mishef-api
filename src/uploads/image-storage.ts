@@ -5,8 +5,15 @@ import {
   variantWidths,
   type ImageAssets,
 } from './image-assets';
-import { processImage } from './image-processor';
-import { buildImageKey, deleteR2Object, putR2Object } from './r2';
+import { MAX_INPUT_PIXELS, processImage } from './image-processor';
+import {
+  buildImageKey,
+  deleteR2Object,
+  publicUrlForKey,
+  putR2Object,
+} from './r2';
+import { BadRequestException } from '@nestjs/common';
+import sharp from 'sharp';
 
 export interface StoredImage {
   /** Clave base de la imagen (lo que se guarda en la base). */
@@ -68,4 +75,68 @@ export async function storeOptimizedImage(
   }
 
   return { key, assets, bytes };
+}
+
+export interface StoredReceiptLogo {
+  key: string;
+  url: string;
+  width: number;
+  height: number;
+  bytes: number;
+}
+
+/**
+ * Genera el JPEG pequeño que se imprime en el ticket.
+ *
+ * El logo del panel puede ser grande y tener transparencia; para la impresora
+ * se recorta a 384 px de ancho, máximo 192 px de alto y fondo blanco.
+ */
+export async function storeReceiptLogo(
+  folder: string,
+  input: Buffer,
+): Promise<StoredReceiptLogo> {
+  let data: Buffer;
+  let width: number;
+  let height: number;
+
+  try {
+    const result = await sharp(input, {
+      limitInputPixels: MAX_INPUT_PIXELS,
+      failOn: 'error',
+    })
+      .rotate()
+      .resize({
+        width: 384,
+        height: 192,
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .flatten({ background: '#ffffff' })
+      .jpeg({ quality: 85, mozjpeg: true })
+      .toBuffer({ resolveWithObject: true });
+
+    data = result.data;
+    width = result.info.width;
+    height = result.info.height;
+  } catch {
+    throw new BadRequestException(
+      'La imagen no se pudo leer. Usa un JPG, PNG o WebP válido.',
+    );
+  }
+
+  if (!width || !height) {
+    throw new BadRequestException('La imagen no tiene medidas válidas.');
+  }
+
+  const key = `${buildImageKey(folder, width, height)}-receipt.jpg`;
+
+  await putR2Object(key, data, 'image/jpeg', IMMUTABLE_CACHE_CONTROL);
+
+  return {
+    key,
+    url: publicUrlForKey(key),
+    width,
+    height,
+    bytes: data.length,
+  };
 }

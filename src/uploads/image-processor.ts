@@ -77,6 +77,7 @@ export async function processImage(input: Buffer): Promise<ProcessedImage> {
     const avif = await resized.clone().avif({ quality: AVIF_QUALITY, effort: AVIF_EFFORT }).toBuffer();
     const jpeg = await resized
       .clone()
+      .flatten({ background: '#ffffff' })
       .jpeg({ quality: JPEG_QUALITY, mozjpeg: true, progressive: true })
       .toBuffer();
 

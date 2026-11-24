@@ -233,6 +233,10 @@ model Organization {
   theme      String   @default("default")
   /// URL pública del logo (R2). `null` = icono genérico.
   logoUrl   String?
+  /// Clave base de la imagen optimizada del logo en R2.
+  logoKey   String?
+  /// JPEG pequeño (384 px) que se imprime en la terminal Point.
+  logoReceiptKey String?
   /// Dirección escrita del negocio (para el ticket y el menú público).
   address   String?
   /// Coordenadas del negocio. Sirven para el mapa y las funciones por cercanía.
@@ -430,6 +434,8 @@ model Branch {
   isActive       Boolean  @default(true)
   /// Porcentaje de propina sugerido en el POS (0 = sin sugerencia).
   defaultTipPercent Int   @default(0)
+  /// Plantilla del ticket de la sucursal. `null` = plantilla por defecto.
+  receiptTemplate Json?
   /// Coordenadas del local para la geocerca del checador.
   latitude Decimal? @db.Decimal(10, 7)
   longitude Decimal? @db.Decimal(10, 7)

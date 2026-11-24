@@ -25,6 +25,22 @@ import {
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
 import { CloudflareHostnamesService } from './cloudflare-hostnames.service';
 import { StorageService } from '../storage/storage.service';
+import { imageAssetObjectKeys, imageFallbackUrl } from '../uploads/image-assets';
+import {
+  storeOptimizedImage,
+  storeReceiptLogo,
+} from '../uploads/image-storage';
+import { PresignImageDto } from '../uploads/dto/presign-image.dto';
+import {
+  IMAGE_CONTENT_TYPES,
+  UPLOAD_URL_EXPIRES_IN,
+  buildTempObjectKey,
+  deleteR2Object,
+  getR2Object,
+  isTempObjectKey,
+  maxUploadBytes,
+  presignPutUrl,
+} from '../uploads/r2';
 
 /** Resultado de una búsqueda de dirección (Nominatim/OpenStreetMap). */
 export interface LocationSearchResult {
@@ -87,6 +103,177 @@ export class OrganizationsService {
         organization.practiceMode &&
         (!organization.practiceUntil || organization.practiceUntil > new Date()),
     };
+  }
+
+  /**
+   * Firma la subida directa del logo a R2.
+   *
+   * Se usa el mismo flujo que las imágenes del catálogo: el navegador sube a
+   * `{org}/tmp/` y `finalizeLogo` procesa las variantes.
+   */
+  async presignLogo(organizationId: string | null, dto: PresignImageDto) {
+    if (!organizationId) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    if (!(dto.contentType in IMAGE_CONTENT_TYPES)) {
+      throw new BadRequestException('Formato no admitido. Usa JPG, PNG o WebP');
+    }
+
+    const maxBytes = maxUploadBytes();
+
+    if (dto.size > maxBytes) {
+      throw new BadRequestException(
+        `La imagen supera el máximo de ${Math.round(maxBytes / 1024 / 1024)} MB`,
+      );
+    }
+
+    await this.storage.assertWithinLimit(organizationId, dto.size);
+
+    const key = buildTempObjectKey(organizationId, dto.contentType);
+
+    return {
+      key,
+      uploadUrl: await presignPutUrl(key, dto.contentType),
+      method: 'PUT' as const,
+      headers: { 'Content-Type': dto.contentType },
+      expiresIn: UPLOAD_URL_EXPIRES_IN,
+      maxBytes,
+    };
+  }
+
+  /**
+   * Procesa el logo subido, genera las variantes del panel y el JPEG de recibo.
+   *
+   * El JPEG de recibo (384 px de ancho, fondo blanco) es el que se manda a la
+   * terminal Point. Las variantes AVIF/JPEG se usan en el panel y los correos.
+   */
+  async finalizeLogo(organizationId: string | null, key: string) {
+    if (!organizationId) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    if (!isTempObjectKey(organizationId, key)) {
+      throw new BadRequestException('La subida no pertenece a este negocio');
+    }
+
+    const current = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { logoKey: true, logoReceiptKey: true },
+    });
+
+    if (!current) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    const buffer = await getR2Object(key);
+
+    if (!buffer) {
+      throw new NotFoundException('El archivo no se subió a R2');
+    }
+
+    const maxBytes = maxUploadBytes();
+
+    if (buffer.length > maxBytes) {
+      throw new BadRequestException(
+        `La imagen supera el máximo de ${Math.round(maxBytes / 1024 / 1024)} MB`,
+      );
+    }
+
+    await this.storage.assertWithinLimit(organizationId, buffer.length);
+
+    let stored: Awaited<ReturnType<typeof storeOptimizedImage>> | null = null;
+    let receipt: Awaited<ReturnType<typeof storeReceiptLogo>> | null = null;
+
+    try {
+      stored = await storeOptimizedImage(
+        `${organizationId}/branding/logo`,
+        buffer,
+      );
+
+      receipt = await storeReceiptLogo(
+        `${organizationId}/branding/receipt`,
+        buffer,
+      );
+
+      const logoUrl = imageFallbackUrl(stored.assets);
+
+      await this.prisma.organization.update({
+        where: { id: organizationId },
+        data: {
+          logoUrl,
+          logoKey: stored.key,
+          logoReceiptKey: receipt.key,
+        },
+      });
+    } catch (error) {
+      if (stored) {
+        for (const objectKey of imageAssetObjectKeys(stored.key)) {
+          await deleteR2Object(objectKey);
+        }
+      }
+
+      if (receipt) {
+        await deleteR2Object(receipt.key);
+      }
+
+      throw error;
+    } finally {
+      await deleteR2Object(key);
+    }
+
+    if (!stored || !receipt) {
+      throw new Error('No se generaron las variantes del logo');
+    }
+
+    // El logo ya quedó guardado en la organización. Si el contador de
+    // almacenamiento falla, no se borran los archivos recién creados.
+    await this.storage.add(organizationId, stored.bytes + receipt.bytes);
+
+    if (current.logoKey) {
+      await this.storage.releaseImage(organizationId, current.logoKey);
+    }
+
+    if (current.logoReceiptKey) {
+      await this.storage.releaseImage(organizationId, current.logoReceiptKey);
+    }
+
+    return {
+      logoUrl: imageFallbackUrl(stored.assets),
+      logoReceiptKey: receipt.key,
+      logoReceiptUrl: receipt.url,
+    };
+  }
+
+  /** Quita el logo del negocio y libera sus archivos. */
+  async removeLogo(organizationId: string | null) {
+    if (!organizationId) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    const current = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { logoKey: true, logoReceiptKey: true },
+    });
+
+    if (!current) {
+      throw new NotFoundException('Organización no encontrada');
+    }
+
+    await this.prisma.organization.update({
+      where: { id: organizationId },
+      data: { logoUrl: null, logoKey: null, logoReceiptKey: null },
+    });
+
+    if (current.logoKey) {
+      await this.storage.releaseImage(organizationId, current.logoKey);
+    }
+
+    if (current.logoReceiptKey) {
+      await this.storage.releaseImage(organizationId, current.logoReceiptKey);
+    }
+
+    return { ok: true };
   }
 
   /**
