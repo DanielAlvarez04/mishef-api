@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Request } from 'express';
+import { isAllowedWebOrigin } from '../allowed-origin';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
@@ -41,22 +42,23 @@ export class OriginGuard implements CanActivate {
     const origin =
       request.get('origin') ?? this.originFromReferer(request.get('referer'));
 
-    if (!origin || !this.allowedOrigins().includes(origin)) {
+    if (!origin || !this.isAllowedOrigin(origin)) {
       throw new ForbiddenException('Origen de la petición no permitido');
     }
 
     return true;
   }
 
-  private allowedOrigins(): string[] {
+  private isAllowedOrigin(origin: string): boolean {
     const webOrigin = this.config.get<string>('WEB_ORIGIN');
     const apiOrigin =
       this.config.get<string>('API_PUBLIC_ORIGIN') ??
       `http://localhost:${this.config.get<string>('PORT') ?? '3001'}`;
+    const tenantDomain = (this.config.get<string>('TENANT_DOMAIN') ?? 'mishef.co')
+      .trim()
+      .toLowerCase();
 
-    return [webOrigin, apiOrigin]
-      .filter((value): value is string => Boolean(value))
-      .map((value) => value.replace(/\/$/, ''));
+    return isAllowedWebOrigin(origin, webOrigin, apiOrigin, tenantDomain);
   }
 
   private originFromReferer(referer: string | undefined): string | null {

@@ -9,6 +9,7 @@ import helmet from 'helmet';
 import compression from 'compression';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
+import { isAllowedWebOrigin } from './common/allowed-origin';
 import { swaggerBasicAuth } from './common/swagger-basic-auth';
 
 /**
@@ -44,8 +45,22 @@ async function bootstrap() {
     }),
   );
 
+  const webOrigin = process.env.WEB_ORIGIN || 'http://localhost:3000';
+  const apiOrigin = process.env.API_PUBLIC_ORIGIN;
+  const tenantDomain = (process.env.TENANT_DOMAIN ?? 'mishef.co')
+    .trim()
+    .toLowerCase();
+
   app.enableCors({
-    origin: process.env.WEB_ORIGIN || 'http://localhost:3000',
+    origin: (origin, callback) => {
+      // Sin Origin son peticiones server-to-server o curl: CORS no aplica.
+      if (!origin) return callback(null, true);
+
+      callback(
+        null,
+        isAllowedWebOrigin(origin, webOrigin, apiOrigin, tenantDomain),
+      );
+    },
     credentials: true,
   });
 

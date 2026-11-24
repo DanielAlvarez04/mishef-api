@@ -37,6 +37,7 @@ describe('OriginGuard (CSRF)', () => {
     get: (key: string) => {
       if (key === 'WEB_ORIGIN') return 'http://localhost:3000';
       if (key === 'API_PUBLIC_ORIGIN') return 'http://localhost:3001';
+      if (key === 'TENANT_DOMAIN') return 'mishef.co';
       return undefined;
     },
   } as unknown as ConfigService;
@@ -66,6 +67,15 @@ describe('OriginGuard (CSRF)', () => {
     const req = request(
       'POST',
       { origin: 'http://localhost:3000' },
+      { np_rt: 'token' },
+    );
+    expect(guard.canActivate(contextFor(req))).toBe(true);
+  });
+
+  it('acepta el subdominio de un negocio', () => {
+    const req = request(
+      'POST',
+      { origin: 'https://demo.mishef.co' },
       { np_rt: 'token' },
     );
     expect(guard.canActivate(contextFor(req))).toBe(true);
