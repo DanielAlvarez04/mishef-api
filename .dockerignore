@@ -12,14 +12,8 @@ npm-debug.log*
 tmp-*.mjs
 check-data.ts
 typecheck_errors.txt
-# Scripts de mantenimiento que sí van en la imagen
-scripts/*
-!scripts/storage-recount.mjs
-!scripts/purge-analytics.mjs
-!scripts/create-platform-admin.mjs
-!scripts/seed-plans.mjs
-!scripts/check-mercadopago.mjs
-!scripts/seed-demo-org.mjs
-!scripts/seed-test-user.ts
+# Los scripts de desarrollo no van en la imagen. Solo `docker-scripts/`, que el
+# Dockerfile copia a /app/scripts.
+scripts
 Dockerfile
 .dockerignore

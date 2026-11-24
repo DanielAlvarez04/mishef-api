@@ -14,9 +14,10 @@
  * como tenant de demostración mediante `DEMO_TENANT_SLUGS` (por defecto
  * `demo`). El seed crea la organización directamente en la base.
  *
- * No se ejecuta dentro del contenedor de producción tal cual: la imagen solo
- * instala dependencias de producción y no incluye `ts-node`. Usa un túnel SSH a
- * la base o ejecútalo desde tu máquina con la `DATABASE_URL` de producción.
+ * También puede ejecutarse dentro del contenedor de producción:
+ *   docker exec -u 0 -e DEMO_PASSWORD="..." <api> node scripts/seed-demo-org.mjs
+ * `prepareSeed` crea el enlace `src -> dist/src` e instala `ts-node` temporalmente
+ * porque la imagen solo trae dependencias de producción.
  *
  * Es idempotente para la organización, el usuario y la sucursal. El seed de
  * catálogo borra los datos de negocio, así que la demo debe reiniciarse antes
@@ -25,6 +26,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, symlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { config } from 'dotenv';
 import { hash } from 'argon2';
 import { PrismaClient } from '@prisma/client';
@@ -230,10 +232,13 @@ async function main() {
   // Windows (los `.cmd` de npx fallan con `spawnSync` sin shell).
   const require = createRequire(import.meta.url);
   const tsNodeBin = require.resolve('ts-node/dist/bin.js');
+  const seedTestUser = fileURLToPath(
+    new URL('./seed-test-user.ts', import.meta.url),
+  );
   console.log('Sembrando catálogo completo…');
   execFileSync(
     process.execPath,
-    [tsNodeBin, '--transpile-only', 'scripts/seed-test-user.ts', EMAIL],
+    [tsNodeBin, '--transpile-only', seedTestUser, EMAIL],
     { stdio: 'inherit', cwd: process.cwd(), env: process.env },
   );
 

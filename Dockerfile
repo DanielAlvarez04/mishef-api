@@ -48,9 +48,10 @@ RUN npm ci --omit=dev --legacy-peer-deps && npm cache clean --force
 
 COPY prisma.config.ts ./
 COPY prisma ./prisma
-# Scripts de mantenimiento (`storage:recount`, purgas…). Son archivos sueltos:
-# no pasan por el build de Nest, pero necesitan las mismas variables de entorno.
-COPY scripts ./scripts
+# Scripts de operación que sí van en la imagen (`storage:recount`, purgas,
+# seeds de planes/demo…). El resto de `scripts/` es solo desarrollo y queda
+# fuera por `.dockerignore`.
+COPY docker-scripts ./scripts
 # Se genera en la imagen final para que el cliente coincida con el schema y no
 # dependa de que `npm prune` haya conservado `node_modules/.prisma`.
 RUN ./node_modules/.bin/prisma generate

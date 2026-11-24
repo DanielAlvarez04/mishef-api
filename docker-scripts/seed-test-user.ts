@@ -3,8 +3,8 @@
  * Seed de pruebas para un usuario concreto.
  *
  * Uso:
- *   npx ts-node --transpile-only scripts/seed-test-user.ts
- *   npx ts-node --transpile-only scripts/seed-test-user.ts correo@dominio.com
+ *   npx ts-node --transpile-only docker-scripts/seed-test-user.ts
+ *   npx ts-node --transpile-only docker-scripts/seed-test-user.ts correo@dominio.com
  *
  * Borra TODOS los datos de la organización del usuario (conserva usuario,
  * membresía y datos core globales) y siembra un catálogo completo:
