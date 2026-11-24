@@ -16,7 +16,7 @@ import {
   renderReceiptText,
   type ReceiptTemplate,
 } from '../mercadopago/point-receipt';
-import { sampleReceiptInput } from '../mercadopago/receipt-sample';
+import { sampleReceiptInput, type ReceiptSampleScenario } from '../mercadopago/receipt-sample';
 import { publicUrlForKey } from '../uploads/r2';
 
 @Injectable()
@@ -179,16 +179,20 @@ export class ReceiptsService {
     branchId: string,
     template?: unknown,
     organizationId?: string,
+    scenario: ReceiptSampleScenario = 'table',
   ) {
     const branch = await this.branchContext(branchId, organizationId);
-    const receipt = sampleReceiptInput({
-      organizationName: branch.organization.name,
-      organizationAddress: branch.organization.address,
-      rfc: branch.organization.fiscalProfile?.rfc ?? null,
-      branchName: branch.name,
-      branchAddress: branch.address,
-      currency: branch.organization.currency,
-    });
+    const receipt = sampleReceiptInput(
+      {
+        organizationName: branch.organization.name,
+        organizationAddress: branch.organization.address,
+        rfc: branch.organization.fiscalProfile?.rfc ?? null,
+        branchName: branch.name,
+        branchAddress: branch.address,
+        currency: branch.organization.currency,
+      },
+      scenario,
+    );
     const selected = await this.templateFor(branch.receiptTemplate, template);
     const rendered = renderReceiptText(selected, receipt);
 
@@ -205,17 +209,21 @@ export class ReceiptsService {
     branchId: string,
     template?: unknown,
     organizationId?: string,
+    scenario: ReceiptSampleScenario = 'table',
   ) {
     const branch = await this.branchContext(branchId, organizationId);
     const selected = await this.templateFor(branch.receiptTemplate, template);
-    const receipt = sampleReceiptInput({
-      organizationName: branch.organization.name,
-      organizationAddress: branch.organization.address,
-      rfc: branch.organization.fiscalProfile?.rfc ?? null,
-      branchName: branch.name,
-      branchAddress: branch.address,
-      currency: branch.organization.currency,
-    });
+    const receipt = sampleReceiptInput(
+      {
+        organizationName: branch.organization.name,
+        organizationAddress: branch.organization.address,
+        rfc: branch.organization.fiscalProfile?.rfc ?? null,
+        branchName: branch.name,
+        branchAddress: branch.address,
+        currency: branch.organization.currency,
+      },
+      scenario,
+    );
 
     return this.receiptPrint.print({
       organizationId: branch.organizationId,

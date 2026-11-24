@@ -62,15 +62,31 @@ export class ReceiptsController {
   @ApiOperation({ summary: 'Vista previa de una plantilla de ticket' })
   @Post('platform/branches/:id/receipt-preview')
   @UseGuards(PlatformAdminGuard)
-  preview(@Param('id') branchId: string, @Body() body: { template?: unknown }) {
-    return this.receipts.preview(branchId, body?.template);
+  preview(
+    @Param('id') branchId: string,
+    @Body() body: { template?: unknown; scenario?: unknown },
+  ) {
+    return this.receipts.preview(
+      branchId,
+      body?.template,
+      undefined,
+      scenarioOf(body?.scenario),
+    );
   }
 
   @ApiOperation({ summary: 'Imprimir un ticket de prueba en la terminal' })
   @Post('platform/branches/:id/receipt-test')
   @UseGuards(PlatformAdminGuard)
-  test(@Param('id') branchId: string, @Body() body: { template?: unknown }) {
-    return this.receipts.testPrint(branchId, body?.template);
+  test(
+    @Param('id') branchId: string,
+    @Body() body: { template?: unknown; scenario?: unknown },
+  ) {
+    return this.receipts.testPrint(
+      branchId,
+      body?.template,
+      undefined,
+      scenarioOf(body?.scenario),
+    );
   }
 
   /* --------------------------------------------------------------------- */
@@ -105,12 +121,13 @@ export class ReceiptsController {
   previewForOrganization(
     @CurrentUser() user: JwtUser,
     @Param('id') branchId: string,
-    @Body() body: { template?: unknown },
+    @Body() body: { template?: unknown; scenario?: unknown },
   ) {
     return this.receipts.preview(
       branchId,
       body?.template,
       organizationId(user),
+      scenarioOf(body?.scenario),
     );
   }
 
@@ -120,14 +137,19 @@ export class ReceiptsController {
   testForOrganization(
     @CurrentUser() user: JwtUser,
     @Param('id') branchId: string,
-    @Body() body: { template?: unknown },
+    @Body() body: { template?: unknown; scenario?: unknown },
   ) {
     return this.receipts.testPrint(
       branchId,
       body?.template,
       organizationId(user),
+      scenarioOf(body?.scenario),
     );
   }
+}
+
+function scenarioOf(value: unknown): 'table' | 'paid' {
+  return value === 'paid' ? 'paid' : 'table';
 }
 
 function organizationId(user: JwtUser): string {

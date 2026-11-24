@@ -38,8 +38,8 @@ const TOTAL_FIELD_ORDER = [
   'subtotal',
   'tax',
   'discount',
-  'delivery',
   'tip',
+  'delivery',
   'total',
 ] as const satisfies readonly TotalField[];
 
@@ -89,6 +89,7 @@ const totalsBlockSchema = z.object({
 const paymentsBlockSchema = z.object({
   ...blockBase,
   type: z.literal('payments'),
+  showTitle: z.boolean().default(true),
   showMethod: z.boolean(),
   showAmount: z.boolean(),
 });
@@ -131,6 +132,7 @@ export const receiptTemplateSchema = z
       z.literal(2),
       z.literal(3),
       z.literal(4),
+      z.literal(5),
     ]),
     /** Imprime el logo como una acción `image` antes del ticket de texto. */
     printLogo: z.boolean(),
@@ -141,7 +143,7 @@ export const receiptTemplateSchema = z
 export type ReceiptBlock = z.infer<typeof receiptBlockSchema>;
 
 export type ReceiptTemplate = {
-  version: 1 | 2 | 3 | 4;
+  version: 1 | 2 | 3 | 4 | 5;
   printLogo: boolean;
   blocks: ReceiptBlock[];
 };
@@ -152,6 +154,7 @@ export type ReceiptTemplate = {
  * v1 → v2: agrega «Descuento» a los totales.
  * v2 → v3: inserta el bloque «Propina sugerida» antes del pie de página.
  * v3 → v4: quita el bloque de pagos; la cuenta se imprime antes de cobrar.
+ * v4 → v5: vuelve a agregar «Pagos» para ventanilla y reimpresiones.
  *
  * Solo se aplica una vez por plantilla: al guardarla queda en la versión
  * actual y, si el usuario quita un bloque, ya no se vuelve a agregar.
@@ -197,7 +200,11 @@ function upgradeTemplate(template: ReceiptTemplate): ReceiptTemplate {
     );
   }
 
-  return { ...template, version: 4, blocks };
+  if (template.version < 5) {
+    blocks = insertPaymentsBlock(blocks);
+  }
+
+  return { ...template, version: 5, blocks };
 }
 
 /** Id estable para los bloques que agrega la migración. */
@@ -251,8 +258,53 @@ function insertTipSuggestions(blocks: ReceiptBlock[]): ReceiptBlock[] {
   ];
 }
 
+/**
+ * Agrega «Pagos» una sola vez, antes de la propina sugerida o del pie.
+ *
+ * El bloque imprime su propio título y separador solo cuando hay pagos
+ * confirmados, así que puede convivir con «Propina sugerida» en la plantilla.
+ */
+function insertPaymentsBlock(blocks: ReceiptBlock[]): ReceiptBlock[] {
+  if (blocks.some((block) => block.type === 'payments')) {
+    return blocks;
+  }
+
+  const payments: ReceiptBlock = {
+    id: uniqueBlockId(blocks, 'payments'),
+    type: 'payments',
+    showTitle: true,
+    showMethod: true,
+    showAmount: true,
+  };
+  const tipIndex = blocks.findIndex(
+    (block) => block.type === 'tipSuggestions',
+  );
+
+  if (tipIndex >= 0) {
+    return [
+      ...blocks.slice(0, tipIndex),
+      payments,
+      ...blocks.slice(tipIndex),
+    ];
+  }
+
+  const footerIndex = blocks
+    .map((block) => block.type)
+    .lastIndexOf('text');
+
+  if (footerIndex >= 0) {
+    return [
+      ...blocks.slice(0, footerIndex),
+      payments,
+      ...blocks.slice(footerIndex),
+    ];
+  }
+
+  return [...blocks, payments];
+}
+
 export const DEFAULT_RECEIPT_TEMPLATE: ReceiptTemplate = {
-  version: 4,
+  version: 5,
   printLogo: false,
   blocks: [
     {
@@ -297,9 +349,16 @@ export const DEFAULT_RECEIPT_TEMPLATE: ReceiptTemplate = {
     {
       id: 'totals',
       type: 'totals',
-      fields: ['subtotal', 'tax', 'discount', 'delivery', 'tip', 'total'],
+      fields: ['subtotal', 'tax', 'discount', 'tip', 'delivery', 'total'],
     },
     { id: 'divider-3', type: 'divider' },
+    {
+      id: 'payments',
+      type: 'payments',
+      showTitle: true,
+      showMethod: true,
+      showAmount: true,
+    },
     { id: 'tip-suggestions', type: 'tipSuggestions' },
     {
       id: 'footer',
@@ -931,6 +990,13 @@ function renderPaymentsBlock(
   input: PointReceiptInput,
   builder: ReceiptTextBuilder,
 ): void {
+  // En una cuenta de mesa sin pagar no se imprime la sección de pagos.
+  if (input.order.payments.length === 0) return;
+
+  if (block.showTitle) {
+    builder.push(styledLine('PAGOS', 'left', 'normal', true));
+  }
+
   for (const payment of input.order.payments) {
     const label =
       PAYMENT_METHOD_LABELS[payment.method] ?? sanitize(payment.method);
@@ -944,28 +1010,34 @@ function renderPaymentsBlock(
       builder.push(pad('', amount));
     }
   }
+
+  // Separador de salida solo cuando la sección se imprime.
+  builder.push('-'.repeat(LINE_WIDTH));
 }
 
 /** Porcentajes de propina que se imprimen en el ticket. */
 const TIP_SUGGESTION_PERCENTAGES = [10, 15, 20] as const;
 
 /**
- * Sugerencias de propina para la cuenta impresa antes de cobrar.
+ * Sugerencias de propina para la cuenta de mesa antes de cobrar.
  *
- * Se imprimen siempre que todavía no haya una propina registrada. La cuenta se
- * lleva al cliente antes del pago, así que el ticket es también la sugerencia.
+ * Solo se imprimen en servicio a mesa y mientras no haya pagos confirmados:
+ * en ventanilla el ticket lleva la sección de pagos, no sugerencias.
  */
 function renderTipSuggestionsBlock(
   _block: Extract<ReceiptBlock, { type: 'tipSuggestions' }>,
   input: PointReceiptInput,
   builder: ReceiptTextBuilder,
 ): void {
+  const isTableService =
+    input.order.channel === 'DINE_IN' && !input.order.isTakeaway;
+  const hasPayments = input.order.payments.length > 0;
   const tipCents = input.order.payments.reduce(
     (sum, payment) => sum + cents(payment.tipAmount),
     0,
   );
 
-  if (tipCents > 0) return;
+  if (!isTableService || hasPayments || tipCents > 0) return;
 
   builder.push(styledLine('Propina sugerida', 'left', 'normal', true));
 
