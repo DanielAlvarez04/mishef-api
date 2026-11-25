@@ -45,6 +45,8 @@ const TOTAL_FIELD_ORDER = [
 
 const blockBase = {
   id: z.string().min(1).max(40),
+  /** El admin del negocio puede apagar el bloque completo desde los switches. */
+  enabled: z.boolean().default(true),
 };
 
 const businessBlockSchema = z.object({
@@ -113,6 +115,13 @@ const tipSuggestionsBlockSchema = z.object({
   type: z.literal('tipSuggestions'),
 });
 
+const metaBlockSchema = z.object({
+  ...blockBase,
+  type: z.literal('meta'),
+  showTicketUid: z.boolean().default(true),
+  showServedBy: z.boolean().default(true),
+});
+
 export const receiptBlockSchema = z.discriminatedUnion('type', [
   businessBlockSchema,
   ticketBlockSchema,
@@ -123,6 +132,7 @@ export const receiptBlockSchema = z.discriminatedUnion('type', [
   textBlockSchema,
   dividerBlockSchema,
   tipSuggestionsBlockSchema,
+  metaBlockSchema,
 ]);
 
 export const receiptTemplateSchema = z
@@ -133,6 +143,7 @@ export const receiptTemplateSchema = z
       z.literal(3),
       z.literal(4),
       z.literal(5),
+      z.literal(6),
     ]),
     /** Imprime el logo como una acción `image` antes del ticket de texto. */
     printLogo: z.boolean(),
@@ -143,7 +154,7 @@ export const receiptTemplateSchema = z
 export type ReceiptBlock = z.infer<typeof receiptBlockSchema>;
 
 export type ReceiptTemplate = {
-  version: 1 | 2 | 3 | 4 | 5;
+  version: 1 | 2 | 3 | 4 | 5 | 6;
   printLogo: boolean;
   blocks: ReceiptBlock[];
 };
@@ -155,6 +166,7 @@ export type ReceiptTemplate = {
  * v2 → v3: inserta el bloque «Propina sugerida» antes del pie de página.
  * v3 → v4: quita el bloque de pagos; la cuenta se imprime antes de cobrar.
  * v4 → v5: vuelve a agregar «Pagos» para ventanilla y reimpresiones.
+ * v5 → v6: agrega «ID y atención» después del texto de gracias.
  *
  * Solo se aplica una vez por plantilla: al guardarla queda en la versión
  * actual y, si el usuario quita un bloque, ya no se vuelve a agregar.
@@ -204,7 +216,11 @@ function upgradeTemplate(template: ReceiptTemplate): ReceiptTemplate {
     blocks = insertPaymentsBlock(blocks);
   }
 
-  return { ...template, version: 5, blocks };
+  if (template.version < 6) {
+    blocks = insertMetaBlock(blocks);
+  }
+
+  return { ...template, version: 6, blocks };
 }
 
 /** Id estable para los bloques que agrega la migración. */
@@ -234,10 +250,12 @@ function insertTipSuggestions(blocks: ReceiptBlock[]): ReceiptBlock[] {
   const tipBlock: ReceiptBlock = {
     id: uniqueBlockId(blocks, 'tip-suggestions'),
     type: 'tipSuggestions',
+    enabled: true,
   };
   const divider: ReceiptBlock = {
     id: uniqueBlockId([...blocks, tipBlock], 'divider-tip'),
     type: 'divider',
+    enabled: true,
   };
   const footerIndex = blocks
     .map((block) => block.type)
@@ -272,6 +290,7 @@ function insertPaymentsBlock(blocks: ReceiptBlock[]): ReceiptBlock[] {
   const payments: ReceiptBlock = {
     id: uniqueBlockId(blocks, 'payments'),
     type: 'payments',
+    enabled: true,
     showTitle: true,
     showMethod: true,
     showAmount: true,
@@ -303,13 +322,42 @@ function insertPaymentsBlock(blocks: ReceiptBlock[]): ReceiptBlock[] {
   return [...blocks, payments];
 }
 
+/** Agrega «ID y atención» después del último texto (el pie de página). */
+function insertMetaBlock(blocks: ReceiptBlock[]): ReceiptBlock[] {
+  if (blocks.some((block) => block.type === 'meta')) {
+    return blocks;
+  }
+
+  const meta: ReceiptBlock = {
+    id: uniqueBlockId(blocks, 'meta'),
+    type: 'meta',
+    enabled: true,
+    showTicketUid: true,
+    showServedBy: true,
+  };
+  const footerIndex = blocks
+    .map((block) => block.type)
+    .lastIndexOf('text');
+
+  if (footerIndex >= 0) {
+    return [
+      ...blocks.slice(0, footerIndex + 1),
+      meta,
+      ...blocks.slice(footerIndex + 1),
+    ];
+  }
+
+  return [...blocks, meta];
+}
+
 export const DEFAULT_RECEIPT_TEMPLATE: ReceiptTemplate = {
-  version: 5,
+  version: 6,
   printLogo: false,
   blocks: [
     {
       id: 'business',
       type: 'business',
+      enabled: true,
       showName: true,
       showBranch: true,
       showRfc: true,
@@ -319,20 +367,23 @@ export const DEFAULT_RECEIPT_TEMPLATE: ReceiptTemplate = {
     {
       id: 'ticket',
       type: 'ticket',
+      enabled: true,
       showTicket: true,
       showDate: true,
       align: 'center',
     },
-    { id: 'divider-1', type: 'divider' },
+    { id: 'divider-1', type: 'divider', enabled: true },
     {
       id: 'order',
       type: 'order',
+      enabled: true,
       fields: ['place', 'partySize', 'customer'],
       align: 'left',
     },
     {
       id: 'items-title',
       type: 'text',
+      enabled: true,
       text: 'PRODUCTOS',
       align: 'left',
       size: 'normal',
@@ -341,32 +392,43 @@ export const DEFAULT_RECEIPT_TEMPLATE: ReceiptTemplate = {
     {
       id: 'items',
       type: 'items',
+      enabled: true,
       showVariant: true,
       showQuantity: true,
       showLineTotal: true,
     },
-    { id: 'divider-2', type: 'divider' },
+    { id: 'divider-2', type: 'divider', enabled: true },
     {
       id: 'totals',
       type: 'totals',
+      enabled: true,
       fields: ['subtotal', 'tax', 'discount', 'tip', 'delivery', 'total'],
     },
-    { id: 'divider-3', type: 'divider' },
+    { id: 'divider-3', type: 'divider', enabled: true },
     {
       id: 'payments',
       type: 'payments',
+      enabled: true,
       showTitle: true,
       showMethod: true,
       showAmount: true,
     },
-    { id: 'tip-suggestions', type: 'tipSuggestions' },
+    { id: 'tip-suggestions', type: 'tipSuggestions', enabled: true },
     {
       id: 'footer',
       type: 'text',
+      enabled: true,
       text: '¡Gracias por su visita!',
       align: 'center',
       size: 'normal',
       bold: false,
+    },
+    {
+      id: 'meta',
+      type: 'meta',
+      enabled: true,
+      showTicketUid: true,
+      showServedBy: true,
     },
   ],
 };
@@ -396,6 +458,8 @@ export interface PointReceiptInput {
     ticketNumber: number | null;
     /** AAAAMMDD + consecutivo, para reclamos. */
     ticketUid: string | null;
+    /** Nombre del usuario que tomó la orden (histórico). */
+    servedByName: string | null;
     tableNumber: string | null;
     partySize: number;
     isTakeaway: boolean;
@@ -997,10 +1061,18 @@ function renderPaymentsBlock(
     builder.push(styledLine('PAGOS', 'left', 'normal', true));
   }
 
+  const grouped = new Map<string, number>();
+
   for (const payment of input.order.payments) {
-    const label =
-      PAYMENT_METHOD_LABELS[payment.method] ?? sanitize(payment.method);
-    const amount = money(payment.amount, input.currency);
+    grouped.set(
+      payment.method,
+      (grouped.get(payment.method) ?? 0) + cents(payment.amount),
+    );
+  }
+
+  for (const [method, amountCents] of grouped) {
+    const label = PAYMENT_METHOD_LABELS[method] ?? sanitize(method);
+    const amount = money((amountCents / 100).toFixed(2), input.currency);
 
     if (block.showMethod && block.showAmount) {
       builder.push(pad(label, amount));
@@ -1060,6 +1132,35 @@ function renderTipSuggestionsBlock(
 }
 
 /**
+ * Identificación del ticket y atención.
+ *
+ * Va en letra pequeña y centrado, normalmente debajo del pie de página.
+ */
+function renderMetaBlock(
+  block: Extract<ReceiptBlock, { type: 'meta' }>,
+  input: PointReceiptInput,
+  builder: ReceiptTextBuilder,
+): void {
+  if (block.showTicketUid && input.order.ticketUid) {
+    builder.push(
+      `{center}{s}${truncate(
+        `ID Ticket: ${input.order.ticketUid}`,
+        LINE_WIDTH,
+      )}{/s}{/center}`,
+    );
+  }
+
+  if (block.showServedBy && input.order.servedByName) {
+    builder.push(
+      `{center}{s}${truncate(
+        `Atendido por: ${sanitize(input.order.servedByName)}`,
+        LINE_WIDTH,
+      )}{/s}{/center}`,
+    );
+  }
+}
+
+/**
  * Construye el contenido del ticket a partir de la plantilla y los datos.
  *
  * Es una función pura para poder probar el formato sin Mercado Pago ni la base
@@ -1073,6 +1174,8 @@ export function renderReceiptText(
   const warnings = builder.warnings;
 
   for (const block of template.blocks) {
+    if (!block.enabled) continue;
+
     switch (block.type) {
       case 'business':
         renderBusinessBlock(block, input, builder);
@@ -1095,6 +1198,9 @@ export function renderReceiptText(
       case 'tipSuggestions':
         renderTipSuggestionsBlock(block, input, builder);
         break;
+      case 'meta':
+        renderMetaBlock(block, input, builder);
+        break;
       case 'text':
         builder.pushText(block.text, block.align, block.size, block.bold);
         break;
@@ -1113,6 +1219,7 @@ export function renderReceiptText(
     input.organizationAddress ?? '',
     input.branchAddress ?? '',
     input.order.customerName ?? '',
+    input.order.servedByName ?? '',
     ...input.order.items.flatMap((item) => [item.name, item.variant ?? '']),
     ...template.blocks
       .filter((block) => block.type === 'text')
@@ -1129,28 +1236,7 @@ export function renderReceiptText(
     );
   }
 
-  let content = builder.content;
-
-  // Folio de reclamos: siempre al final, pequeño y centrado. Va fuera de la
-  // plantilla para que ningún bloque lo desplace.
-  if (input.order.ticketUid) {
-    const uidLine = `{center}{s}#${input.order.ticketUid}{/s}{/center}`;
-    const next = `${content}{br}${uidLine}`;
-
-    if (next.length <= MAX_CONTENT) {
-      content = next;
-    } else {
-      const cut = content.slice(0, MAX_CONTENT - uidLine.length - 4);
-      const lastBreak = cut.lastIndexOf('{br}');
-
-      content = `${
-        lastBreak > 0 ? cut.slice(0, lastBreak) : cut
-      }{br}${uidLine}`;
-      warnings.push('El ticket se recortó para incluir el folio.');
-    }
-  }
-
-  return { content, warnings };
+  return { content: builder.content, warnings };
 }
 
 /** Compatibilidad con el ticket clásico. */

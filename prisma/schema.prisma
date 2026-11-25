@@ -1314,6 +1314,8 @@ model Order {
   ticketNumber    Int?
   /// Identificador legible para reclamos: AAAAMMDD + consecutivo de 3 dígitos.
   ticketUid       String?
+  /// Nombre del usuario que tomó la orden (histórico del ticket).
+  servedByName    String?
   status         OrderStatus @default(OPEN)
   subtotal       Decimal     @default(0.0000) @db.Decimal(12, 2)
   taxTotal       Decimal     @default(0.0000) @db.Decimal(12, 2)

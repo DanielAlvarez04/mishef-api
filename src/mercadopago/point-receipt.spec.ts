@@ -22,6 +22,7 @@ const base: PointReceiptInput = {
     isTakeaway: false,
     channel: 'DINE_IN',
     customerName: 'Ana',
+    servedByName: 'Ana',
     issuedAt: new Date('2026-11-24T19:45:00Z'),
     subtotal: '103.45',
     taxTotal: '16.55',
@@ -59,7 +60,9 @@ describe('buildPointReceipt', () => {
     expect(content).toContain('Propina');
     expect(content).toContain('PAGOS');
     expect(content).toContain('Efectivo');
-    expect(content).toContain('#20261124042');
+    expect(content).toContain('ID Ticket: 20261124042');
+    expect(content).toContain('Atendido por: Ana');
+    expect(content).not.toContain('#20261124042');
     expect(content).toContain('Gracias por su visita');
   });
 
@@ -86,8 +89,15 @@ describe('buildPointReceipt', () => {
       .map((line) => line.replace(/\{[^}]*\}/g, ''));
 
     expect(content).not.toContain('{left}');
-    const body = content.split('{br}').slice(0, -1).join('{br}');
-    expect(body).not.toContain('{center}');
+    const nonMeta = content
+      .split('{br}')
+      .filter(
+        (line) =>
+          !line.includes('ID Ticket:') &&
+          !line.includes('Atendido por:'),
+      )
+      .join('{br}');
+    expect(nonMeta).not.toContain('{center}');
 
     expect(lines).toContain(
       'Mesa 4 - 2 personas'.padEnd(32, ' '),
@@ -197,7 +207,7 @@ describe('buildPointReceipt', () => {
     expect(total?.endsWith('$200.00')).toBe(true);
     expect(total?.startsWith('TOTAL COBRADO')).toBe(false);
     expect(content).not.toContain('PAGOS');
-    expect(lines.at(-1)).toContain('#20261124042');
+    expect(lines.at(-1)).toContain('Atendido por: Ana');
   });
 
   it('no sugiere propina si la cuenta ya tiene pagos o propina', () => {
@@ -243,6 +253,69 @@ describe('buildPointReceipt', () => {
     expect(content).toContain('PAGOS');
     expect(content).toContain('Tarjeta');
     expect(content).not.toContain('Propina sugerida');
+  });
+
+  it('agrupa los pagos por método en una sola línea', () => {
+    const content = buildPointReceipt({
+      ...base,
+      order: {
+        ...base.order,
+        payments: [
+          { method: 'CASH', amount: '60.00', tipAmount: '0.00' },
+          { method: 'CASH', amount: '40.00', tipAmount: '0.00' },
+          { method: 'CARD', amount: '20.00', tipAmount: '0.00' },
+        ],
+      },
+    });
+    const lines = content
+      .split('{br}')
+      .map((line) => line.replace(/\{[^}]*\}/g, ''));
+
+    const cashLines = lines.filter((line) => line.startsWith('Efectivo'));
+    const cardLines = lines.filter((line) => line.startsWith('Tarjeta'));
+
+    expect(cashLines).toHaveLength(1);
+    expect(cashLines[0].endsWith('$100.00')).toBe(true);
+    expect(cardLines).toHaveLength(1);
+    expect(cardLines[0].endsWith('$20.00')).toBe(true);
+  });
+
+  it('muestra ID Ticket y Atendido por debajo del pie, en pequeño', () => {
+    const content = buildPointReceipt(base);
+
+    expect(content).toContain(
+      '{center}{s}ID Ticket: 20261124042{/s}{/center}',
+    );
+    expect(content).toContain(
+      '{center}{s}Atendido por: Ana{/s}{/center}',
+    );
+
+    const lines = content
+      .split('{br}')
+      .map((line) => line.replace(/\{[^}]*\}/g, ''));
+    const footerIndex = lines.findIndex((line) =>
+      line.includes('Gracias por su visita'),
+    );
+    const uidIndex = lines.findIndex((line) => line.includes('ID Ticket:'));
+    const servedIndex = lines.findIndex((line) =>
+      line.includes('Atendido por:'),
+    );
+
+    expect(footerIndex).toBeGreaterThanOrEqual(0);
+    expect(footerIndex).toBeLessThan(uidIndex);
+    expect(uidIndex).toBeLessThan(servedIndex);
+  });
+
+  it('omite el bloque de identificación si el admin lo apaga', () => {
+    const template = defaultReceiptTemplate();
+    template.blocks = template.blocks.map((block) =>
+      block.type === 'meta' ? { ...block, enabled: false } : block,
+    );
+
+    const result = renderReceiptText(template, base);
+
+    expect(result.content).not.toContain('ID Ticket:');
+    expect(result.content).not.toContain('Atendido por:');
   });
 
   it('desglosa subtotal sin IVA, IVA, descuento, propina y total', () => {
@@ -295,7 +368,7 @@ describe('buildPointReceipt', () => {
     const parsed = receiptTemplateSchema.parse(legacy);
     const totals = parsed.blocks.find((block) => block.type === 'totals');
 
-    expect(parsed.version).toBe(5);
+    expect(parsed.version).toBe(6);
     expect(totals?.type).toBe('totals');
     expect(totals?.type === 'totals' ? totals.fields : []).toEqual([
       'subtotal',
@@ -318,7 +391,7 @@ describe('buildPointReceipt', () => {
     const parsed = receiptTemplateSchema.parse(withoutPayments);
     const types = parsed.blocks.map((block) => block.type);
 
-    expect(parsed.version).toBe(5);
+    expect(parsed.version).toBe(6);
     expect(types).toContain('payments');
     expect(types).toContain('tipSuggestions');
     expect(types.indexOf('payments')).toBeLessThan(

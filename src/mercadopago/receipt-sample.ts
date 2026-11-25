@@ -39,6 +39,7 @@ export function sampleReceiptInput(
       isTakeaway: paid,
       channel: paid ? 'COUNTER' : 'DINE_IN',
       customerName: paid ? 'Cliente de mostrador' : 'Cliente de ejemplo',
+      servedByName: paid ? 'Carlos' : 'Ana',
       issuedAt,
       subtotal: '172.41',
       taxTotal: '27.59',
@@ -69,8 +70,13 @@ export function sampleReceiptInput(
         ? [
             {
               method: 'CARD',
-              amount: '200.00',
+              amount: '120.00',
               tipAmount: '20.00',
+            },
+            {
+              method: 'CARD',
+              amount: '80.00',
+              tipAmount: '0.00',
             },
           ]
         : [],

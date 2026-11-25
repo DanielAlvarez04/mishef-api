@@ -390,6 +390,7 @@ export class MercadoPagoPointService {
         id: true,
         ticketNumber: true,
         ticketUid: true,
+        servedByName: true,
         tableNumber: true,
         partySize: true,
         isTakeaway: true,
@@ -413,6 +414,7 @@ export class MercadoPagoPointService {
         branch: {
           select: { name: true, address: true, receiptTemplate: true },
         },
+        user: { select: { name: true, username: true } },
         rounds: {
           where: { status: { not: OrderRoundStatus.CANCELLED } },
           orderBy: { createdAt: 'asc' },
@@ -512,6 +514,11 @@ export class MercadoPagoPointService {
         order: {
           ticketNumber: ticket?.number ?? order.ticketNumber,
           ticketUid: ticket?.uid ?? order.ticketUid,
+          servedByName:
+            order.servedByName ??
+            order.user?.name ??
+            order.user?.username ??
+            null,
           tableNumber: order.tableNumber,
           partySize: order.partySize,
           isTakeaway: order.isTakeaway,

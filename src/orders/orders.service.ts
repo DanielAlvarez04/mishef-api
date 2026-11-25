@@ -230,6 +230,19 @@ export class OrdersService {
     }
 
     const created = await this.prisma.$transaction(async (tx) => {
+      const actor = await tx.membership.findFirst({
+        where: {
+          userId,
+          ...(organizationId ? { organizationId } : {}),
+        },
+        select: {
+          username: true,
+          user: { select: { name: true } },
+        },
+      });
+      const servedByName =
+        actor?.user.name?.trim() || actor?.username?.trim() || null;
+
       const channel =
         dto.channel ??
         (dto.isTakeaway ? OrderChannel.COUNTER : OrderChannel.DINE_IN);
@@ -306,6 +319,7 @@ export class OrdersService {
           scheduledAt: dto.scheduledAt ? new Date(dto.scheduledAt) : null,
           ticketNumber: ticket.number,
           ticketUid: ticket.uid,
+          servedByName,
           total: deliveryFee,
           subtotal: deliveryFee,
           idempotencyKey,
