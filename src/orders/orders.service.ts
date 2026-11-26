@@ -117,7 +117,9 @@ const TICKET_TRANSITIONS: Record<
 };
 
 const kitchenTicketInclude: Prisma.KitchenTicketInclude = {
-  station: { select: { id: true, name: true, code: true, color: true } },
+  station: {
+    select: { id: true, name: true, code: true, color: true, slaMinutes: true },
+  },
   assignedMembership: {
     select: { id: true, user: { select: { name: true, username: true } } },
   },
@@ -149,6 +151,7 @@ const kitchenTicketInclude: Prisma.KitchenTicketInclude = {
       sentAt: true,
       createdAt: true,
       orderId: true,
+      estimatedMinutes: true,
       order: {
         select: {
           id: true,
@@ -1481,7 +1484,14 @@ export class OrdersService {
         isActive: true,
       },
       orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
-      select: { id: true, name: true, code: true, type: true, color: true },
+      select: {
+        id: true,
+        name: true,
+        code: true,
+        type: true,
+        color: true,
+        slaMinutes: true,
+      },
     });
   }
 
@@ -1564,6 +1574,7 @@ export class OrdersService {
           color: true,
           type: true,
           sortOrder: true,
+          slaMinutes: true,
         },
       }),
       this.prisma.kitchenTicket.findMany({

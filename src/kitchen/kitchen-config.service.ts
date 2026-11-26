@@ -298,6 +298,7 @@ export class KitchenConfigService {
         type: dto.type ?? KitchenStationType.CUSTOM,
         color: dto.color?.trim() || null,
         sortOrder: dto.sortOrder ?? 0,
+        slaMinutes: dto.slaMinutes ?? null,
       },
     });
   }
@@ -330,6 +331,12 @@ export class KitchenConfigService {
       dto.sortOrder !== station.sortOrder
     ) {
       data.sortOrder = dto.sortOrder;
+    }
+    if (
+      dto.slaMinutes !== undefined &&
+      dto.slaMinutes !== station.slaMinutes
+    ) {
+      data.slaMinutes = dto.slaMinutes;
     }
     if (dto.isActive !== undefined && dto.isActive !== station.isActive) {
       data.isActive = dto.isActive;

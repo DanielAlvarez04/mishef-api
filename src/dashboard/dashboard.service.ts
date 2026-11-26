@@ -1103,7 +1103,7 @@ export class DashboardService {
             readyAt: true,
             pickedUpAt: true,
             deliveredAt: true,
-            station: { select: { id: true, name: true } },
+            station: { select: { id: true, name: true, slaMinutes: true } },
             assignedMembership: {
               select: {
                 user: { select: { name: true } },
@@ -1182,6 +1182,7 @@ export class DashboardService {
         stationId: string;
         stationName: string;
         tickets: number;
+        slaMinutes: number | null;
         wait: number[];
         prep: number[];
         pickup: number[];
@@ -1207,6 +1208,7 @@ export class DashboardService {
         stationId: ticket.stationId,
         stationName: ticket.station.name,
         tickets: 0,
+        slaMinutes: ticket.station.slaMinutes,
         wait: [],
         prep: [],
         pickup: [],
@@ -1224,10 +1226,10 @@ export class DashboardService {
         const prepMinutes = minutesBetween(ticket.startedAt, ticket.readyAt);
         station.prep.push(prepMinutes);
 
-        if (
-          ticket.orderRound.estimatedMinutes !== null &&
-          prepMinutes > ticket.orderRound.estimatedMinutes
-        ) {
+        const targetMinutes =
+          ticket.station.slaMinutes ?? ticket.orderRound.estimatedMinutes;
+
+        if (targetMinutes !== null && prepMinutes > targetMinutes) {
           station.late += 1;
         }
       }
@@ -1279,6 +1281,7 @@ export class DashboardService {
         stationId: station.stationId,
         stationName: station.stationName,
         tickets: station.tickets,
+        slaMinutes: station.slaMinutes,
         averageWaitMinutes: average(station.wait),
         averagePrepMinutes: average(station.prep),
         averagePickupMinutes: average(station.pickup),

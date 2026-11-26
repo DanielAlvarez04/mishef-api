@@ -52,6 +52,13 @@ export class CreateKitchenStationDto {
   @Min(0)
   @Max(999)
   sortOrder?: number;
+
+  /** Minutos objetivo de preparación; `null` = sin SLA propio. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(240)
+  slaMinutes?: number | null;
 }
 
 export class UpdateKitchenStationDto {
@@ -82,6 +89,13 @@ export class UpdateKitchenStationDto {
   @Min(0)
   @Max(999)
   sortOrder?: number;
+
+  /** Minutos objetivo de preparación; `null` = sin SLA propio. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(240)
+  slaMinutes?: number | null;
 
   @IsOptional()
   @IsBoolean()

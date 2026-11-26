@@ -2457,6 +2457,8 @@ model KitchenStation {
   type           KitchenStationType @default(CUSTOM)
   color          String?
   sortOrder      Int                @default(0)
+  /// Minutos objetivo de preparación; `null` = usa el estimado de la ronda o 15.
+  slaMinutes     Int?
   isActive       Boolean            @default(true)
   createdAt      DateTime           @default(now())
   updatedAt      DateTime           @updatedAt
