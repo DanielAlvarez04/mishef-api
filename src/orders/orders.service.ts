@@ -2492,10 +2492,11 @@ export class OrdersService {
   }
 
   /**
-   * Cierra automáticamente una cuenta cuando ya no tiene rondas activas y está
-   * completamente pagada. Aplica a todos los canales: el cobro puede ocurrir
-   * antes o después de que cocina entregue, pero la cuenta no se libera hasta
-   * que no queden tickets activos.
+   * Cierra una cuenta pagada que quedó abierta.
+   *
+   * El cierre normal ocurre al confirmar el pago; este respaldo se ejecuta al
+   * entregar o cancelar tickets para cuentas que se pagaron antes del cierre
+   * automático. Exige que no queden rondas activas.
    */
   private async maybeAutoClosePaidOrder(
     tx: Prisma.TransactionClient,

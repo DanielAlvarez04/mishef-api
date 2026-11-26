@@ -7,7 +7,6 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
-  OrderRoundStatus,
   OrderStatus,
   PaymentMethod,
   PaymentStatus,
@@ -28,16 +27,6 @@ import {
   VoidPaymentDto,
 } from './dto/payments.dto';
 import { ProviderPaymentRegistry } from './provider-payment.registry';
-
-const ACTIVE_ROUND_STATUSES = [
-  OrderRoundStatus.PENDING,
-  OrderRoundStatus.HELD,
-  OrderRoundStatus.PENDING_PAYMENT,
-  OrderRoundStatus.FIRED,
-  OrderRoundStatus.PREPARING,
-  OrderRoundStatus.READY,
-  OrderRoundStatus.PICKED_UP,
-];
 
 const paymentInclude = {
   order: {
@@ -598,12 +587,15 @@ export class PaymentsService {
         userId: actor.id,
         source: 'offline_reconciliation',
       });
+      const autoClosed = Boolean(
+        (confirmed as { orderClosed?: boolean }).orderClosed,
+      );
 
-      let closed = false;
+      let closed = autoClosed;
       let order: unknown = null;
       let closeMessage: string | null = null;
 
-      if (dto.closeOrder !== false) {
+      if (dto.closeOrder !== false && !autoClosed) {
         try {
           order = await this.closeOrder(
             organizationId,
@@ -745,7 +737,13 @@ export class PaymentsService {
     }
 
     if (payment.status === PaymentStatus.CONFIRMED) {
-      return { ...payment, duplicated: true };
+      const orderClosed = await this.autoCloseIfPaid(
+        organizationId,
+        payment.orderId,
+        options.userId ?? payment.userId ?? null,
+      );
+
+      return { ...payment, duplicated: true, orderClosed };
     }
 
     // Un link anulado localmente puede pagarse igual si el cliente conservó la
@@ -862,7 +860,33 @@ export class PaymentsService {
       },
     ]);
 
-    return result;
+    const orderClosed = await this.autoCloseIfPaid(
+      organizationId,
+      payment.orderId,
+      options.userId ?? payment.userId ?? null,
+    );
+
+    return { ...result, orderClosed };
+  }
+
+  /**
+   * Cierra la cuenta en cuanto los pagos confirmados cubren el total.
+   *
+   * No es un error si todavía falta saldo o hay cobros pendientes: la cuenta
+   * sigue abierta y el cierre se reintenta con el siguiente pago. Los tickets
+   * de cocina no bloquean el cierre.
+   */
+  private async autoCloseIfPaid(
+    organizationId: string | null,
+    orderId: string,
+    userId: string | null,
+  ) {
+    try {
+      await this.closeOrder(organizationId, userId, orderId);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -1097,18 +1121,12 @@ export class PaymentsService {
    * haber pagos pendientes. Los tickets de cocina pueden seguir activos: la
    * cuenta se cierra al cobrar y el ticket conserva su propio ciclo.
    */
-  async closeOrder(organizationId: string | null, userId: string, orderId: string) {
+  async closeOrder(
+    organizationId: string | null,
+    userId: string | null,
+    orderId: string,
+  ) {
     const order = await this.getOpenOrder(organizationId, orderId);
-
-    const activeRounds = await this.prisma.orderRound.count({
-      where: { orderId, status: { in: ACTIVE_ROUND_STATUSES } },
-    });
-
-    if (activeRounds > 0) {
-      throw new BadRequestException(
-        'Todavía hay comandas activas en cocina; entrégalas o cancélalas antes de cerrar',
-      );
-    }
 
     // Un pago pendiente (incluido el de tarjeta offline) no cubre la cuenta:
     // cerrarla dejaría la mesa libre con un cobro sin confirmar.
