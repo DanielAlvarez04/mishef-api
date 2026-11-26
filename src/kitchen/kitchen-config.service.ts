@@ -69,6 +69,10 @@ const TOURNANT_PERMISSIONS = [
   'kitchen.transition.ready',
 ];
 
+/**
+ * Presets de puestos de cocina. Los nombres visibles van en español; los
+ * códigos se conservan como identificadores internos y para no romper datos.
+ */
 const PRESETS: Array<{
   code: string;
   name: string;
@@ -77,43 +81,43 @@ const PRESETS: Array<{
 }> = [
   {
     code: 'CHEF_DE_CUISINE',
-    name: 'Chef de cuisine',
+    name: 'Jefe de cocina',
     level: KitchenPositionLevel.MANAGEMENT,
     permissions: CHEF_PERMISSIONS,
   },
   {
     code: 'SOUS_CHEF',
-    name: 'Sous-chef',
+    name: 'Subjefe de cocina',
     level: KitchenPositionLevel.MANAGEMENT,
     permissions: SOUS_PERMISSIONS,
   },
   {
     code: 'CHEF_DE_PARTIE',
-    name: 'Chef de partie',
+    name: 'Jefe de partida',
     level: KitchenPositionLevel.CHEF_DE_PARTIE,
     permissions: PARTIE_PERMISSIONS,
   },
   {
     code: 'CUISINIER',
-    name: 'Cuisinier',
+    name: 'Cocinero',
     level: KitchenPositionLevel.COOK,
     permissions: COOK_PERMISSIONS,
   },
   {
     code: 'COMMIS',
-    name: 'Commis',
+    name: 'Asistente de cocina',
     level: KitchenPositionLevel.ASSISTANT,
     permissions: COMMIS_PERMISSIONS,
   },
   {
     code: 'TOURNANT',
-    name: 'Tournant',
+    name: 'Rondador',
     level: KitchenPositionLevel.COOK,
     permissions: TOURNANT_PERMISSIONS,
   },
   {
     code: 'ABOYEUR',
-    name: 'Aboyeur / Expo',
+    name: 'Camarero de pase',
     level: KitchenPositionLevel.EXPO,
     permissions: EXPO_PERMISSIONS,
   },
