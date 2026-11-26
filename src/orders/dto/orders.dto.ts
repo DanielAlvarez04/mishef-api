@@ -111,6 +111,16 @@ export class SendRoundDto {
   @IsString()
   @MaxLength(80)
   idempotencyKey?: string;
+
+  /** Mantener la ronda en espera (modo Avanzado, cursos). */
+  @IsOptional()
+  @IsBoolean()
+  hold?: boolean;
+
+  /** Curso al que pertenece la ronda (modo Avanzado). */
+  @IsOptional()
+  @IsString()
+  courseId?: string;
 }
 
 /** Apertura de una cuenta (pedido). */

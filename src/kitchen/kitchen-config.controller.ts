@@ -20,10 +20,12 @@ import { CurrentBranch } from '../common/decorators/current-branch.decorator';
 import { RequirePermissions } from '../common/decorators/require-permissions.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import {
+  CreateKitchenCourseDto,
   CreateKitchenPositionDto,
   CreateKitchenRoutingDto,
   CreateKitchenStationDto,
   UpdateKitchenAssignmentDto,
+  UpdateKitchenCourseDto,
   UpdateKitchenModeDto,
   UpdateKitchenPositionDto,
   UpdateKitchenRoutingDto,
@@ -157,5 +159,31 @@ export class KitchenConfigController {
   @Delete('routing/:id')
   deleteRouting(@CurrentUser() user: JwtUser, @Param('id') id: string) {
     return this.config.deleteRouting(user.organizationId, id);
+  }
+
+  @ApiOperation({ summary: 'Crear curso' })
+  @Post('courses')
+  createCourse(
+    @CurrentUser() user: JwtUser,
+    @Body() dto: CreateKitchenCourseDto,
+  ) {
+    return this.config.createCourse(user.organizationId, dto);
+  }
+
+  @ApiOperation({ summary: 'Actualizar curso' })
+  @Patch('courses/:id')
+  updateCourse(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Body() dto: UpdateKitchenCourseDto,
+  ) {
+    return this.config.updateCourse(user.organizationId, id, dto);
+  }
+
+  @ApiOperation({ summary: 'Desactivar curso' })
+  @HttpCode(HttpStatus.OK)
+  @Delete('courses/:id')
+  deactivateCourse(@CurrentUser() user: JwtUser, @Param('id') id: string) {
+    return this.config.deactivateCourse(user.organizationId, id);
   }
 }

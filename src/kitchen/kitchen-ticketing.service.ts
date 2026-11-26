@@ -41,7 +41,7 @@ export class KitchenTicketingService {
     if (branch?.kitchenMode !== KitchenMode.ADVANCED) return [];
 
     const itemIds = [...new Set(input.items.map((item) => item.itemId))];
-    const [items, rules, stations] = await Promise.all([
+    const [items, rules, stationRows] = await Promise.all([
       tx.item.findMany({
         where: { id: { in: itemIds } },
         select: { id: true, categoryId: true, defaultStationId: true },
@@ -73,7 +73,22 @@ export class KitchenTicketingService {
       }),
     ]);
 
-    if (stations.length === 0) return [];
+    let stations = stationRows;
+
+    if (stations.length === 0) {
+      const fallback = await tx.kitchenStation.create({
+        data: {
+          organizationId: input.organizationId,
+          branchId: input.branchId,
+          name: 'Cocina',
+          code: 'COCINA',
+          type: 'CUSTOM',
+        },
+        select: { id: true },
+      });
+
+      stations = [fallback];
+    }
 
     const stationIds = new Set(stations.map((station) => station.id));
     const itemById = new Map(items.map((item) => [item.id, item]));

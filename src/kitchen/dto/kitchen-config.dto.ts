@@ -198,3 +198,34 @@ export class UpdateKitchenRoutingDto {
   @Max(999)
   priority?: number;
 }
+
+export class CreateKitchenCourseDto {
+  @IsString()
+  @MinLength(2)
+  @MaxLength(60)
+  name!: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(999)
+  sortOrder?: number;
+}
+
+export class UpdateKitchenCourseDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  @MaxLength(60)
+  name?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(999)
+  sortOrder?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+}

@@ -14,10 +14,12 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { isEmptyPatch, sameStringSet } from '../common/patch';
 import {
+  CreateKitchenCourseDto,
   CreateKitchenPositionDto,
   CreateKitchenRoutingDto,
   CreateKitchenStationDto,
   UpdateKitchenAssignmentDto,
+  UpdateKitchenCourseDto,
   UpdateKitchenPositionDto,
   UpdateKitchenRoutingDto,
   UpdateKitchenStationDto,
@@ -136,7 +138,7 @@ export class KitchenConfigService {
     }
 
     const effectiveBranchId = branch?.id ?? null;
-    const [stations, positions, members, routing] = await Promise.all([
+    const [stations, positions, members, routing, courses] = await Promise.all([
       this.prisma.kitchenStation.findMany({
         where: { organizationId: orgId, branchId: effectiveBranchId },
         orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
@@ -169,6 +171,10 @@ export class KitchenConfigService {
           menu: { select: { id: true, name: true } },
         },
       }),
+      this.prisma.kitchenCourse.findMany({
+        where: { organizationId: orgId },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      }),
     ]);
 
     return {
@@ -188,6 +194,7 @@ export class KitchenConfigService {
         ),
       })),
       routing,
+      courses,
     };
   }
 
@@ -630,6 +637,84 @@ export class KitchenConfigService {
 
     await this.prisma.kitchenStationRule.delete({ where: { id } });
     return { ok: true };
+  }
+
+  // --------------------------------------------------------------------------
+  // Cursos
+  // --------------------------------------------------------------------------
+
+  async createCourse(
+    organizationId: string | null,
+    dto: CreateKitchenCourseDto,
+  ) {
+    const orgId = this.requireOrganization(organizationId);
+    const name = dto.name.trim();
+
+    const duplicate = await this.prisma.kitchenCourse.findFirst({
+      where: { organizationId: orgId, name },
+      select: { id: true },
+    });
+
+    if (duplicate) {
+      throw new ConflictException('Ya existe un curso con ese nombre');
+    }
+
+    return this.prisma.kitchenCourse.create({
+      data: {
+        organizationId: orgId,
+        name,
+        sortOrder: dto.sortOrder ?? 0,
+      },
+    });
+  }
+
+  async updateCourse(
+    organizationId: string | null,
+    id: string,
+    dto: UpdateKitchenCourseDto,
+  ) {
+    const orgId = this.requireOrganization(organizationId);
+    const course = await this.prisma.kitchenCourse.findFirst({
+      where: { id, organizationId: orgId },
+    });
+
+    if (!course) throw new NotFoundException('Curso no encontrado');
+
+    const data: Prisma.KitchenCourseUpdateInput = {};
+    const name = dto.name?.trim();
+
+    if (name !== undefined && name !== course.name) data.name = name;
+    if (
+      dto.sortOrder !== undefined &&
+      dto.sortOrder !== course.sortOrder
+    ) {
+      data.sortOrder = dto.sortOrder;
+    }
+    if (dto.isActive !== undefined && dto.isActive !== course.isActive) {
+      data.isActive = dto.isActive;
+    }
+
+    if (isEmptyPatch(data)) return course;
+
+    return this.prisma.kitchenCourse.update({
+      where: { id },
+      data,
+    });
+  }
+
+  async deactivateCourse(organizationId: string | null, id: string) {
+    const orgId = this.requireOrganization(organizationId);
+    const course = await this.prisma.kitchenCourse.findFirst({
+      where: { id, organizationId: orgId },
+    });
+
+    if (!course) throw new NotFoundException('Curso no encontrado');
+    if (!course.isActive) return course;
+
+    return this.prisma.kitchenCourse.update({
+      where: { id },
+      data: { isActive: false },
+    });
   }
 
   // --------------------------------------------------------------------------

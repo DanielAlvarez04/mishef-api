@@ -1085,6 +1085,38 @@ export class DashboardService {
       },
     });
 
+    const tickets = organizationId
+      ? await this.prisma.kitchenTicket.findMany({
+          where: {
+            organizationId,
+            ...(branchId ? { branchId } : {}),
+            createdAt: { gte: from, lte: to },
+          },
+          select: {
+            status: true,
+            stationId: true,
+            createdAt: true,
+            startedAt: true,
+            readyAt: true,
+            pickedUpAt: true,
+            deliveredAt: true,
+            station: { select: { id: true, name: true } },
+            assignedMembership: {
+              select: {
+                user: { select: { name: true } },
+                kitchenPosition: { select: { name: true } },
+              },
+            },
+            orderRound: {
+              select: {
+                estimatedMinutes: true,
+                course: { select: { name: true } },
+              },
+            },
+          },
+        })
+      : [];
+
     const byStatus = new Map<OrderRoundStatus, number>();
     const byDay = new Map<string, number>();
     const wait: number[] = [];
@@ -1141,6 +1173,138 @@ export class DashboardService {
       (pair) => pair.real <= pair.estimate * 1.1,
     ).length;
 
+    const stationMap = new Map<
+      string,
+      {
+        stationId: string;
+        stationName: string;
+        tickets: number;
+        wait: number[];
+        prep: number[];
+        pickup: number[];
+        delivery: number[];
+        total: number[];
+        late: number;
+      }
+    >();
+    const courseMap = new Map<
+      string,
+      { course: string; tickets: number; total: number[] }
+    >();
+    const positionMap = new Map<
+      string,
+      { position: string; tickets: number; total: number[] }
+    >();
+
+    const minutesBetween = (fromDate: Date, toDate: Date) =>
+      (toDate.getTime() - fromDate.getTime()) / 60000;
+
+    for (const ticket of tickets) {
+      const station = stationMap.get(ticket.stationId) ?? {
+        stationId: ticket.stationId,
+        stationName: ticket.station.name,
+        tickets: 0,
+        wait: [],
+        prep: [],
+        pickup: [],
+        delivery: [],
+        total: [],
+        late: 0,
+      };
+
+      station.tickets += 1;
+
+      if (ticket.createdAt && ticket.startedAt) {
+        station.wait.push(minutesBetween(ticket.createdAt, ticket.startedAt));
+      }
+      if (ticket.startedAt && ticket.readyAt) {
+        const prepMinutes = minutesBetween(ticket.startedAt, ticket.readyAt);
+        station.prep.push(prepMinutes);
+
+        if (
+          ticket.orderRound.estimatedMinutes !== null &&
+          prepMinutes > ticket.orderRound.estimatedMinutes
+        ) {
+          station.late += 1;
+        }
+      }
+      if (ticket.readyAt && ticket.pickedUpAt) {
+        station.pickup.push(minutesBetween(ticket.readyAt, ticket.pickedUpAt));
+      }
+      if (ticket.pickedUpAt && ticket.deliveredAt) {
+        station.delivery.push(
+          minutesBetween(ticket.pickedUpAt, ticket.deliveredAt),
+        );
+      }
+      if (ticket.createdAt && ticket.deliveredAt) {
+        station.total.push(minutesBetween(ticket.createdAt, ticket.deliveredAt));
+      }
+
+      stationMap.set(ticket.stationId, station);
+
+      const courseName = ticket.orderRound.course?.name ?? "Sin curso";
+      const course = courseMap.get(courseName) ?? {
+        course: courseName,
+        tickets: 0,
+        total: [],
+      };
+
+      course.tickets += 1;
+      if (ticket.createdAt && ticket.deliveredAt) {
+        course.total.push(minutesBetween(ticket.createdAt, ticket.deliveredAt));
+      }
+      courseMap.set(courseName, course);
+
+      const positionName =
+        ticket.assignedMembership?.kitchenPosition?.name ??
+        ticket.assignedMembership?.user.name ??
+        "Sin asignar";
+      const position = positionMap.get(positionName) ?? {
+        position: positionName,
+        tickets: 0,
+        total: [],
+      };
+      position.tickets += 1;
+      if (ticket.createdAt && ticket.deliveredAt) {
+        position.total.push(minutesBetween(ticket.createdAt, ticket.deliveredAt));
+      }
+      positionMap.set(positionName, position);
+    }
+
+    const byStation = [...stationMap.values()]
+      .map((station) => ({
+        stationId: station.stationId,
+        stationName: station.stationName,
+        tickets: station.tickets,
+        averageWaitMinutes: average(station.wait),
+        averagePrepMinutes: average(station.prep),
+        averagePickupMinutes: average(station.pickup),
+        averageDeliveryMinutes: average(station.delivery),
+        averageTotalMinutes: average(station.total),
+        lateTickets: station.late,
+        lateRate:
+          station.tickets > 0
+            ? Math.round((station.late / station.tickets) * 1000) / 1000
+            : null,
+      }))
+      .sort((left, right) => right.tickets - left.tickets);
+
+    const byCourse = [...courseMap.values()]
+      .map((course) => ({
+        course: course.course,
+        tickets: course.tickets,
+        averageTotalMinutes: average(course.total),
+      }))
+      .sort((left, right) => right.tickets - left.tickets);
+
+    const byPosition = [...positionMap.values()]
+      .map((position) => ({
+        position: position.position,
+        tickets: position.tickets,
+        averageTotalMinutes: average(position.total),
+      }))
+      .sort((left, right) => right.tickets - left.tickets);
+
     return {
       from: from.toISOString(),
       to: to.toISOString(),
@@ -1162,6 +1326,9 @@ export class DashboardService {
       byDay: [...byDay]
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([date, count]) => ({ date, count })),
+      byStation,
+      byCourse,
+      byPosition,
     };
   }
 }

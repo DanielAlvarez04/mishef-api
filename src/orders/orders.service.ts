@@ -720,6 +720,47 @@ export class OrdersService {
       select: { taxRate: true },
     }) : { taxRate: new Prisma.Decimal(0) };
 
+    const branch = order.branchId
+      ? await this.prisma.branch.findUnique({
+          where: { id: order.branchId },
+          select: { id: true, kitchenMode: true },
+        })
+      : null;
+    const advanced = branch?.kitchenMode === KitchenMode.ADVANCED;
+    const hold = advanced && dto.hold === true;
+
+    let courseId: string | null = null;
+
+    if (dto.courseId) {
+      if (!advanced) {
+        throw new BadRequestException(
+          'Los cursos solo están disponibles en cocina Avanzada',
+        );
+      }
+
+      if (!organizationId) {
+        throw new BadRequestException('La sesión no tiene un negocio activo');
+      }
+
+      const course = await this.prisma.kitchenCourse.findFirst({
+        where: {
+          id: dto.courseId,
+          organizationId,
+          isActive: true,
+        },
+        select: { id: true },
+      });
+
+      if (!course) throw new NotFoundException('Curso no encontrado');
+      courseId = course.id;
+    }
+
+    const initialStatus = hold
+      ? OrderRoundStatus.HELD
+      : advanced
+        ? OrderRoundStatus.FIRED
+        : OrderRoundStatus.PENDING;
+
     const { items, selections } = await this.buildItems(
       organizationId,
       dto.items,
@@ -759,7 +800,10 @@ export class OrdersService {
       const created = await tx.orderRound.create({
         data: {
           orderId,
-          status: OrderRoundStatus.PENDING,
+          status: initialStatus,
+          courseId,
+          heldAt: hold ? new Date() : null,
+          firedAt: advanced && !hold ? new Date() : null,
           sentAt: new Date(),
           idempotencyKey,
           estimatedMinutes,
@@ -768,23 +812,25 @@ export class OrdersService {
         include: roundInclude,
       });
 
-      await this.kitchenTicketing.createForRound(tx, {
-        organizationId,
-        branchId: order.branchId,
-        roundId: created.id,
-        items: created.items.map((item) => ({
-          id: item.id,
-          itemId: item.itemId,
-        })),
-      });
+      if (!hold) {
+        await this.kitchenTicketing.createForRound(tx, {
+          organizationId,
+          branchId: order.branchId,
+          roundId: created.id,
+          items: created.items.map((item) => ({
+            id: item.id,
+            itemId: item.itemId,
+          })),
+        });
+      }
 
       await tx.orderStatusHistory.create({
         data: {
           orderRoundId: created.id,
           previousStatus: null,
-          newStatus: OrderRoundStatus.PENDING,
+          newStatus: initialStatus,
           changedById: userId,
-          reason: 'Ronda enviada a cocina',
+          reason: hold ? 'Ronda retenida para un curso' : 'Ronda enviada a cocina',
         },
       });
 
@@ -911,14 +957,115 @@ export class OrdersService {
    * - Cancelar después de empezar la preparación **no** devuelve stock
    *   automáticamente (`plan.md` §6.6): se corrige con un ajuste auditado.
    */
+  /**
+   * Dispara una ronda retenida (HELD) en modo Avanzado.
+   *
+   * Crea los tickets por estación y deja la ronda en FIRED. Lo puede hacer el
+   * mesero o el chef; la estación se resuelve con el ruteo configurado.
+   */
+  async fireRound(user: JwtUser, roundId: string) {
+    if (!user.organizationId) {
+      throw new BadRequestException('La sesión no tiene un negocio activo');
+    }
+
+    const round = await this.prisma.orderRound.findFirst({
+      where: {
+        id: roundId,
+        order: { organizationId: user.organizationId },
+      },
+      include: {
+        order: {
+          select: {
+            id: true,
+            branchId: true,
+            tableNumber: true,
+            isTakeaway: true,
+            status: true,
+          },
+        },
+        items: { select: { id: true, itemId: true } },
+      },
+    });
+
+    if (!round) throw new NotFoundException('Ronda no encontrada');
+
+    if (round.status !== OrderRoundStatus.HELD) {
+      throw new BadRequestException('La ronda no está retenida');
+    }
+
+    if (!round.order.branchId) {
+      throw new BadRequestException('La ronda no tiene sucursal');
+    }
+
+    const branch = await this.prisma.branch.findUnique({
+      where: { id: round.order.branchId },
+      select: { kitchenMode: true },
+    });
+
+    if (branch?.kitchenMode !== KitchenMode.ADVANCED) {
+      throw new BadRequestException('La sucursal no usa cocina Avanzada');
+    }
+
+    const now = new Date();
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const claimed = await tx.orderRound.updateMany({
+        where: { id: roundId, status: OrderRoundStatus.HELD },
+        data: {
+          status: OrderRoundStatus.FIRED,
+          firedAt: now,
+        },
+      });
+
+      if (claimed.count === 0) {
+        throw new ConflictException('La ronda ya cambió de estado');
+      }
+
+      await this.kitchenTicketing.createForRound(tx, {
+        organizationId: user.organizationId,
+        branchId: round.order.branchId,
+        roundId,
+        items: round.items.map((item) => ({
+          id: item.id,
+          itemId: item.itemId,
+        })),
+      });
+
+      await tx.orderStatusHistory.create({
+        data: {
+          orderRoundId: roundId,
+          previousStatus: OrderRoundStatus.HELD,
+          newStatus: OrderRoundStatus.FIRED,
+          changedById: user.sub,
+          reason: 'Curso disparado',
+        },
+      });
+
+      return tx.orderRound.findUniqueOrThrow({
+        where: { id: roundId },
+        include: roundInclude,
+      });
+    });
+
+    this.events.publish({
+      type: 'ROUND_UPDATED',
+      organizationId: user.organizationId,
+      branchId: round.order.branchId,
+      orderId: round.order.id,
+      roundId,
+      status: OrderRoundStatus.FIRED,
+    });
+
+    return updated;
+  }
+
   async transitionRound(
     organizationId: string | null,
     userId: string,
     orderId: string,
     roundId: string,
     dto: TransitionRoundDto,
-  ) {
-    const order = await this.getOrderRow(organizationId, orderId);
+  ) {    const order = await this.getOrderRow(organizationId, orderId);
 
     if (order.branchId) {
       const branch = await this.prisma.branch.findUnique({
@@ -1278,6 +1425,47 @@ export class OrdersService {
     return this.enrichedKitchenRounds(organizationId, branchId);
   }
 
+  /** Modo efectivo de la sucursal (para POS y cocina). */
+  async kitchenMode(user: JwtUser, branchId: string | null) {
+    if (!user.organizationId) return { mode: KitchenMode.GENERAL };
+
+    const effectiveBranchId = branchId ?? user.branchId ?? null;
+
+    if (!effectiveBranchId) return { mode: KitchenMode.GENERAL };
+
+    const branch = await this.prisma.branch.findFirst({
+      where: { id: effectiveBranchId, organizationId: user.organizationId },
+      select: { kitchenMode: true },
+    });
+
+    return { mode: branch?.kitchenMode ?? KitchenMode.GENERAL };
+  }
+
+  /** Cursos activos de la sucursal (modo Avanzado). */
+  async kitchenCourses(user: JwtUser, branchId: string | null) {
+    if (!user.organizationId) return [];
+
+    const effectiveBranchId = branchId ?? user.branchId ?? null;
+
+    if (!effectiveBranchId) return [];
+
+    const branch = await this.prisma.branch.findFirst({
+      where: { id: effectiveBranchId, organizationId: user.organizationId },
+      select: { kitchenMode: true },
+    });
+
+    if (branch?.kitchenMode !== KitchenMode.ADVANCED) return [];
+
+    return this.prisma.kitchenCourse.findMany({
+      where: {
+        organizationId: user.organizationId,
+        isActive: true,
+      },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      select: { id: true, name: true, sortOrder: true },
+    });
+  }
+
   /**
    * Tablero de tickets por estación (modo Avanzado).
    *
@@ -1288,13 +1476,13 @@ export class OrdersService {
     const organizationId = user.organizationId;
 
     if (!organizationId) {
-      return { mode: KitchenMode.GENERAL, stations: [], tickets: [] };
+      return { mode: KitchenMode.GENERAL, stations: [], tickets: [], heldRounds: [] };
     }
 
     const effectiveBranchId = branchId ?? user.branchId ?? null;
 
     if (!effectiveBranchId) {
-      return { mode: KitchenMode.GENERAL, stations: [], tickets: [] };
+      return { mode: KitchenMode.GENERAL, stations: [], tickets: [], heldRounds: [] };
     }
 
     const branch = await this.prisma.branch.findFirst({
@@ -1315,6 +1503,7 @@ export class OrdersService {
         userId_organizationId: { userId: user.sub, organizationId },
       },
       select: {
+        id: true,
         kitchenPositionId: true,
         kitchenPosition: { select: { permissions: true } },
         kitchenAssignments: { select: { stationId: true } },
@@ -1328,7 +1517,7 @@ export class OrdersService {
       isAdmin || isWaiter || positionPermissions.includes('kitchen.view.all');
 
     if (!canViewAll && !membership?.kitchenPositionId) {
-      return { mode: KitchenMode.ADVANCED, stations: [], tickets: [] };
+      return { mode: KitchenMode.ADVANCED, stations: [], tickets: [], heldRounds: [] };
     }
 
     const stationIds = canViewAll
@@ -1337,10 +1526,10 @@ export class OrdersService {
         [];
 
     if (stationIds && stationIds.length === 0) {
-      return { mode: KitchenMode.ADVANCED, stations: [], tickets: [] };
+      return { mode: KitchenMode.ADVANCED, stations: [], tickets: [], heldRounds: [] };
     }
 
-    const [stations, tickets] = await Promise.all([
+    const [stations, tickets, heldRounds] = await Promise.all([
       this.prisma.kitchenStation.findMany({
         where: {
           organizationId,
@@ -1375,9 +1564,43 @@ export class OrdersService {
         orderBy: [{ createdAt: 'asc' }],
         include: kitchenTicketInclude,
       }),
+      this.prisma.orderRound.findMany({
+        where: {
+          status: OrderRoundStatus.HELD,
+          order: {
+            organizationId,
+            branchId: branch.id,
+            status: OrderStatus.OPEN,
+          },
+        },
+        orderBy: [{ createdAt: 'asc' }],
+        select: {
+          id: true,
+          createdAt: true,
+          sentAt: true,
+          course: { select: { id: true, name: true } },
+          order: {
+            select: {
+              id: true,
+              tableNumber: true,
+              channel: true,
+              customerName: true,
+            },
+          },
+          items: {
+            select: {
+              id: true,
+              itemName: true,
+              variantName: true,
+              quantity: true,
+              notes: true,
+            },
+          },
+        },
+      }),
     ]);
 
-    return { mode: KitchenMode.ADVANCED, stations, tickets };
+    return { mode: KitchenMode.ADVANCED, stations, tickets, heldRounds };
   }
 
   /**
@@ -1440,6 +1663,7 @@ export class OrdersService {
         },
       },
       select: {
+        id: true,
         kitchenPositionId: true,
         kitchenPosition: { select: { permissions: true } },
         kitchenAssignments: { select: { stationId: true } },
@@ -1533,6 +1757,11 @@ export class OrdersService {
           ...(dto.status === KitchenTicketStatus.CANCELLED
             ? { cancelledAt: now, cancelReason: dto.reason?.trim() || null }
             : {}),
+          ...(dto.status === KitchenTicketStatus.PREPARING &&
+          !ticket.assignedMembershipId &&
+          membership?.id
+            ? { assignedMembershipId: membership.id }
+            : {}),
         },
       });
 
@@ -1610,8 +1839,111 @@ export class OrdersService {
     };
   }
 
-  /** Recalcula el estado agregado de la ronda a partir de sus tickets. */
-  private async syncRoundFromTickets(
+  /**
+   * Rehace un ticket de estación: crea uno nuevo con los mismos ítems en la
+   * misma estación y lo deja pendiente. La ronda se recalcula sola.
+   */
+  async refireKitchenTicket(user: JwtUser, ticketId: string) {
+    if (!user.organizationId) {
+      throw new BadRequestException('La sesión no tiene un negocio activo');
+    }
+
+    const ticket = await this.prisma.kitchenTicket.findFirst({
+      where: { id: ticketId, organizationId: user.organizationId },
+      include: {
+        items: { select: { id: true, orderItemId: true } },
+        orderRound: {
+          select: {
+            id: true,
+            orderId: true,
+            order: { select: { branchId: true } },
+          },
+        },
+      },
+    });
+
+    if (!ticket) throw new NotFoundException('Ticket no encontrado');
+
+    const branch = ticket.branchId
+      ? await this.prisma.branch.findFirst({
+          where: { id: ticket.branchId, organizationId: user.organizationId },
+          select: { kitchenMode: true },
+        })
+      : null;
+
+    if (branch?.kitchenMode !== KitchenMode.ADVANCED) {
+      throw new BadRequestException('La sucursal no usa cocina Avanzada');
+    }
+
+    const membership = await this.prisma.membership.findUnique({
+      where: {
+        userId_organizationId: {
+          userId: user.sub,
+          organizationId: user.organizationId,
+        },
+      },
+      select: {
+        id: true,
+        kitchenPositionId: true,
+        kitchenPosition: { select: { permissions: true } },
+        kitchenAssignments: { select: { stationId: true } },
+      },
+    });
+
+    const permissions = membership?.kitchenPosition?.permissions ?? [];
+    const isAdmin = user.roles.includes(Role.ADMIN);
+    const canRefire = isAdmin || permissions.includes('kitchen.refire');
+
+    if (!canRefire) {
+      throw new ForbiddenException('No tienes permiso para rehacer tickets');
+    }
+
+    if (
+      !isAdmin &&
+      !permissions.includes('kitchen.view.all') &&
+      !membership?.kitchenAssignments.some(
+        (assignment) => assignment.stationId === ticket.stationId,
+      )
+    ) {
+      throw new ForbiddenException('Este ticket pertenece a otra estación');
+    }
+
+    const created = await this.prisma.$transaction(async (tx) => {
+      const replica = await tx.kitchenTicket.create({
+        data: {
+          organizationId: user.organizationId!,
+          branchId: ticket.branchId,
+          orderRoundId: ticket.orderRoundId,
+          stationId: ticket.stationId,
+          status: KitchenTicketStatus.PENDING,
+          items: {
+            create: ticket.items.map((item) => ({
+              orderItemId: item.orderItemId,
+              refiredFromId: item.id,
+            })),
+          },
+        },
+        include: kitchenTicketInclude,
+      });
+
+      await this.syncRoundFromTickets(tx, ticket.orderRoundId, user.sub);
+
+      return replica;
+    });
+
+    this.events.publish({
+      type: 'ROUND_UPDATED',
+      organizationId: user.organizationId,
+      branchId: ticket.branchId,
+      orderId: ticket.orderRound.orderId,
+      roundId: ticket.orderRoundId,
+      status: OrderRoundStatus.PENDING,
+    });
+
+    return created;
+  }
+
+  /** Recalcula el estado agregado de la ronda a partir de sus tickets. */  private async syncRoundFromTickets(
     tx: Prisma.TransactionClient,
     roundId: string,
     userId: string,
