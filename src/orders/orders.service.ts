@@ -1,11 +1,15 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import {
   InventoryMovementType,
+  KitchenItemStatus,
+  KitchenMode,
+  KitchenTicketStatus,
   OptionEffectAction,
   OptionSelection,
   OrderChannel,
@@ -14,6 +18,7 @@ import {
   PaymentStatus,
   Prisma,
   PromotionType,
+  Role,
   SplitStatus,
   UnitCode,
 } from '@prisma/client';
@@ -28,6 +33,7 @@ import {
   type PrepPriority,
 } from '../common/prep';
 import { KitchenService } from '../kitchen/kitchen.service';
+import { KitchenTicketingService } from '../kitchen/kitchen-ticketing.service';
 import {
   CancelOrderDto,
   CreateOrderDto,
@@ -40,6 +46,8 @@ import {
 import { OrdersEventsService } from './orders.events';
 import { OrderSplitsService } from './order-splits.service';
 import { TicketSequenceService } from '../tickets/ticket-sequence.service';
+import { TransitionKitchenTicketDto } from '../kitchen/dto/kitchen-ticket.dto';
+import type { JwtUser } from '../auth/auth.service';
 
 /** Estados a los que puede pasar cada estado de ronda (plan.md §6.6). */
 const ALLOWED_TRANSITIONS: Record<OrderRoundStatus, OrderRoundStatus[]> = {
@@ -81,6 +89,80 @@ const OPEN_ROUND_STATUSES = [
   OrderRoundStatus.READY,
   OrderRoundStatus.PICKED_UP,
 ];
+
+/** Transiciones de un ticket de estación. */
+const TICKET_TRANSITIONS: Record<
+  KitchenTicketStatus,
+  KitchenTicketStatus[]
+> = {
+  [KitchenTicketStatus.PENDING]: [
+    KitchenTicketStatus.PREPARING,
+    KitchenTicketStatus.CANCELLED,
+  ],
+  [KitchenTicketStatus.PREPARING]: [
+    KitchenTicketStatus.READY,
+    KitchenTicketStatus.CANCELLED,
+  ],
+  [KitchenTicketStatus.READY]: [
+    KitchenTicketStatus.PICKED_UP,
+    KitchenTicketStatus.DELIVERED,
+    KitchenTicketStatus.CANCELLED,
+  ],
+  [KitchenTicketStatus.PICKED_UP]: [
+    KitchenTicketStatus.DELIVERED,
+    KitchenTicketStatus.CANCELLED,
+  ],
+  [KitchenTicketStatus.DELIVERED]: [],
+  [KitchenTicketStatus.CANCELLED]: [],
+};
+
+const kitchenTicketInclude: Prisma.KitchenTicketInclude = {
+  station: { select: { id: true, name: true, code: true, color: true } },
+  assignedMembership: {
+    select: { id: true, user: { select: { name: true, username: true } } },
+  },
+  items: {
+    include: {
+      orderItem: {
+        include: {
+          extras: true,
+          options: true,
+          exclusions: {
+            include: {
+              ingredient: {
+                select: {
+                  id: true,
+                  name: true,
+                  baseUnit: true,
+                  displayUnit: true,
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  orderRound: {
+    select: {
+      id: true,
+      sentAt: true,
+      createdAt: true,
+      orderId: true,
+      order: {
+        select: {
+          id: true,
+          tableNumber: true,
+          channel: true,
+          customerName: true,
+          isTakeaway: true,
+          branchId: true,
+          status: true,
+        },
+      },
+    },
+  },
+};
 
 const roundInclude: Prisma.OrderRoundInclude = {
   items: {
@@ -172,6 +254,7 @@ export class OrdersService {
     private readonly events: OrdersEventsService,
     private readonly analytics: AnalyticsService,
     private readonly kitchen: KitchenService,
+    private readonly kitchenTicketing: KitchenTicketingService,
     private readonly splits: OrderSplitsService,
     private readonly tickets: TicketSequenceService,
   ) {}
@@ -685,6 +768,16 @@ export class OrdersService {
         include: roundInclude,
       });
 
+      await this.kitchenTicketing.createForRound(tx, {
+        organizationId,
+        branchId: order.branchId,
+        roundId: created.id,
+        items: created.items.map((item) => ({
+          id: item.id,
+          itemId: item.itemId,
+        })),
+      });
+
       await tx.orderStatusHistory.create({
         data: {
           orderRoundId: created.id,
@@ -826,6 +919,19 @@ export class OrdersService {
     dto: TransitionRoundDto,
   ) {
     const order = await this.getOrderRow(organizationId, orderId);
+
+    if (order.branchId) {
+      const branch = await this.prisma.branch.findUnique({
+        where: { id: order.branchId },
+        select: { kitchenMode: true },
+      });
+
+      if (branch?.kitchenMode === KitchenMode.ADVANCED) {
+        throw new BadRequestException(
+          'El modo Avanzado se opera por estación. Usa el tablero de tickets.',
+        );
+      }
+    }
 
     const round = await this.prisma.orderRound.findFirst({
       where: { id: roundId, orderId },
@@ -1170,6 +1276,434 @@ export class OrdersService {
 
   kitchenRounds(organizationId: string | null, branchId: string | null = null) {
     return this.enrichedKitchenRounds(organizationId, branchId);
+  }
+
+  /**
+   * Tablero de tickets por estación (modo Avanzado).
+   *
+   * El alcance se resuelve en el servidor: ADMIN y meseros ven todo; un
+   * `KITCHEN` con posición ve `kitchen.view.all` o solo sus estaciones.
+   */
+  async kitchenTickets(user: JwtUser, branchId: string | null) {
+    const organizationId = user.organizationId;
+
+    if (!organizationId) {
+      return { mode: KitchenMode.GENERAL, stations: [], tickets: [] };
+    }
+
+    const effectiveBranchId = branchId ?? user.branchId ?? null;
+
+    if (!effectiveBranchId) {
+      return { mode: KitchenMode.GENERAL, stations: [], tickets: [] };
+    }
+
+    const branch = await this.prisma.branch.findFirst({
+      where: { id: effectiveBranchId, organizationId },
+      select: { id: true, kitchenMode: true },
+    });
+
+    if (!branch || branch.kitchenMode !== KitchenMode.ADVANCED) {
+      return {
+        mode: branch?.kitchenMode ?? KitchenMode.GENERAL,
+        stations: [],
+        tickets: [],
+      };
+    }
+
+    const membership = await this.prisma.membership.findUnique({
+      where: {
+        userId_organizationId: { userId: user.sub, organizationId },
+      },
+      select: {
+        kitchenPositionId: true,
+        kitchenPosition: { select: { permissions: true } },
+        kitchenAssignments: { select: { stationId: true } },
+      },
+    });
+
+    const positionPermissions = membership?.kitchenPosition?.permissions ?? [];
+    const isAdmin = user.roles.includes(Role.ADMIN);
+    const isWaiter = user.roles.includes(Role.WAITER);
+    const canViewAll =
+      isAdmin || isWaiter || positionPermissions.includes('kitchen.view.all');
+
+    if (!canViewAll && !membership?.kitchenPositionId) {
+      return { mode: KitchenMode.ADVANCED, stations: [], tickets: [] };
+    }
+
+    const stationIds = canViewAll
+      ? undefined
+      : membership?.kitchenAssignments.map((assignment) => assignment.stationId) ??
+        [];
+
+    if (stationIds && stationIds.length === 0) {
+      return { mode: KitchenMode.ADVANCED, stations: [], tickets: [] };
+    }
+
+    const [stations, tickets] = await Promise.all([
+      this.prisma.kitchenStation.findMany({
+        where: {
+          organizationId,
+          branchId: branch.id,
+          isActive: true,
+          ...(stationIds ? { id: { in: stationIds } } : {}),
+        },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+        select: {
+          id: true,
+          name: true,
+          code: true,
+          color: true,
+          type: true,
+          sortOrder: true,
+        },
+      }),
+      this.prisma.kitchenTicket.findMany({
+        where: {
+          organizationId,
+          branchId: branch.id,
+          status: {
+            in: [
+              KitchenTicketStatus.PENDING,
+              KitchenTicketStatus.PREPARING,
+              KitchenTicketStatus.READY,
+              KitchenTicketStatus.PICKED_UP,
+            ],
+          },
+          ...(stationIds ? { stationId: { in: stationIds } } : {}),
+        },
+        orderBy: [{ createdAt: 'asc' }],
+        include: kitchenTicketInclude,
+      }),
+    ]);
+
+    return { mode: KitchenMode.ADVANCED, stations, tickets };
+  }
+
+  /**
+   * Cambia el estado de un ticket de estación.
+   *
+   * - Cocina (KITCHEN) inicia y marca listo en sus estaciones.
+   * - El mesero (WAITER) recoge en el pase y entrega en la mesa.
+   * - El agregado de la ronda se recalcula después de cada cambio.
+   */
+  async transitionKitchenTicket(
+    user: JwtUser,
+    ticketId: string,
+    dto: TransitionKitchenTicketDto,
+  ) {
+    if (!user.organizationId) {
+      throw new BadRequestException('La sesión no tiene un negocio activo');
+    }
+
+    const ticket = await this.prisma.kitchenTicket.findFirst({
+      where: { id: ticketId, organizationId: user.organizationId },
+      include: {
+        station: { select: { id: true, name: true } },
+        items: { select: { orderItemId: true } },
+        orderRound: {
+          select: {
+            id: true,
+            orderId: true,
+            order: {
+              select: {
+                tableNumber: true,
+                isTakeaway: true,
+                branchId: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!ticket) throw new NotFoundException('Ticket no encontrado');
+
+    const branch = ticket.branchId
+      ? await this.prisma.branch.findFirst({
+          where: { id: ticket.branchId, organizationId: user.organizationId },
+          select: { kitchenMode: true },
+        })
+      : null;
+
+    if (branch?.kitchenMode !== KitchenMode.ADVANCED) {
+      throw new BadRequestException(
+        'El ticket pertenece a una sucursal en modo General',
+      );
+    }
+
+    const membership = await this.prisma.membership.findUnique({
+      where: {
+        userId_organizationId: {
+          userId: user.sub,
+          organizationId: user.organizationId,
+        },
+      },
+      select: {
+        kitchenPositionId: true,
+        kitchenPosition: { select: { permissions: true } },
+        kitchenAssignments: { select: { stationId: true } },
+      },
+    });
+
+    const positionPermissions = membership?.kitchenPosition?.permissions ?? [];
+    const isAdmin = user.roles.includes(Role.ADMIN);
+    const isWaiter = user.roles.includes(Role.WAITER);
+    const isPickup =
+      dto.status === KitchenTicketStatus.PICKED_UP ||
+      dto.status === KitchenTicketStatus.DELIVERED;
+
+    if (isPickup) {
+      const allowed =
+        isAdmin ||
+        isWaiter ||
+        (dto.status === KitchenTicketStatus.PICKED_UP
+          ? positionPermissions.includes('kitchen.pickup')
+          : positionPermissions.includes('kitchen.deliver'));
+
+      if (!allowed) {
+        throw new ForbiddenException(
+          'Solo el mesero puede recoger o entregar un ticket',
+        );
+      }
+    } else {
+      const allowed =
+        isAdmin ||
+        (dto.status === KitchenTicketStatus.PREPARING &&
+          positionPermissions.includes('kitchen.transition.start')) ||
+        (dto.status === KitchenTicketStatus.READY &&
+          (positionPermissions.includes('kitchen.transition.ready') ||
+            positionPermissions.includes('kitchen.expo'))) ||
+        (dto.status === KitchenTicketStatus.CANCELLED &&
+          positionPermissions.includes('kitchen.void'));
+
+      if (!allowed) {
+        throw new ForbiddenException(
+          'No tienes permiso para operar este ticket',
+        );
+      }
+
+      if (
+        !isAdmin &&
+        !positionPermissions.includes('kitchen.view.all')
+      ) {
+        if (!membership?.kitchenPositionId) {
+          throw new ForbiddenException(
+            'Configura tu puesto de cocina para operar estaciones',
+          );
+        }
+
+        const assigned = membership.kitchenAssignments.some(
+          (assignment) => assignment.stationId === ticket.stationId,
+        );
+
+        if (!assigned) {
+          throw new ForbiddenException(
+            'Este ticket pertenece a otra estación',
+          );
+        }
+      }
+    }
+
+    if (!TICKET_TRANSITIONS[ticket.status].includes(dto.status)) {
+      throw new BadRequestException(
+        `No se puede pasar de ${ticket.status} a ${dto.status}`,
+      );
+    }
+
+    const now = new Date();
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      const claimed = await tx.kitchenTicket.updateMany({
+        where: { id: ticketId, status: ticket.status },
+        data: {
+          status: dto.status,
+          ...(dto.status === KitchenTicketStatus.PREPARING
+            ? { startedAt: now }
+            : {}),
+          ...(dto.status === KitchenTicketStatus.READY
+            ? { readyAt: now }
+            : {}),
+          ...(dto.status === KitchenTicketStatus.PICKED_UP
+            ? { pickedUpAt: now }
+            : {}),
+          ...(dto.status === KitchenTicketStatus.DELIVERED
+            ? { deliveredAt: now }
+            : {}),
+          ...(dto.status === KitchenTicketStatus.CANCELLED
+            ? { cancelledAt: now, cancelReason: dto.reason?.trim() || null }
+            : {}),
+        },
+      });
+
+      if (claimed.count === 0) {
+        throw new ConflictException(
+          'El ticket ya cambió de estado; recarga el tablero',
+        );
+      }
+
+      const itemStatus =
+        dto.status === KitchenTicketStatus.CANCELLED
+          ? KitchenItemStatus.VOID
+          : (dto.status as unknown as KitchenItemStatus);
+
+      await tx.kitchenTicketItem.updateMany({
+        where: { ticketId },
+        data: {
+          status: itemStatus,
+          ...(dto.status === KitchenTicketStatus.CANCELLED
+            ? { voidReason: dto.reason?.trim() || null }
+            : {}),
+        },
+      });
+
+      let warnings: ConsumptionWarning[] = [];
+
+      if (
+        dto.status === KitchenTicketStatus.PREPARING &&
+        !ticket.startedAt
+      ) {
+        warnings = await this.consumeRound(
+          tx,
+          user.organizationId,
+          user.sub,
+          {
+            tableNumber: ticket.orderRound.order.tableNumber,
+            isTakeaway: ticket.orderRound.order.isTakeaway,
+            branchId: ticket.orderRound.order.branchId,
+          },
+          ticket.orderRoundId,
+          {
+            orderItemIds: ticket.items.map((item) => item.orderItemId),
+            dedupeScope: `ticket:${ticketId}`,
+          },
+        );
+      }
+
+      const roundStatus = await this.syncRoundFromTickets(
+        tx,
+        ticket.orderRoundId,
+        user.sub,
+      );
+
+      const updated = await tx.kitchenTicket.findUniqueOrThrow({
+        where: { id: ticketId },
+        include: kitchenTicketInclude,
+      });
+
+      return { updated, warnings, roundStatus };
+    });
+
+    this.events.publish({
+      type: 'ROUND_UPDATED',
+      organizationId: user.organizationId,
+      branchId: ticket.branchId,
+      orderId: ticket.orderRound.orderId,
+      roundId: ticket.orderRoundId,
+      status: result.roundStatus ?? undefined,
+    });
+
+    return {
+      ...result.updated,
+      warnings: result.warnings,
+      roundStatus: result.roundStatus,
+    };
+  }
+
+  /** Recalcula el estado agregado de la ronda a partir de sus tickets. */
+  private async syncRoundFromTickets(
+    tx: Prisma.TransactionClient,
+    roundId: string,
+    userId: string,
+  ) {
+    const tickets = await tx.kitchenTicket.findMany({
+      where: { orderRoundId: roundId },
+      select: { status: true },
+    });
+
+    if (tickets.length === 0) return null;
+
+    const statuses = tickets.map((ticket) => ticket.status);
+    let next: OrderRoundStatus;
+
+    if (
+      statuses.every(
+        (status) =>
+          status === KitchenTicketStatus.DELIVERED ||
+          status === KitchenTicketStatus.CANCELLED,
+      )
+    ) {
+      next = statuses.every(
+        (status) => status === KitchenTicketStatus.CANCELLED,
+      )
+        ? OrderRoundStatus.CANCELLED
+        : OrderRoundStatus.DELIVERED;
+    } else if (
+      statuses.every((status) =>
+        (
+          [
+            KitchenTicketStatus.READY,
+            KitchenTicketStatus.PICKED_UP,
+            KitchenTicketStatus.DELIVERED,
+            KitchenTicketStatus.CANCELLED,
+          ] as KitchenTicketStatus[]
+        ).includes(status),
+      )
+    ) {
+      next = OrderRoundStatus.READY;
+    } else if (
+      statuses.some((status) =>
+        (
+          [
+            KitchenTicketStatus.PREPARING,
+            KitchenTicketStatus.READY,
+            KitchenTicketStatus.PICKED_UP,
+            KitchenTicketStatus.DELIVERED,
+          ] as KitchenTicketStatus[]
+        ).includes(status),
+      )
+    ) {
+      next = OrderRoundStatus.PREPARING;
+    } else {
+      next = OrderRoundStatus.PENDING;
+    }
+
+    const round = await tx.orderRound.findUnique({
+      where: { id: roundId },
+      select: { status: true },
+    });
+
+    if (!round || round.status === next) return next;
+
+    const now = new Date();
+
+    await tx.orderRound.update({
+      where: { id: roundId },
+      data: {
+        status: next,
+        ...(next === OrderRoundStatus.PREPARING
+          ? { startedAt: now }
+          : next === OrderRoundStatus.READY
+            ? { readyAt: now }
+            : next === OrderRoundStatus.DELIVERED
+              ? { deliveredAt: now }
+              : next === OrderRoundStatus.CANCELLED
+                ? { cancelledAt: now }
+                : {}),
+      },
+    });
+
+    await tx.orderStatusHistory.create({
+      data: {
+        orderRoundId: roundId,
+        previousStatus: round.status,
+        newStatus: next,
+        changedById: userId,
+        reason: 'Actualización por ticket de estación',
+      },
+    });
+
+    return next;
   }
 
   /**
@@ -1988,9 +2522,18 @@ export class OrdersService {
       branchId: string | null;
     },
     roundId: string,
+    options?: {
+      orderItemIds?: string[];
+      dedupeScope?: string;
+    },
   ): Promise<ConsumptionWarning[]> {
     const items = await tx.orderItem.findMany({
-      where: { orderRoundId: roundId },
+      where: {
+        orderRoundId: roundId,
+        ...(options?.orderItemIds?.length
+          ? { id: { in: options.orderItemIds } }
+          : {}),
+      },
       include: {
         extras: true,
         exclusions: true,
@@ -2051,7 +2594,7 @@ export class OrdersService {
         continue;
       }
 
-      const dedupeKey = `round:${roundId}:${ingredientId}`;
+      const dedupeKey = `${options?.dedupeScope ?? `round:${roundId}`}:${ingredientId}`;
 
       const already = await tx.inventoryMovement.findUnique({
         where: { dedupeKey },

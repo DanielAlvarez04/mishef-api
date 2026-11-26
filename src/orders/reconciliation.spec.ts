@@ -21,11 +21,12 @@ function build(options: {
 
   const service = new OrdersService(
     prisma as unknown as PrismaService,
-    {} as never,
-    {} as never,
-    {} as never,
-    {} as never,
-    {} as never,
+    {} as never, // events
+    {} as never, // analytics
+    {} as never, // kitchen
+    {} as never, // kitchen ticketing
+    {} as never, // splits
+    {} as never, // tickets
   );
 
   return { service, prisma };
