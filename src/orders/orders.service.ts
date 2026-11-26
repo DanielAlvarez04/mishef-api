@@ -1505,13 +1505,25 @@ export class OrdersService {
     const organizationId = user.organizationId;
 
     if (!organizationId) {
-      return { mode: KitchenMode.GENERAL, stations: [], tickets: [], heldRounds: [] };
+      return {
+        mode: KitchenMode.GENERAL,
+        stations: [],
+        tickets: [],
+        heldRounds: [],
+        recentTickets: [],
+      };
     }
 
     const effectiveBranchId = branchId ?? user.branchId ?? null;
 
     if (!effectiveBranchId) {
-      return { mode: KitchenMode.GENERAL, stations: [], tickets: [], heldRounds: [] };
+      return {
+        mode: KitchenMode.GENERAL,
+        stations: [],
+        tickets: [],
+        heldRounds: [],
+        recentTickets: [],
+      };
     }
 
     const branch = await this.prisma.branch.findFirst({
@@ -1524,6 +1536,8 @@ export class OrdersService {
         mode: branch?.kitchenMode ?? KitchenMode.GENERAL,
         stations: [],
         tickets: [],
+        heldRounds: [],
+        recentTickets: [],
       };
     }
 
@@ -1546,7 +1560,13 @@ export class OrdersService {
       isAdmin || isWaiter || positionPermissions.includes('kitchen.view.all');
 
     if (!canViewAll && !membership?.kitchenPositionId) {
-      return { mode: KitchenMode.ADVANCED, stations: [], tickets: [], heldRounds: [] };
+      return {
+        mode: KitchenMode.ADVANCED,
+        stations: [],
+        tickets: [],
+        heldRounds: [],
+        recentTickets: [],
+      };
     }
 
     const stationIds = canViewAll
@@ -1555,10 +1575,17 @@ export class OrdersService {
         [];
 
     if (stationIds && stationIds.length === 0) {
-      return { mode: KitchenMode.ADVANCED, stations: [], tickets: [], heldRounds: [] };
+      return {
+        mode: KitchenMode.ADVANCED,
+        stations: [],
+        tickets: [],
+        heldRounds: [],
+        recentTickets: [],
+      };
     }
 
-    const [stations, tickets, heldRounds] = await Promise.all([
+    const recentCutoff = new Date(Date.now() - 4 * 60 * 60 * 1000);
+    const [stations, tickets, heldRounds, recentTickets] = await Promise.all([
       this.prisma.kitchenStation.findMany({
         where: {
           organizationId,
@@ -1628,9 +1655,29 @@ export class OrdersService {
           },
         },
       }),
+      this.prisma.kitchenTicket.findMany({
+        where: {
+          organizationId,
+          branchId: branch.id,
+          status: {
+            in: [KitchenTicketStatus.DELIVERED, KitchenTicketStatus.CANCELLED],
+          },
+          createdAt: { gte: recentCutoff },
+          ...(stationIds ? { stationId: { in: stationIds } } : {}),
+        },
+        orderBy: [{ createdAt: 'desc' }],
+        take: 20,
+        include: kitchenTicketInclude,
+      }),
     ]);
 
-    return { mode: KitchenMode.ADVANCED, stations, tickets, heldRounds };
+    return {
+      mode: KitchenMode.ADVANCED,
+      stations,
+      tickets,
+      heldRounds,
+      recentTickets,
+    };
   }
 
   /**
