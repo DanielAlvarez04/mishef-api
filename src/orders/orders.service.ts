@@ -1391,7 +1391,10 @@ export class OrdersService {
       throw new BadRequestException('La ronda no está pendiente de pago');
     }
 
-    if (round.order.status !== OrderStatus.OPEN) {
+    if (
+      round.order.status !== OrderStatus.OPEN &&
+      round.order.status !== OrderStatus.CLOSED
+    ) {
       throw new BadRequestException('La cuenta ya no está abierta');
     }
 
@@ -2938,7 +2941,6 @@ export class OrdersService {
         where: {
           order: {
             organizationId: organizationId,
-            status: OrderStatus.OPEN,
             ...(branchId ? { branchId } : {}),
           },
           status: {

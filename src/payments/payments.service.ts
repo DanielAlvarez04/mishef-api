@@ -7,7 +7,6 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
-  OrderRoundStatus,
   OrderStatus,
   PaymentMethod,
   PaymentStatus,
@@ -28,16 +27,6 @@ import {
   VoidPaymentDto,
 } from './dto/payments.dto';
 import { ProviderPaymentRegistry } from './provider-payment.registry';
-
-const ACTIVE_ROUND_STATUSES = [
-  OrderRoundStatus.PENDING,
-  OrderRoundStatus.HELD,
-  OrderRoundStatus.PENDING_PAYMENT,
-  OrderRoundStatus.FIRED,
-  OrderRoundStatus.PREPARING,
-  OrderRoundStatus.READY,
-  OrderRoundStatus.PICKED_UP,
-];
 
 const paymentInclude = {
   order: {
@@ -1093,22 +1082,15 @@ export class PaymentsService {
   /**
    * Cierra la cuenta.
    *
-   * Requisitos: no puede haber comandas activas y el total debe estar cubierto
-   * por pagos confirmados. El saldo se calcula en el servidor: el cliente no
-   * decide si una cuenta está pagada (`plan.md` §5).
+   * Requisitos: el total debe estar cubierto por pagos confirmados y no puede
+   * haber pagos pendientes. Los tickets de cocina pueden seguir activos: la
+   * cuenta se cierra al cobrar y el ticket conserva su propio ciclo.
    */
   async closeOrder(organizationId: string | null, userId: string, orderId: string) {
     const order = await this.getOpenOrder(organizationId, orderId);
 
-    const activeRounds = await this.prisma.orderRound.count({
-      where: { orderId, status: { in: ACTIVE_ROUND_STATUSES } },
-    });
-
-    if (activeRounds > 0) {
-      throw new BadRequestException(
-        'Todavía hay comandas activas en cocina; entrégalas o cancélalas antes de cerrar',
-      );
-    }
+    // La cuenta puede cerrarse aunque cocina siga preparando: el cobro ya está
+    // completo y el ticket de estación conserva su propio ciclo.
 
     // Un pago pendiente (incluido el de tarjeta offline) no cubre la cuenta:
     // cerrarla dejaría la mesa libre con un cobro sin confirmar.
