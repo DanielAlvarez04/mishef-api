@@ -87,4 +87,18 @@ export class KitchenTicketsController {
   refire(@CurrentUser() user: JwtUser, @Param('id') id: string) {
     return this.orders.refireKitchenTicket(user, id);
   }
+
+  @ApiOperation({ summary: 'Validar un ticket en el pase' })
+  @RequirePermissions('kitchen:read')
+  @Post('tickets/:id/expo')
+  expo(@CurrentUser() user: JwtUser, @Param('id') id: string) {
+    return this.orders.expoValidateTicket(user, id);
+  }
+
+  @ApiOperation({ summary: 'Historial de un ticket de estación' })
+  @RequirePermissions('kitchen:read')
+  @Get('tickets/:id/history')
+  history(@CurrentUser() user: JwtUser, @Param('id') id: string) {
+    return this.orders.ticketHistory(user, id);
+  }
 }

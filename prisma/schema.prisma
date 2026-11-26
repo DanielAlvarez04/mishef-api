@@ -2564,11 +2564,15 @@ model KitchenTicket {
   deliveredAt          DateTime?
   cancelledAt          DateTime?
   cancelReason         String?
+  expoAt               DateTime?
+  expoValidatedById    String?
+  expoValidatedByName  String?
 
   orderRound         OrderRound          @relation(fields: [orderRoundId], references: [id], onDelete: Cascade)
   station            KitchenStation      @relation(fields: [stationId], references: [id], onDelete: Restrict)
   assignedMembership Membership?         @relation("KitchenTicketAssignee", fields: [assignedMembershipId], references: [id], onDelete: SetNull)
   items              KitchenTicketItem[]
+  history            KitchenTicketHistory[]
 
   @@unique([orderRoundId, stationId])
   @@index([organizationId, status, createdAt])
@@ -2590,4 +2594,20 @@ model KitchenTicketItem {
 
   @@unique([ticketId, orderItemId])
   @@index([orderItemId])
+}
+
+/// Historial de transiciones de un ticket de estación (auditoría).
+model KitchenTicketHistory {
+  id             String              @id @default(cuid())
+  ticketId       String
+  previousStatus KitchenTicketStatus?
+  newStatus      KitchenTicketStatus
+  changedById    String?
+  changedByName  String?
+  changedAt      DateTime            @default(now())
+  reason         String?
+
+  ticket KitchenTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, changedAt])
 }

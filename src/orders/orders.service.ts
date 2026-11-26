@@ -1805,6 +1805,17 @@ export class OrdersService {
         },
       });
 
+      await tx.kitchenTicketHistory.create({
+        data: {
+          ticketId,
+          previousStatus: ticket.status,
+          newStatus: dto.status,
+          changedById: user.sub,
+          changedByName: user.email ?? user.sub,
+          reason: dto.reason?.trim() || null,
+        },
+      });
+
       let warnings: ConsumptionWarning[] = [];
 
       if (
@@ -1856,6 +1867,170 @@ export class OrdersService {
       warnings: result.warnings,
       roundStatus: result.roundStatus,
     };
+  }
+
+  /**
+   * Valida un ticket en el pase/expo. No cambia el estado de preparación:
+   * agrega la marca de calidad y el responsable para el handoff.
+   */
+  async expoValidateTicket(user: JwtUser, ticketId: string) {
+    if (!user.organizationId) {
+      throw new BadRequestException('La sesión no tiene un negocio activo');
+    }
+
+    const ticket = await this.prisma.kitchenTicket.findFirst({
+      where: { id: ticketId, organizationId: user.organizationId },
+      include: {
+        station: { select: { id: true, name: true } },
+        orderRound: {
+          select: { id: true, orderId: true, order: { select: { branchId: true } } },
+        },
+      },
+    });
+
+    if (!ticket) throw new NotFoundException('Ticket no encontrado');
+
+    const branch = ticket.branchId
+      ? await this.prisma.branch.findFirst({
+          where: { id: ticket.branchId, organizationId: user.organizationId },
+          select: { kitchenMode: true },
+        })
+      : null;
+
+    if (branch?.kitchenMode !== KitchenMode.ADVANCED) {
+      throw new BadRequestException('La sucursal no usa cocina Avanzada');
+    }
+
+    if (ticket.expoAt) {
+      return this.prisma.kitchenTicket.findUniqueOrThrow({
+        where: { id: ticketId },
+        include: kitchenTicketInclude,
+      });
+    }
+
+    if (
+      ticket.status !== KitchenTicketStatus.READY &&
+      ticket.status !== KitchenTicketStatus.PICKED_UP
+    ) {
+      throw new BadRequestException(
+        'El ticket todavía no está listo en la estación',
+      );
+    }
+
+    const membership = await this.prisma.membership.findUnique({
+      where: {
+        userId_organizationId: {
+          userId: user.sub,
+          organizationId: user.organizationId,
+        },
+      },
+      select: {
+        id: true,
+        kitchenPositionId: true,
+        kitchenPosition: { select: { permissions: true } },
+        kitchenAssignments: { select: { stationId: true } },
+      },
+    });
+
+    const permissions = membership?.kitchenPosition?.permissions ?? [];
+    const isAdmin = user.roles.includes(Role.ADMIN);
+    const canExpo = isAdmin || permissions.includes('kitchen.expo');
+
+    if (!canExpo) {
+      throw new ForbiddenException(
+        'No tienes permiso para validar tickets en el pase',
+      );
+    }
+
+    if (
+      !isAdmin &&
+      !permissions.includes('kitchen.view.all') &&
+      !membership?.kitchenAssignments.some(
+        (assignment) => assignment.stationId === ticket.stationId,
+      )
+    ) {
+      throw new ForbiddenException('Este ticket pertenece a otra estación');
+    }
+
+    const now = new Date();
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      await tx.kitchenTicket.update({
+        where: { id: ticketId },
+        data: {
+          expoAt: now,
+          expoValidatedById: user.sub,
+          expoValidatedByName: user.email ?? user.sub,
+        },
+      });
+
+      await tx.kitchenTicketHistory.create({
+        data: {
+          ticketId,
+          previousStatus: ticket.status,
+          newStatus: ticket.status,
+          changedById: user.sub,
+          changedByName: user.email ?? user.sub,
+          reason: 'Validado en pase',
+        },
+      });
+
+      return tx.kitchenTicket.findUniqueOrThrow({
+        where: { id: ticketId },
+        include: kitchenTicketInclude,
+      });
+    });
+
+    return updated;
+  }
+
+  /** Historial detallado de un ticket (auditoría). */
+  async ticketHistory(user: JwtUser, ticketId: string) {
+    if (!user.organizationId) {
+      throw new BadRequestException('La sesión no tiene un negocio activo');
+    }
+
+    const ticket = await this.prisma.kitchenTicket.findFirst({
+      where: { id: ticketId, organizationId: user.organizationId },
+      select: { id: true, stationId: true },
+    });
+
+    if (!ticket) throw new NotFoundException('Ticket no encontrado');
+
+    if (!user.roles.includes(Role.ADMIN) && !user.roles.includes(Role.WAITER)) {
+      const membership = await this.prisma.membership.findUnique({
+        where: {
+          userId_organizationId: {
+            userId: user.sub,
+            organizationId: user.organizationId,
+          },
+        },
+        select: {
+          kitchenPositionId: true,
+          kitchenPosition: { select: { permissions: true } },
+          kitchenAssignments: { select: { stationId: true } },
+        },
+      });
+
+      const permissions = membership?.kitchenPosition?.permissions ?? [];
+
+      if (
+        !membership?.kitchenPositionId ||
+        (!permissions.includes('kitchen.view.all') &&
+          !membership.kitchenAssignments.some(
+            (assignment) => assignment.stationId === ticket.stationId,
+          ))
+      ) {
+        throw new ForbiddenException(
+          'No tienes permiso para ver el historial de este ticket',
+        );
+      }
+    }
+
+    return this.prisma.kitchenTicketHistory.findMany({
+      where: { ticketId },
+      orderBy: { changedAt: 'asc' },
+    });
   }
 
   /**
@@ -1943,6 +2118,17 @@ export class OrdersService {
           },
         },
         include: kitchenTicketInclude,
+      });
+
+      await tx.kitchenTicketHistory.create({
+        data: {
+          ticketId: replica.id,
+          previousStatus: null,
+          newStatus: KitchenTicketStatus.PENDING,
+          changedById: user.sub,
+          changedByName: user.email ?? user.sub,
+          reason: 'Refire',
+        },
       });
 
       await this.syncRoundFromTickets(tx, ticket.orderRoundId, user.sub);
