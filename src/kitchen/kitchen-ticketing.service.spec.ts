@@ -27,6 +27,9 @@ function buildTx(overrides: Partial<Record<string, unknown>> = {}) {
     orderItem: {
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
+    kitchenTicketHistory: {
+      create: jest.fn().mockResolvedValue({}),
+    },
     ...overrides,
   };
 

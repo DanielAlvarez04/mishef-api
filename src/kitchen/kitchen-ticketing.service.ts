@@ -162,6 +162,15 @@ export class KitchenTicketingService {
         },
       });
 
+      await tx.kitchenTicketHistory.create({
+        data: {
+          ticketId: ticket.id,
+          previousStatus: null,
+          newStatus: KitchenTicketStatus.PENDING,
+          reason: 'Ticket creado',
+        },
+      });
+
       await tx.orderItem.updateMany({
         where: { id: { in: orderItemIds } },
         data: { stationId },
