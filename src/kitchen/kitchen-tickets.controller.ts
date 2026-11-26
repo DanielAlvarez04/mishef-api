@@ -53,6 +53,16 @@ export class KitchenTicketsController {
     return this.orders.kitchenCourses(user, branchId);
   }
 
+  @ApiOperation({ summary: 'Estaciones activas para ruteo de artículos' })
+  @RequirePermissions('catalog:manage')
+  @Get('stations')
+  stations(
+    @CurrentUser() user: JwtUser,
+    @CurrentBranch() branchId: string | null,
+  ) {
+    return this.orders.kitchenStations(user, branchId);
+  }
+
   @ApiOperation({ summary: 'Cambiar el estado de un ticket de estación' })
   @RequirePermissions('kitchen:read')
   @Patch('tickets/:id/status')

@@ -1466,6 +1466,25 @@ export class OrdersService {
     });
   }
 
+  /** Estaciones activas para configurar el ruteo de un artículo. */
+  async kitchenStations(user: JwtUser, branchId: string | null) {
+    if (!user.organizationId) return [];
+
+    const effectiveBranchId = branchId ?? user.branchId ?? null;
+
+    if (!effectiveBranchId) return [];
+
+    return this.prisma.kitchenStation.findMany({
+      where: {
+        organizationId: user.organizationId,
+        branchId: effectiveBranchId,
+        isActive: true,
+      },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      select: { id: true, name: true, code: true, type: true, color: true },
+    });
+  }
+
   /**
    * Tablero de tickets por estación (modo Avanzado).
    *

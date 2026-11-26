@@ -58,6 +58,7 @@ const recipeInclude = {
       price: true,
       isActive: true,
       isCombo: true,
+      defaultStationId: true,
       category: { select: { id: true, name: true } },
       catalogEntry: { select: { imageKey: true, imageUrl: true, imageVariants: true } },
       variants: {
@@ -518,6 +519,25 @@ export class RecipesService {
       );
     }
 
+    if (dto.defaultStationId) {
+      if (!organizationId) {
+        throw new BadRequestException('La sesión no tiene un negocio activo');
+      }
+
+      const station = await this.prisma.kitchenStation.findFirst({
+        where: {
+          id: dto.defaultStationId,
+          organizationId,
+          isActive: true,
+        },
+        select: { id: true },
+      });
+
+      if (!station) {
+        throw new NotFoundException('Estación de cocina no encontrada');
+      }
+    }
+
     const existing = await this.prisma.item.findFirst({
       where: { catalogEntryId, organizationId },
       select: {
@@ -526,6 +546,7 @@ export class RecipesService {
         description: true,
         price: true,
         categoryId: true,
+        defaultStationId: true,
         isActive: true,
         isArchived: true,
       },
@@ -549,6 +570,10 @@ export class RecipesService {
         (existing.categoryId ?? null) !== dto.categoryId
           ? { categoryId: dto.categoryId }
           : {}),
+        ...(dto.defaultStationId !== undefined &&
+        (existing.defaultStationId ?? null) !== dto.defaultStationId
+          ? { defaultStationId: dto.defaultStationId }
+          : {}),
         ...(existing.isActive ? { isActive: false } : {}),
         ...(existing.isArchived ? {} : { isArchived: true }),
       };
@@ -567,6 +592,7 @@ export class RecipesService {
           name: recipe.name,
           description: recipe.description,
           categoryId: dto.categoryId ?? null,
+          defaultStationId: dto.defaultStationId ?? null,
           price: draftPrice ?? new Prisma.Decimal(0),
           isActive: false,
           isArchived: true,
@@ -919,6 +945,25 @@ export class RecipesService {
 
     const sku = dto.sku?.trim() || null;
 
+    if (dto.defaultStationId) {
+      if (!organizationId) {
+        throw new BadRequestException('La sesión no tiene un negocio activo');
+      }
+
+      const station = await tx.kitchenStation.findFirst({
+        where: {
+          id: dto.defaultStationId,
+          organizationId,
+          isActive: true,
+        },
+        select: { id: true },
+      });
+
+      if (!station) {
+        throw new NotFoundException('Estación de cocina no encontrada');
+      }
+    }
+
     const variants =
       dto.variants && dto.variants.length > 0
         ? dto.variants
@@ -981,6 +1026,9 @@ export class RecipesService {
       isArchived: false,
       ...(dto.prepMinutes !== undefined
         ? { prepMinutes: dto.prepMinutes }
+        : {}),
+      ...(dto.defaultStationId !== undefined
+        ? { defaultStationId: dto.defaultStationId }
         : {}),
     };
 

@@ -142,6 +142,11 @@ export class PublishRecipeDto {
   @Max(180)
   prepMinutes?: number | null;
 
+  /** Estación primaria de cocina para el modo Avanzado. */
+  @IsOptional()
+  @IsString()
+  defaultStationId?: string | null;
+
   /** Presentaciones; si se omite se crean Chico, Regular y Grande. */
   @IsOptional()
   @IsArray()
@@ -189,6 +194,11 @@ export class SaveRecipeDraftItemDto {
   @IsOptional()
   @IsString()
   categoryId?: string | null;
+
+  /** Estación primaria de cocina para el modo Avanzado. */
+  @IsOptional()
+  @IsString()
+  defaultStationId?: string | null;
 
   @IsOptional()
   @IsArray()
