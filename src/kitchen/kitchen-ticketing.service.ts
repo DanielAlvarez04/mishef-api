@@ -94,6 +94,7 @@ export class KitchenTicketingService {
     const itemById = new Map(items.map((item) => [item.id, item]));
     const ruleByItem = new Map<string, string>();
     const ruleByCategory = new Map<string, string>();
+    const ruleByMenu = new Map<string, string>();
 
     for (const rule of rules) {
       if (!stationIds.has(rule.stationId)) continue;
@@ -103,6 +104,24 @@ export class KitchenTicketingService {
       if (rule.categoryId && !ruleByCategory.has(rule.categoryId)) {
         ruleByCategory.set(rule.categoryId, rule.stationId);
       }
+      if (rule.menuId && !ruleByMenu.has(rule.menuId)) {
+        ruleByMenu.set(rule.menuId, rule.stationId);
+      }
+    }
+
+    const menuIds = [...ruleByMenu.keys()];
+    const menuItems = menuIds.length
+      ? await tx.menuItem.findMany({
+          where: { itemId: { in: itemIds }, menuId: { in: menuIds } },
+          select: { itemId: true, menuId: true },
+        })
+      : [];
+    const ruleByMenuForItem = new Map<string, string>();
+
+    for (const row of menuItems) {
+      if (ruleByMenuForItem.has(row.itemId)) continue;
+      const stationId = ruleByMenu.get(row.menuId);
+      if (stationId) ruleByMenuForItem.set(row.itemId, stationId);
     }
 
     const fallbackStation = stations[0].id;
@@ -119,6 +138,7 @@ export class KitchenTicketingService {
         (catalogItem?.categoryId
           ? ruleByCategory.get(catalogItem.categoryId)
           : undefined) ??
+        ruleByMenuForItem.get(item.itemId) ??
         fallbackStation;
 
       const list = grouped.get(stationId) ?? [];
