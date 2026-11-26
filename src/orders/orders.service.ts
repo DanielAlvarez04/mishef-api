@@ -1671,13 +1671,28 @@ export class OrdersService {
 
       await this.recalculateTotals(tx, orderId);
 
+      const orderClosed =
+        dto.status === OrderRoundStatus.DELIVERED ||
+        dto.status === OrderRoundStatus.CANCELLED
+          ? await this.maybeAutoClosePaidOrder(tx, orderId, userId)
+          : false;
+
       const updated = await tx.orderRound.findUniqueOrThrow({
         where: { id: roundId },
         include: roundInclude,
       });
 
-      return { updated, warnings };
+      return { updated, warnings, orderClosed };
     });
+
+    if (result.orderClosed) {
+      this.events.publish({
+        type: 'ORDER_CLOSED',
+        organizationId,
+        branchId: order.branchId,
+        orderId,
+      });
+    }
 
     this.events.publish({
       type: 'ROUND_UPDATED',
@@ -2434,8 +2449,9 @@ export class OrdersService {
       );
 
       const orderClosed =
-        dto.status === KitchenTicketStatus.DELIVERED
-          ? await this.maybeAutoCloseCounterOrder(
+        dto.status === KitchenTicketStatus.DELIVERED ||
+        dto.status === KitchenTicketStatus.CANCELLED
+          ? await this.maybeAutoClosePaidOrder(
               tx,
               ticket.orderRound.orderId,
               user.sub,
@@ -2476,10 +2492,12 @@ export class OrdersService {
   }
 
   /**
-   * Cierra automáticamente una cuenta de mostrador cuando ya no tiene rondas
-   * activas y está completamente pagada. Las cuentas de mesa se cierran a mano.
+   * Cierra automáticamente una cuenta cuando ya no tiene rondas activas y está
+   * completamente pagada. Aplica a todos los canales: el cobro puede ocurrir
+   * antes o después de que cocina entregue, pero la cuenta no se libera hasta
+   * que no queden tickets activos.
    */
-  private async maybeAutoCloseCounterOrder(
+  private async maybeAutoClosePaidOrder(
     tx: Prisma.TransactionClient,
     orderId: string,
     userId: string,
@@ -2489,17 +2507,12 @@ export class OrdersService {
       select: {
         id: true,
         status: true,
-        channel: true,
         total: true,
         organizationId: true,
       },
     });
 
-    if (
-      !order ||
-      order.status !== OrderStatus.OPEN ||
-      order.channel !== OrderChannel.COUNTER
-    ) {
+    if (!order || order.status !== OrderStatus.OPEN) {
       return false;
     }
 

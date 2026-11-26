@@ -1432,6 +1432,42 @@ model OrderTable {
   @@index([tableId])
 }
 
+/// Captura del POS guardada como borrador y todavía no enviada a cocina.
+///
+/// No es una cuenta: no ocupa mesa, no genera tickets ni suma ventas. Caduca a
+/// los 15 minutos si nadie la reanuda, y la ve todo el personal de la sucursal.
+model PosDraft {
+  id              String       @id @default(cuid())
+  organizationId  String
+  branchId        String?
+  createdById     String?
+  createdByName   String?
+  /// Cuenta abierta de la que salió la captura, si aplica.
+  orderId         String?
+  channel         OrderChannel @default(DINE_IN)
+  tableNumber     String?
+  tableId         String?
+  customerName    String?
+  customerPhone   String?
+  customerSex     GuestSex?
+  customerAgeRange GuestAgeRange?
+  deliveryAddress String?
+  deliveryFee     Decimal      @default(0) @db.Decimal(12, 2)
+  partySize       Int          @default(1)
+  /// Líneas del carrito tal como las captura el POS (JSON).
+  cart            Json
+  /// Comensales capturados (JSON).
+  guests          Json
+  /// Total estimado solo para la bandeja; el definitivo lo calcula la cuenta.
+  total           Decimal      @default(0) @db.Decimal(12, 2)
+  expiresAt       DateTime
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  @@index([organizationId, branchId, expiresAt])
+  @@index([expiresAt])
+}
+
 /// Persona dentro de una cuenta (opcional). Permite pedir por comensal.
 model OrderGuest {
   id        String         @id @default(cuid())

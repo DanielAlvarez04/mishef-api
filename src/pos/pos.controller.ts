@@ -30,6 +30,8 @@ import {
   SetPosPinDto,
   UpdatePosDisplayStateDto,
 } from './dto/pos.dto';
+import { CreatePosDraftDto } from './dto/pos-draft.dto';
+import { PosDraftsService } from './pos-drafts.service';
 import { PosService } from './pos.service';
 import { RequireFeature } from '../features/require-feature.decorator';
 
@@ -45,6 +47,7 @@ const DEVICE_COOKIE_MAX_AGE = 180 * 24 * 60 * 60 * 1000;
 export class PosController {
   constructor(
     private readonly pos: PosService,
+    private readonly drafts: PosDraftsService,
     private readonly config: ConfigService,
   ) {}
 
@@ -163,6 +166,53 @@ export class PosController {
   @Delete('devices/:id')
   revoke(@CurrentUser() user: JwtUser, @Param('id') id: string) {
     return this.pos.revokeDevice(user.organizationId, id);
+  }
+
+  @ApiOperation({ summary: 'Guardar una captura del POS como borrador' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @RequirePermissions('orders:draft')
+  @Post('drafts')
+  createDraft(
+    @CurrentUser() user: JwtUser,
+    @CurrentBranch() branchId: string | null,
+    @Body() dto: CreatePosDraftDto,
+  ) {
+    return this.drafts.create(user.organizationId, branchId, user.sub, dto);
+  }
+
+  @ApiOperation({ summary: 'Borradores vigentes de la sucursal' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @RequirePermissions('orders:draft')
+  @Get('drafts')
+  listDrafts(
+    @CurrentUser() user: JwtUser,
+    @CurrentBranch() branchId: string | null,
+  ) {
+    return this.drafts.list(user.organizationId, branchId);
+  }
+
+  @ApiOperation({ summary: 'Reanudar un borrador y consumirlo' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @RequirePermissions('orders:draft')
+  @Post('drafts/:id/resume')
+  resumeDraft(
+    @CurrentUser() user: JwtUser,
+    @CurrentBranch() branchId: string | null,
+    @Param('id') id: string,
+  ) {
+    return this.drafts.resume(user.organizationId, branchId, id);
+  }
+
+  @ApiOperation({ summary: 'Eliminar un borrador' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @RequirePermissions('orders:draft')
+  @Delete('drafts/:id')
+  removeDraft(
+    @CurrentUser() user: JwtUser,
+    @CurrentBranch() branchId: string | null,
+    @Param('id') id: string,
+  ) {
+    return this.drafts.remove(user.organizationId, branchId, id);
   }
 
   @ApiOperation({ summary: 'Crear una pantalla de cliente' })
