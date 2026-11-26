@@ -2576,7 +2576,7 @@ model KitchenTicket {
   items              KitchenTicketItem[]
   history            KitchenTicketHistory[]
 
-  @@unique([orderRoundId, stationId])
+  @@index([orderRoundId, stationId])
   @@index([organizationId, status, createdAt])
   @@index([branchId, status, createdAt])
   @@index([stationId, status])
