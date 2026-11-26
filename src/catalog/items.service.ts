@@ -516,6 +516,10 @@ export class ItemsService {
       ? await this.assertCategory(organizationId, dto.categoryId)
       : null;
 
+    if (dto.defaultStationId) {
+      await this.assertKitchenStation(organizationId, dto.defaultStationId);
+    }
+
     // El SKU es automático: `X` + iniciales de la categoría + consecutivo.
     const providedSku = normalizeSku(dto.sku);
     if (providedSku) {
@@ -579,6 +583,7 @@ export class ItemsService {
         data: {
           organizationId,
           categoryId: dto.categoryId ?? null,
+          defaultStationId: dto.defaultStationId ?? null,
           name,
           description: normalizeOptional(dto.description),
           sku,
@@ -683,6 +688,10 @@ export class ItemsService {
       ? await this.assertCategory(organizationId, dto.categoryId)
       : null;
 
+    if (dto.defaultStationId) {
+      await this.assertKitchenStation(organizationId, dto.defaultStationId);
+    }
+
     const categoryChanged =
       dto.categoryId !== undefined &&
       (dto.categoryId ?? null) !== item.categoryId;
@@ -755,6 +764,12 @@ export class ItemsService {
       (dto.categoryId ?? null) !== item.categoryId
     ) {
       data.categoryId = dto.categoryId;
+    }
+    if (
+      dto.defaultStationId !== undefined &&
+      (dto.defaultStationId ?? null) !== item.defaultStationId
+    ) {
+      data.defaultStationId = dto.defaultStationId;
     }
     if (price !== undefined && !price.equals(item.price)) data.price = price;
     if (taxRate !== undefined && !sameDecimal(taxRate, item.taxRate)) {
@@ -2341,6 +2356,26 @@ export class ItemsService {
     }
 
     return category;
+  }
+
+  private async assertKitchenStation(
+    organizationId: string | null,
+    stationId: string,
+  ) {
+    if (!organizationId) {
+      throw new BadRequestException('La sesión no tiene un negocio activo');
+    }
+
+    const station = await this.prisma.kitchenStation.findFirst({
+      where: { id: stationId, organizationId, isActive: true },
+      select: { id: true },
+    });
+
+    if (!station) {
+      throw new NotFoundException('Estación de cocina no encontrada');
+    }
+
+    return station;
   }
 
   private async assertSkuAvailable(

@@ -37,10 +37,57 @@ enum OrderStatus {
 
 enum OrderRoundStatus {
   PENDING
+  HELD
+  FIRED
   PREPARING
   READY
+  PICKED_UP
   DELIVERED
   CANCELLED
+}
+
+enum KitchenMode {
+  GENERAL
+  ADVANCED
+}
+
+enum KitchenStationType {
+  GARDE_MANGER
+  ENTREMETIER
+  SAUCIER
+  GRILL
+  FRY
+  FISH
+  PASTRY
+  BUTCHERY
+  EXPO
+  CUSTOM
+}
+
+enum KitchenPositionLevel {
+  MANAGEMENT
+  CHEF_DE_PARTIE
+  COOK
+  ASSISTANT
+  EXPO
+}
+
+enum KitchenTicketStatus {
+  PENDING
+  PREPARING
+  READY
+  PICKED_UP
+  DELIVERED
+  CANCELLED
+}
+
+enum KitchenItemStatus {
+  PENDING
+  PREPARING
+  READY
+  PICKED_UP
+  DELIVERED
+  VOID
 }
 
 enum PaymentMethod {
@@ -207,84 +254,84 @@ enum PrepTimeSource {
 // ============================================================================
 
 model Organization {
-  id        String   @id @default(cuid())
-  name      String
-  slug      String   @unique
-  domain    String?  @unique // dominio personalizado del negocio (ej. app.micafeteria.com)
+  id                  String      @id @default(cuid())
+  name                String
+  slug                String      @unique
+  domain              String?     @unique // dominio personalizado del negocio (ej. app.micafeteria.com)
   /// Token que el negocio publica en `_mishef.<domain>` para demostrar control.
-  domainToken      String?
+  domainToken         String?
   /// `null` mientras el dominio no esté verificado.
-  domainVerifiedAt DateTime?
+  domainVerifiedAt    DateTime?
   /// Id del custom hostname en Cloudflare for SaaS.
-  domainProviderId String?
+  domainProviderId    String?
   /// El plan contratado incluye dominio propio.
-  customDomainEnabled Boolean @default(false)
+  customDomainEnabled Boolean     @default(false)
   /// Cuántas veces el negocio cambió su dirección (máximo 1).
-  slugChanges Int @default(0)
+  slugChanges         Int         @default(0)
   /// Bytes ocupados en R2 (imágenes optimizadas y fotos de merma).
-  storageBytes BigInt @default(0)
-  slugAliases SlugAlias[]
-  taxRate   Decimal  @default(0.16) @db.Decimal(5, 4) // IVA por defecto del negocio (0.16 = 16 %)
+  storageBytes        BigInt      @default(0)
+  slugAliases         SlugAlias[]
+  taxRate             Decimal     @default(0.16) @db.Decimal(5, 4) // IVA por defecto del negocio (0.16 = 16 %)
   /// Código ISO 4217 de la moneda del negocio (ver `src/common/currency.ts`).
-  currency  String   @default("MXN")
+  currency            String      @default("MXN")
   /// Color primario de la marca en formato `#rrggbb`. `null` = tema por defecto.
-  brandColor String?
+  brandColor          String?
   /// Tema visual del panel (clases `data-theme` / `theme-*` en globals.css).
-  theme      String   @default("default")
+  theme               String      @default("default")
   /// URL pública del logo (R2). `null` = icono genérico.
-  logoUrl   String?
+  logoUrl             String?
   /// Clave base de la imagen optimizada del logo en R2.
-  logoKey   String?
+  logoKey             String?
   /// JPEG pequeño (384 px) que se imprime en la terminal Point.
-  logoReceiptKey String?
+  logoReceiptKey      String?
   /// Dirección escrita del negocio (para el ticket y el menú público).
-  address   String?
+  address             String?
   /// Coordenadas del negocio. Sirven para el mapa y las funciones por cercanía.
-  latitude  Decimal? @db.Decimal(10, 7)
-  longitude Decimal? @db.Decimal(10, 7)
-  isActive  Boolean  @default(true)
+  latitude            Decimal?    @db.Decimal(10, 7)
+  longitude           Decimal?    @db.Decimal(10, 7)
+  isActive            Boolean     @default(true)
   /// Modo práctica: no se registra analítica de operación mientras esté activo.
-  practiceMode  Boolean   @default(false)
+  practiceMode        Boolean     @default(false)
   /// Fin automático del modo práctica (48 h desde el alta). `null` = manual.
-  practiceUntil DateTime?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  practiceUntil       DateTime?
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
 
   // Onboarding fields
-  businessType        String? // Giro principal: restaurante, cafetería, etc.
-  serviceTypes        String[] @default([]) // Modelo de servicio: mesa, mostrador, etc.
-  goals               String[] @default([]) // Objetivos: inventario, costos, etc.
-  hasBranches         Boolean  @default(false) // "Tengo sucursales"
+  businessType                String? // Giro principal: restaurante, cafetería, etc.
+  serviceTypes                String[] @default([]) // Modelo de servicio: mesa, mostrador, etc.
+  goals                       String[] @default([]) // Objetivos: inventario, costos, etc.
+  hasBranches                 Boolean  @default(false) // "Tengo sucursales"
   /// Mostrar/activar la sección de insumos core sugeridos en Configuración.
-  useCoreSuggestions  Boolean  @default(true)
+  useCoreSuggestions          Boolean  @default(true)
   /// Mostrar/activar los grupos de opciones core sugeridos en el editor de artículos.
-  useCoreOptionGroups Boolean  @default(true)
+  useCoreOptionGroups         Boolean  @default(true)
   /// Mostrar/activar las categorías core de artículos sugeridas.
-  useCoreCategories   Boolean  @default(true)
+  useCoreCategories           Boolean  @default(true)
   /// Mostrar/activar las categorías core de recetas sugeridas.
-  useCoreRecipeCategories Boolean @default(true)
+  useCoreRecipeCategories     Boolean  @default(true)
   /// Mostrar/activar las categorías core de insumos sugeridas.
-  useCoreIngredientCategories Boolean @default(true)
+  useCoreIngredientCategories Boolean  @default(true)
 
   // Cocina
   /// Tiempo de preparación manual por defecto, en minutos.
-  kitchenPrepMinutes Int @default(15)
+  kitchenPrepMinutes  Int            @default(15)
   /// De dónde sale el tiempo base: manual o promedio histórico real.
-  kitchenPrepSource PrepTimeSource @default(MANUAL)
+  kitchenPrepSource   PrepTimeSource @default(MANUAL)
   /// Priorizar la cola de cocina por urgencia en lugar de llegada.
-  kitchenSuggestOrder Boolean @default(true)
+  kitchenSuggestOrder Boolean        @default(true)
 
   // Asistencia
   /// Aplicar tolerancias al registrar checadas (si es false, se guarda la hora exacta).
-  attendanceApplyTolerance Boolean @default(true)
+  attendanceApplyTolerance         Boolean @default(true)
   /// Minutos de gracia para una entrada tardía.
-  attendanceLateGraceMinutes Int @default(10)
+  attendanceLateGraceMinutes       Int     @default(10)
   /// Minutos de gracia para la comida/descanso.
-  attendanceLunchGraceMinutes Int @default(5)
+  attendanceLunchGraceMinutes      Int     @default(5)
   /// Minutos de gracia para una salida anticipada.
-  attendanceEarlyLeaveGraceMinutes Int @default(15)
+  attendanceEarlyLeaveGraceMinutes Int     @default(15)
   /// Duración de comida por defecto cuando el horario no la define.
-  attendanceDefaultBreakMinutes Int @default(60)
+  attendanceDefaultBreakMinutes    Int     @default(60)
 
   /// Correo para facturación de la suscripción de la plataforma.
   billingEmail String?
@@ -311,23 +358,26 @@ model Organization {
   optionGroups         OptionGroup[]
   menus                Menu[]
   mediaAssets          MediaAsset[]
+  kitchenStations      KitchenStation[]
+  kitchenPositions     KitchenPosition[]
+  kitchenCourses       KitchenCourse[]
 
   mercadoPagoConnection MercadoPagoConnection?
   mercadoPagoTerminals  MercadoPagoTerminal[]
-  subscription         OrganizationSubscription?
-  fiscalProfile        FiscalProfile?
+  subscription          OrganizationSubscription?
+  fiscalProfile         FiscalProfile?
 
-  cashSessions  CashSession[]
-  cashMovements CashMovement[]
-  posDevices    PosDevice[]
-  posPairings   PosPairing[]
-  posDisplays   PosDisplay[]
-  imageJobs     ImageJob[]
-  invitations   Invitation[]
-  shifts        Shift[]
-  shiftTemplates ShiftTemplate[]
-  schedules     Schedule[]
-  attendanceEvents AttendanceEvent[]
+  cashSessions          CashSession[]
+  cashMovements         CashMovement[]
+  posDevices            PosDevice[]
+  posPairings           PosPairing[]
+  posDisplays           PosDisplay[]
+  imageJobs             ImageJob[]
+  invitations           Invitation[]
+  shifts                Shift[]
+  shiftTemplates        ShiftTemplate[]
+  schedules             Schedule[]
+  attendanceEvents      AttendanceEvent[]
   attendanceAdjustments AttendanceAdjustment[]
 }
 
@@ -341,89 +391,93 @@ model PlatformSetting {
 }
 
 model User {
-  id               String    @id @default(cuid())
-  email            String?   @unique
+  id                     String    @id @default(cuid())
+  email                  String?   @unique
   /// Campo legado solo para mostrar en reportes. El login vive en `Membership.username`.
-  username         String?
-  passwordHash     String?
-  name             String?
-  googleId         String?   @unique // `sub` de Google (OpenID Connect)
-  isActive         Boolean   @default(true)
-  emailVerified    Boolean   @default(false)
-  twoFactorEnabled Boolean   @default(false)
+  username               String?
+  passwordHash           String?
+  name                   String?
+  googleId               String?   @unique // `sub` de Google (OpenID Connect)
+  isActive               Boolean   @default(true)
+  emailVerified          Boolean   @default(false)
+  twoFactorEnabled       Boolean   @default(false)
   /// Secreto TOTP (app autenticadora), solo si `twoFactorTotpEnabled`.
-  twoFactorTotpSecret String?
-  twoFactorTotpEnabled Boolean @default(false)
+  twoFactorTotpSecret    String?
+  twoFactorTotpEnabled   Boolean   @default(false)
   /// Códigos de recuperación hasheados (se muestran una sola vez al activar 2FA).
-  twoFactorRecoveryCodes String[] @default([])
+  twoFactorRecoveryCodes String[]  @default([])
   /// El usuario debe cambiar la contraseña inicial en su primer acceso.
-  mustChangePassword Boolean @default(false)
+  mustChangePassword     Boolean   @default(false)
   /// Metadatos del último inicio de sesión para alertar de uno nuevo.
-  lastLoginAt DateTime?
-  lastLoginIp String?
-  lastLoginUserAgent String?
+  lastLoginAt            DateTime?
+  lastLoginIp            String?
+  lastLoginUserAgent     String?
   /// Acceso al panel de plataforma (`/platform`, `/plans`, `/subscriptions`).
-  isPlatformAdmin  Boolean   @default(false)
-  onboardedAt      DateTime? // null hasta completar el onboarding
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  isPlatformAdmin        Boolean   @default(false)
+  onboardedAt            DateTime? // null hasta completar el onboarding
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
 
-  memberships            Membership[]
-  authSessions           AuthSession[]
-  twoFactorCodes         TwoFactorCode[]
-  orders                 Order[]
-  payments               Payment[]               @relation("PaymentUser")
-  confirmedPayments      Payment[]               @relation("PaymentConfirmedBy")
-  inventoryMovements     InventoryMovement[]
-  auditLogs              AuditLog[]
-  emailVerificationToken EmailVerificationToken?
-  passwordResetToken     PasswordResetToken?
-  orderStatusHistories   OrderStatusHistory[]
-  tipPayments            Payment[]               @relation("PaymentTipRecipient")
-  cashSessionsOpened     CashSession[]           @relation("CashSessionOpenedBy")
-  cashSessionsClosed     CashSession[]           @relation("CashSessionClosedBy")
-  cashMovements          CashMovement[]
-  posDevicesPaired       PosDevice[]             @relation("PosDevicePairedBy")
-  posPairingsCreated     PosPairing[]            @relation("PosPairingCreatedBy")
-  posDisplaysCreated     PosDisplay[]            @relation("PosDisplayCreatedBy")
-  shifts                 Shift[]
-  shiftsRecorded         Shift[]                 @relation("ShiftRecordedBy")
-  shiftsReviewed         Shift[]                 @relation("ShiftReviewedBy")
-  attendanceEventsRecorded AttendanceEvent[]    @relation("AttendanceEventRecordedBy")
-  attendanceAdjustments  AttendanceAdjustment[]  @relation("AttendanceAdjustmentCreatedBy")
-  attendanceAdjustmentsReceived AttendanceAdjustment[] @relation("AttendanceAdjustmentUser")
-  attendanceEvents       AttendanceEvent[]
-  scheduleEntries        ScheduleEntry[]
-  wastes                 Waste[]
+  memberships                   Membership[]
+  authSessions                  AuthSession[]
+  twoFactorCodes                TwoFactorCode[]
+  orders                        Order[]
+  payments                      Payment[]               @relation("PaymentUser")
+  confirmedPayments             Payment[]               @relation("PaymentConfirmedBy")
+  inventoryMovements            InventoryMovement[]
+  auditLogs                     AuditLog[]
+  emailVerificationToken        EmailVerificationToken?
+  passwordResetToken            PasswordResetToken?
+  orderStatusHistories          OrderStatusHistory[]
+  tipPayments                   Payment[]               @relation("PaymentTipRecipient")
+  cashSessionsOpened            CashSession[]           @relation("CashSessionOpenedBy")
+  cashSessionsClosed            CashSession[]           @relation("CashSessionClosedBy")
+  cashMovements                 CashMovement[]
+  posDevicesPaired              PosDevice[]             @relation("PosDevicePairedBy")
+  posPairingsCreated            PosPairing[]            @relation("PosPairingCreatedBy")
+  posDisplaysCreated            PosDisplay[]            @relation("PosDisplayCreatedBy")
+  shifts                        Shift[]
+  shiftsRecorded                Shift[]                 @relation("ShiftRecordedBy")
+  shiftsReviewed                Shift[]                 @relation("ShiftReviewedBy")
+  attendanceEventsRecorded      AttendanceEvent[]       @relation("AttendanceEventRecordedBy")
+  attendanceAdjustments         AttendanceAdjustment[]  @relation("AttendanceAdjustmentCreatedBy")
+  attendanceAdjustmentsReceived AttendanceAdjustment[]  @relation("AttendanceAdjustmentUser")
+  attendanceEvents              AttendanceEvent[]
+  scheduleEntries               ScheduleEntry[]
+  wastes                        Waste[]
 
   @@index([isActive])
   @@index([username])
 }
 
 model Membership {
-  id             String   @id @default(cuid())
-  userId         String
-  organizationId String?
-  branchId       String? // null = acceso a todas las sucursales
+  id                     String    @id @default(cuid())
+  userId                 String
+  organizationId         String?
+  branchId               String? // null = acceso a todas las sucursales
   /// Nombre de usuario local del negocio (minúsculas). Único por organización.
-  username       String?
-  roles          Role[]   @default([WAITER])
-  isActive       Boolean  @default(true)
+  username               String?
+  roles                  Role[]    @default([WAITER])
+  kitchenPositionId      String?
+  isActive               Boolean   @default(true)
   /// Creador del negocio; puede iniciar sesión desde el dominio principal.
-  isOwner        Boolean  @default(false)
+  isOwner                Boolean   @default(false)
   /// PIN de 4-8 dígitos para entrar a la caja en un dispositivo vinculado.
-  pinHash        String?
-  pinUpdatedAt   DateTime?
-  pinAttempts    Int      @default(0)
-  pinLockedUntil DateTime?
+  pinHash                String?
+  pinUpdatedAt           DateTime?
+  pinAttempts            Int       @default(0)
+  pinLockedUntil         DateTime?
   /// Puede operar el modo checador y registrar checadas de otros con su PIN.
-  attendanceKioskEnabled Boolean @default(false)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  attendanceKioskEnabled Boolean   @default(false)
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
 
-  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch       Branch?       @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  user                   User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization           Organization?       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch                 Branch?             @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  kitchenPosition        KitchenPosition?    @relation(fields: [kitchenPositionId], references: [id], onDelete: SetNull)
+  kitchenAssignments     KitchenAssignment[]
+  assignedKitchenTickets KitchenTicket[]     @relation("KitchenTicketAssignee")
 
   @@unique([userId, organizationId])
   @@unique([organizationId, username])
@@ -435,22 +489,24 @@ model Membership {
 /// Sucursal física del negocio. Por ahora agrupa al personal; el inventario y
 /// los pedidos se irán vinculando por fases para no mezclar existencias.
 model Branch {
-  id             String   @id @default(cuid())
-  organizationId String
-  name           String
-  address        String?
-  phone          String?
-  isActive       Boolean  @default(true)
+  id                   String      @id @default(cuid())
+  organizationId       String
+  name                 String
+  address              String?
+  phone                String?
+  isActive             Boolean     @default(true)
+  /// Modo de cocina de la sucursal. No hay modo a nivel organización.
+  kitchenMode          KitchenMode @default(GENERAL)
   /// Porcentaje de propina sugerido en el POS (0 = sin sugerencia).
-  defaultTipPercent Int   @default(0)
+  defaultTipPercent    Int         @default(0)
   /// Plantilla del ticket de la sucursal. `null` = plantilla por defecto.
-  receiptTemplate Json?
+  receiptTemplate      Json?
   /// Coordenadas del local para la geocerca del checador.
-  latitude Decimal? @db.Decimal(10, 7)
-  longitude Decimal? @db.Decimal(10, 7)
-  geofenceRadiusMeters Int @default(150)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  latitude             Decimal?    @db.Decimal(10, 7)
+  longitude            Decimal?    @db.Decimal(10, 7)
+  geofenceRadiusMeters Int         @default(150)
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
 
   organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   memberships  Membership[]
@@ -460,17 +516,18 @@ model Branch {
   orders       Order[]
   payments     Payment[]
 
-  mercadoPagoTerminals MercadoPagoTerminal[]
-  cashSessions         CashSession[]
-  cashMovements        CashMovement[]
-  dailySequences       BranchDailySequence[]
-  posDevices           PosDevice[]
-  posPairings          PosPairing[]
-  posDisplays          PosDisplay[]
-  shifts               Shift[]
-  schedules            Schedule[]
-  attendanceEvents     AttendanceEvent[]
+  mercadoPagoTerminals  MercadoPagoTerminal[]
+  cashSessions          CashSession[]
+  cashMovements         CashMovement[]
+  dailySequences        BranchDailySequence[]
+  posDevices            PosDevice[]
+  posPairings           PosPairing[]
+  posDisplays           PosDisplay[]
+  shifts                Shift[]
+  schedules             Schedule[]
+  attendanceEvents      AttendanceEvent[]
   attendanceAdjustments AttendanceAdjustment[]
+  kitchenStations       KitchenStation[]
 
   @@unique([organizationId, name])
   @@index([organizationId, isActive])
@@ -530,16 +587,16 @@ model EmailVerificationToken {
 }
 
 model TwoFactorCode {
-  id         String           @id
-  userId     String
+  id             String           @id
+  userId         String
   /// Negocio de la sesión que se está autenticando (solo en LOGIN).
   organizationId String?
-  purpose    TwoFactorPurpose
-  codeHash   String
-  expiresAt  DateTime
-  attempts   Int              @default(0)
-  consumedAt DateTime?
-  createdAt  DateTime         @default(now())
+  purpose        TwoFactorPurpose
+  codeHash       String
+  expiresAt      DateTime
+  attempts       Int              @default(0)
+  consumedAt     DateTime?
+  createdAt      DateTime         @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -578,10 +635,11 @@ model Category {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
-  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization Organization?        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   items        Item[]
   recipes      Recipe[]
   overrides    CategoryOverride[]
+  stationRules KitchenStationRule[] @relation("CategoryStationRule")
 
   @@unique([organizationId, kind, name])
   @@unique([kind, code])
@@ -681,32 +739,36 @@ model FiscalProfile {
 /// Artículo del catálogo (lo que se vende en el POS).
 /// La tabla sigue llamándose `Product` para no migrar la base.
 model Item {
-  id             String   @id @default(cuid())
-  organizationId String?
-  categoryId     String?
+  id               String   @id @default(cuid())
+  organizationId   String?
+  categoryId       String?
   /// Identidad del catálogo: dueña de la imagen y de la carpeta en R2.
-  catalogEntryId String?  @unique
-  name           String
-  description    String?
-  sku            String? // Código interno / importación CSV
-  price          Decimal  @db.Decimal(12, 2) // Precio final con IVA incluido
-  taxRate        Decimal? @db.Decimal(5, 4) // Tasa aplicable; null = no configurada (no se asume ninguna)
-  isActive       Boolean  @default(true)
+  catalogEntryId   String?  @unique
+  name             String
+  description      String?
+  sku              String? // Código interno / importación CSV
+  price            Decimal  @db.Decimal(12, 2) // Precio final con IVA incluido
+  taxRate          Decimal? @db.Decimal(5, 4) // Tasa aplicable; null = no configurada (no se asume ninguna)
+  /// Estación primaria de cocina para el modo Avanzado.
+  defaultStationId String?
+  isActive         Boolean  @default(true)
   /// Marcado manual desde el catálogo: el menú público lo muestra como agotado.
-  isSoldOut      Boolean  @default(false)
+  isSoldOut        Boolean  @default(false)
   /// La receta dejó de publicarse como artículo: se oculta del catálogo de
   /// artículos (aunque esté inactivo) y se conserva para volver a publicarla.
-  isArchived     Boolean  @default(false)
-  isCombo        Boolean  @default(false)
+  isArchived       Boolean  @default(false)
+  isCombo          Boolean  @default(false)
   /// Minutos de preparación propios. `null` = usa el tiempo del negocio.
-  prepMinutes    Int?
-  sortOrder      Int      @default(0)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  prepMinutes      Int?
+  sortOrder        Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   organization           Organization?             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   category               Category?                 @relation(fields: [categoryId], references: [id])
   catalogEntry           CatalogEntry?             @relation(fields: [catalogEntryId], references: [id], onDelete: SetNull)
+  defaultStation         KitchenStation?           @relation("ItemDefaultStation", fields: [defaultStationId], references: [id], onDelete: SetNull)
+  stationRules           KitchenStationRule[]      @relation("ItemStationRule")
   soldIngredient         Ingredient?               @relation("IngredientSoldItem")
   variants               ItemVariant[]
   extras                 ItemExtra[]
@@ -728,27 +790,27 @@ model Item {
 }
 
 model ItemVariant {
-  id           String   @id @default(cuid())
-  itemId       String   @map("productId")
-  name         String // ej: "Chico", "Regular", "Grande", "Sin azúcar"
+  id            String   @id @default(cuid())
+  itemId        String   @map("productId")
+  name          String // ej: "Chico", "Regular", "Grande", "Sin azúcar"
   /// SKU propio: el del artículo más el sufijo de la presentación (XVA101A).
-  sku          String?
+  sku           String?
   /// Presentación que el menú muestra por defecto. Solo una por artículo.
-  isPrimary    Boolean  @default(false)
-  priceAdjust  Decimal  @default(0.0000) @db.Decimal(12, 2)
+  isPrimary     Boolean  @default(false)
+  priceAdjust   Decimal  @default(0.0000) @db.Decimal(12, 2)
   /// Multiplicador del consumo de la receta base. Regular = 1.
-  recipeFactor Decimal  @default(1) @db.Decimal(6, 3)
+  recipeFactor  Decimal  @default(1) @db.Decimal(6, 3)
   /// Imagen propia de la presentación. Si falta, se usa la del artículo.
-  imageKey     String?
-  imageUrl     String?
+  imageKey      String?
+  imageUrl      String?
   /// Variantes optimizadas (AVIF + JPEG por ancho) con sus URLs públicas.
   imageVariants Json?
   /// Nombre legible de la imagen (solo referencia, como en CatalogEntry).
-  imageName    String?
-  isActive     Boolean  @default(true)
-  sortOrder    Int      @default(0)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  imageName     String?
+  isActive      Boolean  @default(true)
+  sortOrder     Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   item                   Item               @relation(fields: [itemId], references: [id], onDelete: Cascade)
   orderItems             OrderItem[]
@@ -977,8 +1039,9 @@ model Menu {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization Organization?        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   items        MenuItem[]
+  stationRules KitchenStationRule[] @relation("MenuStationRule")
 
   @@unique([organizationId, name])
   @@index([organizationId, isActive])
@@ -986,10 +1049,10 @@ model Menu {
 
 /// Artículo incluido en un menú, con su orden dentro de la colección.
 model MenuItem {
-  id        String @id @default(cuid())
+  id        String  @id @default(cuid())
   menuId    String
   itemId    String
-  sortOrder Int    @default(0)
+  sortOrder Int     @default(0)
   /// Nombre del grupo del menú al que pertenece; `null` = «Sin grupo».
   group     String?
 
@@ -1296,19 +1359,19 @@ model InventoryMovement {
 // ============================================================================
 
 model Order {
-  id             String      @id @default(cuid())
-  organizationId String?
-  branchId       String?
-  tableNumber    String?
+  id              String       @id @default(cuid())
+  organizationId  String?
+  branchId        String?
+  tableNumber     String?
   /// Número de comensales de la mesa (1–20).
-  partySize      Int         @default(1)
-  isTakeaway     Boolean     @default(false)
+  partySize       Int          @default(1)
+  isTakeaway      Boolean      @default(false)
   /// Canal de venta; `isTakeaway` se conserva por compatibilidad histórica.
   channel         OrderChannel @default(DINE_IN)
   customerName    String?
   customerPhone   String?
   deliveryAddress String?
-  deliveryFee     Decimal     @default(0) @db.Decimal(12, 2)
+  deliveryFee     Decimal      @default(0) @db.Decimal(12, 2)
   scheduledAt     DateTime?
   /// Consecutivo diario por sucursal (control antifraude).
   ticketNumber    Int?
@@ -1316,13 +1379,13 @@ model Order {
   ticketUid       String?
   /// Nombre del usuario que tomó la orden (histórico del ticket).
   servedByName    String?
-  status         OrderStatus @default(OPEN)
-  subtotal       Decimal     @default(0.0000) @db.Decimal(12, 2)
-  taxTotal       Decimal     @default(0.0000) @db.Decimal(12, 2)
-  total          Decimal     @default(0.0000) @db.Decimal(12, 2)
-  idempotencyKey String?     @unique
-  createdAt      DateTime    @default(now())
-  updatedAt      DateTime    @updatedAt
+  status          OrderStatus  @default(OPEN)
+  subtotal        Decimal      @default(0.0000) @db.Decimal(12, 2)
+  taxTotal        Decimal      @default(0.0000) @db.Decimal(12, 2)
+  total           Decimal      @default(0.0000) @db.Decimal(12, 2)
+  idempotencyKey  String?      @unique
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
 
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   branch       Branch?       @relation(fields: [branchId], references: [id], onDelete: SetNull)
@@ -1334,31 +1397,31 @@ model Order {
   guests       OrderGuest[]
   splits       OrderSplit[]
 
+  @@unique([branchId, ticketUid])
   @@index([organizationId, createdAt])
   @@index([organizationId, status, createdAt])
   @@index([branchId, status, createdAt])
   @@index([branchId, createdAt])
-  @@unique([branchId, ticketUid])
   @@index([organizationId, ticketUid])
 }
 
 /// Persona dentro de una cuenta (opcional). Permite pedir por comensal.
 model OrderGuest {
-  id        String      @id @default(cuid())
+  id        String         @id @default(cuid())
   orderId   String
   /// Vacío cuando la persona todavía no tiene nombre.
-  name      String      @default("")
+  name      String         @default("")
   /// Tratamiento demográfico legado; se conserva para registros anteriores.
   title     GuestTitle?
   /// Sexo declarado (opcional).
   sex       GuestSex?
   /// Rango de edad declarado (opcional).
   ageRange  GuestAgeRange?
-  sortOrder Int         @default(0)
-  createdAt DateTime    @default(now())
+  sortOrder Int            @default(0)
+  createdAt DateTime       @default(now())
 
-  order Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  items OrderItem[]
+  order  Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  items  OrderItem[]
   splits OrderSplit[]
 
   @@index([orderId])
@@ -1389,23 +1452,28 @@ model OrderSplit {
 }
 
 model OrderRound {
-  id             String           @id @default(cuid())
-  orderId        String
-  status         OrderRoundStatus @default(PENDING)
-  idempotencyKey String?          @unique
-  sentAt         DateTime?
-  startedAt      DateTime?
-  readyAt        DateTime?
-  deliveredAt    DateTime?
-  cancelledAt    DateTime?
+  id               String           @id @default(cuid())
+  orderId          String
+  status           OrderRoundStatus @default(PENDING)
+  courseId         String?
+  heldAt           DateTime?
+  firedAt          DateTime?
+  idempotencyKey   String?          @unique
+  sentAt           DateTime?
+  startedAt        DateTime?
+  readyAt          DateTime?
+  deliveredAt      DateTime?
+  cancelledAt      DateTime?
   /// Tiempo estimado de preparación al enviar la ronda, en minutos.
   estimatedMinutes Int?
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @updatedAt
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
 
   order         Order                @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  course        KitchenCourse?       @relation(fields: [courseId], references: [id], onDelete: SetNull)
   items         OrderItem[]
   statusHistory OrderStatusHistory[]
+  tickets       KitchenTicket[]
 
   @@index([orderId])
   @@index([status, createdAt])
@@ -1435,15 +1503,19 @@ model OrderItem {
   guestId        String?
   /// Nombre de la persona al momento del pedido (se conserva si se elimina).
   guestName      String?
+  /// Estación de cocina asignada al enviar la ronda (modo Avanzado).
+  stationId      String?
 
   orderRound        OrderRound                  @relation(fields: [orderRoundId], references: [id], onDelete: Cascade)
   item              Item                        @relation("OrderItemRef", fields: [itemId], references: [id], onDelete: Restrict)
   variant           ItemVariant?                @relation(fields: [itemVariantId], references: [id])
-  guest             OrderGuest?                  @relation(fields: [guestId], references: [id], onDelete: SetNull)
+  guest             OrderGuest?                 @relation(fields: [guestId], references: [id], onDelete: SetNull)
+  station           KitchenStation?             @relation(fields: [stationId], references: [id], onDelete: SetNull)
   extras            OrderItemExtra[]
   exclusions        OrderItemExclusion[]
   options           OrderItemOption[]
   ingredientChoices OrderItemIngredientChoice[]
+  kitchenTickets    KitchenTicketItem[]
 
   @@index([orderRoundId])
   @@index([itemId])
@@ -1532,16 +1604,16 @@ model Payment {
   reference      String?
 
   // Propinas y control de caja.
-  tipAmount      Decimal  @default(0) @db.Decimal(12, 2)
+  tipAmount      Decimal   @default(0) @db.Decimal(12, 2)
   /// Porcentaje de propina aplicado (0–100); `null` si fue un monto manual.
-  tipPercent     Decimal? @db.Decimal(5, 2)
+  tipPercent     Decimal?  @db.Decimal(5, 2)
   /// De dónde salió la propina.
   tipSource      TipSource @default(NONE)
   /// Base sobre la que se calculó el porcentaje.
-  tipBaseAmount  Decimal? @db.Decimal(12, 2)
+  tipBaseAmount  Decimal?  @db.Decimal(12, 2)
   tipRecipientId String?
-  cashReceived   Decimal? @db.Decimal(12, 2)
-  changeGiven    Decimal? @db.Decimal(12, 2)
+  cashReceived   Decimal?  @db.Decimal(12, 2)
+  changeGiven    Decimal?  @db.Decimal(12, 2)
   sessionId      String?
   /// Parte de la cuenta a la que se aplica el pago, si está dividida.
   splitId        String?
@@ -1560,16 +1632,16 @@ model Payment {
 
   // Cobros capturados sin conexión.
   /// Dispositivo que capturó el cobro offline (identificador local, no secreto).
-  offlineDeviceId String?
+  offlineDeviceId  String?
   /// Hora local declarada por el dispositivo al capturar el cobro.
   createdOfflineAt DateTime?
   /// Cobro offline que requiere conciliación humana antes de darse por cobrado.
-  reviewRequired Boolean @default(false)
+  reviewRequired   Boolean   @default(false)
   /// Motivo por el que el cobro requiere revisión.
-  reviewReason String?
+  reviewReason     String?
 
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   branch       Branch?       @relation(fields: [branchId], references: [id], onDelete: SetNull)
@@ -1581,6 +1653,9 @@ model Payment {
   session      CashSession?  @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   split        OrderSplit?   @relation(fields: [splitId], references: [id], onDelete: SetNull)
 
+  /// La idempotencia es por negocio: dos negocios pueden repetir la misma
+  /// clave sin colisionar. Postgres permite varios `NULL`.
+  @@unique([organizationId, idempotencyKey])
   @@index([organizationId, status, createdAt])
   @@index([organizationId, status, confirmedAt])
   @@index([branchId, createdAt])
@@ -1592,9 +1667,6 @@ model Payment {
   @@index([sessionId, reviewRequired])
   @@index([tipRecipientId])
   @@index([splitId])
-  /// La idempotencia es por negocio: dos negocios pueden repetir la misma
-  /// clave sin colisionar. Postgres permite varios `NULL`.
-  @@unique([organizationId, idempotencyKey])
 }
 
 // ============================================================================
@@ -1605,28 +1677,28 @@ model Payment {
 /// (y uno por organización cuando no hay sucursal); la regla se refuerza con
 /// un índice parcial en la migración.
 model CashSession {
-  id             String            @id @default(cuid())
-  organizationId String
-  branchId       String?
-  status         CashSessionStatus @default(OPEN)
-  openedById     String?
-  openedAt       DateTime          @default(now())
-  openingFloat   Decimal           @default(0) @db.Decimal(12, 2)
-  closedById     String?
-  closedAt       DateTime?
-  countedCash    Decimal?          @db.Decimal(12, 2)
-  expectedCash   Decimal?          @db.Decimal(12, 2)
-  difference     Decimal?          @db.Decimal(12, 2)
-  notes          String?
+  id                  String            @id @default(cuid())
+  organizationId      String
+  branchId            String?
+  status              CashSessionStatus @default(OPEN)
+  openedById          String?
+  openedAt            DateTime          @default(now())
+  openingFloat        Decimal           @default(0) @db.Decimal(12, 2)
+  closedById          String?
+  closedAt            DateTime?
+  countedCash         Decimal?          @db.Decimal(12, 2)
+  expectedCash        Decimal?          @db.Decimal(12, 2)
+  difference          Decimal?          @db.Decimal(12, 2)
+  notes               String?
   /// Clave de idempotencia del cierre (reintentos offline).
-  closeIdempotencyKey String?      @unique
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @updatedAt
+  closeIdempotencyKey String?           @unique
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
 
-  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch       Branch?       @relation(fields: [branchId], references: [id], onDelete: SetNull)
-  openedBy     User?         @relation("CashSessionOpenedBy", fields: [openedById], references: [id], onDelete: SetNull)
-  closedBy     User?         @relation("CashSessionClosedBy", fields: [closedById], references: [id], onDelete: SetNull)
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?        @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  openedBy     User?          @relation("CashSessionOpenedBy", fields: [openedById], references: [id], onDelete: SetNull)
+  closedBy     User?          @relation("CashSessionClosedBy", fields: [closedById], references: [id], onDelete: SetNull)
   payments     Payment[]
   movements    CashMovement[]
 
@@ -1657,10 +1729,10 @@ model CashMovement {
 
 /// Consecutivo diario por sucursal para numerar los tickets de venta.
 model BranchDailySequence {
-  id        String   @id @default(cuid())
-  branchId  String
-  date      DateTime @db.Date
-  lastNumber Int     @default(0)
+  id         String   @id @default(cuid())
+  branchId   String
+  date       DateTime @db.Date
+  lastNumber Int      @default(0)
 
   branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
 
@@ -1742,25 +1814,25 @@ model PosDisplay {
 /// Los tokens se guardan cifrados con AES-256-GCM (`TokenCipher`); nunca se
 /// exponen al frontend ni se registran en logs.
 model MercadoPagoConnection {
-  id              String   @id @default(cuid())
-  organizationId  String   @unique
-  mpUserId        String
+  id                String    @id @default(cuid())
+  organizationId    String    @unique
+  mpUserId          String
   /// Correo y apodo de la cuenta autorizada, para que el negocio vea cuál está conectada.
-  mpEmail         String?
-  mpNickname      String?
-  accessTokenEnc  String
-  refreshTokenEnc String
-  expiresAt       DateTime
-  scopes          String[] @default([])
+  mpEmail           String?
+  mpNickname        String?
+  accessTokenEnc    String
+  refreshTokenEnc   String
+  expiresAt         DateTime
+  scopes            String[]  @default([])
   /// ACTIVE | ERROR | REVOKED
-  status          String   @default("ACTIVE")
-  connectedById   String?
-  connectedAt     DateTime @default(now())
-  lastRefreshedAt DateTime?
+  status            String    @default("ACTIVE")
+  connectedById     String?
+  connectedAt       DateTime  @default(now())
+  lastRefreshedAt   DateTime?
   /// Último intento de sincronización de terminales con Mercado Pago.
   terminalsSyncedAt DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 }
@@ -1853,13 +1925,13 @@ model Plan {
   perBranch    Boolean @default(false)
   trialDays    Int     @default(14)
 
-  maxBranches        Int?
-  maxUsersPerBranch  Int?
-  maxImagesPerItem   Int     @default(1)
-  maxVideosPerItem   Int     @default(0)
-  maxStorageBytes    BigInt?
-  maxInventoryItems  Int?
-  customDomain       Boolean @default(false)
+  maxBranches       Int?
+  maxUsersPerBranch Int?
+  maxImagesPerItem  Int     @default(1)
+  maxVideosPerItem  Int     @default(0)
+  maxStorageBytes   BigInt?
+  maxInventoryItems Int?
+  customDomain      Boolean @default(false)
 
   isActive  Boolean @default(true)
   isPublic  Boolean @default(true)
@@ -1870,8 +1942,8 @@ model Plan {
   updatedAt DateTime @updatedAt
 
   subscriptions OrganizationSubscription[]
-  changesFrom   PlanChange[]             @relation("PlanChangeFrom")
-  changesTo     PlanChange[]             @relation("PlanChangeTo")
+  changesFrom   PlanChange[]               @relation("PlanChangeFrom")
+  changesTo     PlanChange[]               @relation("PlanChangeTo")
 }
 
 /// Suscripción de un negocio a un plan de Mishef.
@@ -1905,8 +1977,8 @@ model OrganizationSubscription {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  plan         Plan         @relation(fields: [planId], references: [id], onDelete: Restrict)
+  organization Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  plan         Plan                  @relation(fields: [planId], references: [id], onDelete: Restrict)
   payments     SubscriptionPayment[]
   changes      PlanChange[]
 
@@ -1916,23 +1988,23 @@ model OrganizationSubscription {
 
 /// Cambio de plan con prorrateo (upgrade).
 model PlanChange {
-  id             String           @id @default(cuid())
-  subscriptionId String
-  fromPlanId     String
-  toPlanId       String
-  interval       BillingInterval
-  quantity       Int
+  id                    String           @id @default(cuid())
+  subscriptionId        String
+  fromPlanId            String
+  toPlanId              String
+  interval              BillingInterval
+  quantity              Int
   /// Valor de los días restantes del plan anterior, en centavos.
-  creditCents    Int
+  creditCents           Int
   /// Diferencia a cobrar en el primer cargo, en centavos.
-  amountDueCents Int
-  status         PlanChangeStatus @default(PENDING)
+  amountDueCents        Int
+  status                PlanChangeStatus @default(PENDING)
   previousPreapprovalId String?
   providerPreapprovalId String?
-  effectiveAt    DateTime?
-  appliedAt      DateTime?
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @updatedAt
+  effectiveAt           DateTime?
+  appliedAt             DateTime?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
 
   subscription OrganizationSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
   fromPlan     Plan                     @relation("PlanChangeFrom", fields: [fromPlanId], references: [id], onDelete: Restrict)
@@ -1943,20 +2015,20 @@ model PlanChange {
 
 /// Pago individual de una suscripción (cobro recurrente o prorrateo).
 model SubscriptionPayment {
-  id                String   @id @default(cuid())
+  id                String    @id @default(cuid())
   subscriptionId    String
   organizationId    String
-  kind              String   @default("SUBSCRIPTION")
+  kind              String    @default("SUBSCRIPTION")
   status            String
   amountCents       Int
-  currency          String   @default("MXN")
-  providerPaymentId String?  @unique
+  currency          String    @default("MXN")
+  providerPaymentId String?   @unique
   periodStart       DateTime?
   periodEnd         DateTime?
   paidAt            DateTime?
   raw               Json?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   subscription OrganizationSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
 
@@ -1966,14 +2038,14 @@ model SubscriptionPayment {
 
 /// Notificación del webhook de suscripciones (app de billing).
 model BillingWebhookEvent {
-  id         String    @id @default(cuid())
-  requestId  String?   @unique
-  topic      String
-  providerId String?
-  payload    Json
+  id          String    @id @default(cuid())
+  requestId   String?   @unique
+  topic       String
+  providerId  String?
+  payload     Json
   processedAt DateTime?
-  error      String?
-  receivedAt DateTime  @default(now())
+  error       String?
+  receivedAt  DateTime  @default(now())
 
   @@index([providerId])
   @@index([receivedAt])
@@ -2058,7 +2130,7 @@ enum ImageJobTarget {
 /// El navegador sube el original a \`tmp/\` y crea un job. Un worker en la API
 /// genera las variantes AVIF/JPEG, las guarda y actualiza la entidad destino.
 model ImageJob {
-  id             String          @id @default(cuid())
+  id             String         @id @default(cuid())
   organizationId String
   target         ImageJobTarget
   /// CatalogEntry.id o ItemVariant.id segun \`target\`.
@@ -2071,10 +2143,10 @@ model ImageJob {
   folder         String
   /// Objeto temporal subido por el navegador.
   tempKey        String
-  status         ImageJobStatus  @default(PENDING)
+  status         ImageJobStatus @default(PENDING)
   result         Json?
   error          String?
-  createdAt      DateTime        @default(now())
+  createdAt      DateTime       @default(now())
   startedAt      DateTime?
   finishedAt     DateTime?
 
@@ -2089,19 +2161,19 @@ model ImageJob {
 /// El token se guarda hasheado: si alguien obtiene una copia de la base no
 /// puede canjear invitaciones. Caduca y solo sirve una vez.
 model Invitation {
-  id             String   @id @default(cuid())
+  id             String    @id @default(cuid())
   organizationId String
   email          String
-  roles          Role[]   @default([])
+  roles          Role[]    @default([])
   branchId       String?
   /// Nombre visible y username local que tendrá al aceptar.
   name           String?
   username       String?
-  tokenHash      String   @unique
+  tokenHash      String    @unique
   invitedById    String?
   expiresAt      DateTime
   acceptedAt     DateTime?
-  createdAt      DateTime @default(now())
+  createdAt      DateTime  @default(now())
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
@@ -2111,43 +2183,43 @@ model Invitation {
 
 /// Turno de trabajo (checador). Un turno abierto por persona a la vez.
 model Shift {
-  id             String    @id @default(cuid())
-  organizationId String
-  branchId       String?
-  userId         String
+  id                 String           @id @default(cuid())
+  organizationId     String
+  branchId           String?
+  userId             String
   /// Hora real de entrada (nunca se reescribe; el log está en AttendanceEvent).
-  startedAt      DateTime  @default(now())
+  startedAt          DateTime         @default(now())
   /// Hora real de salida.
-  endedAt        DateTime?
+  endedAt            DateTime?
   /// Hora efectiva para nómina, ajustada por las tolerancias vigentes.
   effectiveStartedAt DateTime?
   effectiveEndedAt   DateTime?
   /// Horario publicado que se usó para calcular las tolerancias.
-  scheduleEntryId  String?
+  scheduleEntryId    String?
   scheduledStartedAt DateTime?
   scheduledEndedAt   DateTime?
-  note           String?
+  note               String?
   /// Quién operó el checador; `null` = el propio empleado desde su cuenta.
-  recordedById   String?
-  source         AttendanceSource @default(WEB)
+  recordedById       String?
+  source             AttendanceSource @default(WEB)
   /// Resultado de la geocerca al momento de la checada.
-  withinGeofence Boolean?
+  withinGeofence     Boolean?
   /// Checada fuera de zona/horario que un ADMIN debe autorizar.
-  needsReview    Boolean  @default(false)
-  reviewedById   String?
-  reviewedAt     DateTime?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  needsReview        Boolean          @default(false)
+  reviewedById       String?
+  reviewedAt         DateTime?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
-  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  recordedBy   User?        @relation("ShiftRecordedBy", fields: [recordedById], references: [id], onDelete: SetNull)
-  reviewedBy   User?        @relation("ShiftReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
-  scheduleEntry ScheduleEntry? @relation(fields: [scheduleEntryId], references: [id], onDelete: SetNull)
-  breaks       ShiftBreak[]
-  adjustments  AttendanceAdjustment[]
-  events       AttendanceEvent[]
+  organization  Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch        Branch?                @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  user          User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recordedBy    User?                  @relation("ShiftRecordedBy", fields: [recordedById], references: [id], onDelete: SetNull)
+  reviewedBy    User?                  @relation("ShiftReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
+  scheduleEntry ScheduleEntry?         @relation(fields: [scheduleEntryId], references: [id], onDelete: SetNull)
+  breaks        ShiftBreak[]
+  adjustments   AttendanceAdjustment[]
+  events        AttendanceEvent[]
 
   @@index([organizationId, startedAt])
   @@index([userId, startedAt])
@@ -2356,6 +2428,7 @@ model Waste {
   @@index([branchId, createdAt])
   @@index([ingredientId])
 }
+
 /// Dirección anterior de un negocio.
 ///
 /// Se conserva para que los enlaces y QR ya impresos sigan funcionando: el
@@ -2371,3 +2444,150 @@ model SlugAlias {
   @@index([organizationId])
 }
 
+// ============================================================================
+// Cocina avanzada (modo General / Avanzado)
+// ============================================================================
+
+model KitchenStation {
+  id             String             @id @default(cuid())
+  organizationId String
+  branchId       String?
+  name           String
+  code           String
+  type           KitchenStationType @default(CUSTOM)
+  color          String?
+  sortOrder      Int                @default(0)
+  isActive       Boolean            @default(true)
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  organization Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?              @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  assignments  KitchenAssignment[]
+  tickets      KitchenTicket[]
+  routingRules KitchenStationRule[]
+  defaultItems Item[]               @relation("ItemDefaultStation")
+  orderItems   OrderItem[]
+
+  @@unique([organizationId, branchId, code])
+  @@index([organizationId, isActive])
+  @@index([branchId, isActive])
+}
+
+model KitchenPosition {
+  id             String               @id @default(cuid())
+  organizationId String
+  name           String
+  code           String
+  level          KitchenPositionLevel @default(COOK)
+  permissions    String[]             @default([])
+  isSystemPreset Boolean              @default(false)
+  isActive       Boolean              @default(true)
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  memberships  Membership[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId, isActive])
+}
+
+model KitchenAssignment {
+  id             String   @id @default(cuid())
+  organizationId String
+  membershipId   String
+  stationId      String
+  isPrimary      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  membership Membership     @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  station    KitchenStation @relation(fields: [stationId], references: [id], onDelete: Cascade)
+
+  @@unique([membershipId, stationId])
+  @@index([organizationId])
+  @@index([stationId])
+}
+
+model KitchenStationRule {
+  id             String   @id @default(cuid())
+  organizationId String
+  branchId       String?
+  stationId      String
+  itemId         String?
+  categoryId     String?
+  menuId         String?
+  priority       Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  station  KitchenStation @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  item     Item?          @relation("ItemStationRule", fields: [itemId], references: [id], onDelete: Cascade)
+  category Category?      @relation("CategoryStationRule", fields: [categoryId], references: [id], onDelete: Cascade)
+  menu     Menu?          @relation("MenuStationRule", fields: [menuId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, itemId])
+  @@index([organizationId, categoryId])
+  @@index([organizationId, menuId])
+  @@index([stationId])
+}
+
+model KitchenCourse {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  sortOrder      Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  rounds       OrderRound[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId, isActive])
+}
+
+model KitchenTicket {
+  id                   String              @id @default(cuid())
+  organizationId       String
+  branchId             String?
+  orderRoundId         String
+  stationId            String
+  status               KitchenTicketStatus @default(PENDING)
+  assignedMembershipId String?
+  createdAt            DateTime            @default(now())
+  firedAt              DateTime?
+  startedAt            DateTime?
+  readyAt              DateTime?
+  pickedUpAt           DateTime?
+  deliveredAt          DateTime?
+  cancelledAt          DateTime?
+  cancelReason         String?
+
+  orderRound         OrderRound          @relation(fields: [orderRoundId], references: [id], onDelete: Cascade)
+  station            KitchenStation      @relation(fields: [stationId], references: [id], onDelete: Restrict)
+  assignedMembership Membership?         @relation("KitchenTicketAssignee", fields: [assignedMembershipId], references: [id], onDelete: SetNull)
+  items              KitchenTicketItem[]
+
+  @@unique([orderRoundId, stationId])
+  @@index([organizationId, status, createdAt])
+  @@index([branchId, status, createdAt])
+  @@index([stationId, status])
+  @@index([assignedMembershipId])
+}
+
+model KitchenTicketItem {
+  id            String            @id @default(cuid())
+  ticketId      String
+  orderItemId   String
+  status        KitchenItemStatus @default(PENDING)
+  voidReason    String?
+  refiredFromId String?
+
+  ticket    KitchenTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  orderItem OrderItem     @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  @@unique([ticketId, orderItemId])
+  @@index([orderItemId])
+}

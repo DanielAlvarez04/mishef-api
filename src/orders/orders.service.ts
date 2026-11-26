@@ -44,6 +44,15 @@ import { TicketSequenceService } from '../tickets/ticket-sequence.service';
 /** Estados a los que puede pasar cada estado de ronda (plan.md §6.6). */
 const ALLOWED_TRANSITIONS: Record<OrderRoundStatus, OrderRoundStatus[]> = {
   [OrderRoundStatus.PENDING]: [
+    OrderRoundStatus.FIRED,
+    OrderRoundStatus.PREPARING,
+    OrderRoundStatus.CANCELLED,
+  ],
+  [OrderRoundStatus.HELD]: [
+    OrderRoundStatus.FIRED,
+    OrderRoundStatus.CANCELLED,
+  ],
+  [OrderRoundStatus.FIRED]: [
     OrderRoundStatus.PREPARING,
     OrderRoundStatus.CANCELLED,
   ],
@@ -52,6 +61,11 @@ const ALLOWED_TRANSITIONS: Record<OrderRoundStatus, OrderRoundStatus[]> = {
     OrderRoundStatus.CANCELLED,
   ],
   [OrderRoundStatus.READY]: [
+    OrderRoundStatus.PICKED_UP,
+    OrderRoundStatus.DELIVERED,
+    OrderRoundStatus.CANCELLED,
+  ],
+  [OrderRoundStatus.PICKED_UP]: [
     OrderRoundStatus.DELIVERED,
     OrderRoundStatus.CANCELLED,
   ],
@@ -61,8 +75,11 @@ const ALLOWED_TRANSITIONS: Record<OrderRoundStatus, OrderRoundStatus[]> = {
 
 const OPEN_ROUND_STATUSES = [
   OrderRoundStatus.PENDING,
+  OrderRoundStatus.HELD,
+  OrderRoundStatus.FIRED,
   OrderRoundStatus.PREPARING,
   OrderRoundStatus.READY,
+  OrderRoundStatus.PICKED_UP,
 ];
 
 const roundInclude: Prisma.OrderRoundInclude = {

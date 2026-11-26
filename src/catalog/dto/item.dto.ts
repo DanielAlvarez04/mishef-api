@@ -266,6 +266,11 @@ export class CreateItemDto {
   @IsString()
   categoryId?: string | null;
 
+  /** Estación primaria de cocina para el modo Avanzado. */
+  @IsOptional()
+  @IsString()
+  defaultStationId?: string | null;
+
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   price!: number;
@@ -365,6 +370,11 @@ export class UpdateItemDto {
   @IsOptional()
   @IsString()
   categoryId?: string | null;
+
+  /** Estación primaria de cocina para el modo Avanzado. */
+  @IsOptional()
+  @IsString()
+  defaultStationId?: string | null;
 
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
