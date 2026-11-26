@@ -7,7 +7,6 @@ import {
 import {
   KitchenMode,
   KitchenPositionLevel,
-  KitchenStationType,
   Prisma,
 } from '@prisma/client';
 
@@ -229,7 +228,6 @@ export class KitchenConfigService {
             branchId: branch.id,
             name: 'Cocina',
             code: 'COCINA',
-            type: KitchenStationType.CUSTOM,
             sortOrder: 0,
           },
         });
@@ -295,7 +293,6 @@ export class KitchenConfigService {
         branchId: resolvedBranchId,
         name,
         code,
-        type: dto.type ?? KitchenStationType.CUSTOM,
         color: dto.color?.trim() || null,
         sortOrder: dto.sortOrder ?? 0,
         slaMinutes: dto.slaMinutes ?? null,
@@ -321,7 +318,6 @@ export class KitchenConfigService {
 
     if (name !== undefined && name !== station.name) data.name = name;
     if (code !== undefined && code !== station.code) data.code = code;
-    if (dto.type !== undefined && dto.type !== station.type) data.type = dto.type;
     if (dto.color !== undefined) {
       const color = dto.color?.trim() || null;
       if (color !== station.color) data.color = color;

@@ -82,7 +82,6 @@ export class KitchenTicketingService {
           branchId: input.branchId,
           name: 'Cocina',
           code: 'COCINA',
-          type: 'CUSTOM',
         },
         select: { id: true },
       });

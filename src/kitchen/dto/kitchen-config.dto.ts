@@ -15,7 +15,6 @@ import {
 import {
   KitchenMode,
   KitchenPositionLevel,
-  KitchenStationType,
 } from '@prisma/client';
 
 const CODE = /^[A-Z0-9][A-Z0-9_-]{1,39}$/;
@@ -37,10 +36,6 @@ export class CreateKitchenStationDto {
     message: 'El código usa mayúsculas, números, guion o guion bajo',
   })
   code?: string;
-
-  @IsOptional()
-  @IsEnum(KitchenStationType)
-  type?: KitchenStationType;
 
   @IsOptional()
   @IsString()
@@ -74,10 +69,6 @@ export class UpdateKitchenStationDto {
     message: 'El código usa mayúsculas, números, guion o guion bajo',
   })
   code?: string;
-
-  @IsOptional()
-  @IsEnum(KitchenStationType)
-  type?: KitchenStationType;
 
   @IsOptional()
   @IsString()

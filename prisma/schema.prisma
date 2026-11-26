@@ -51,19 +51,6 @@ enum KitchenMode {
   ADVANCED
 }
 
-enum KitchenStationType {
-  GARDE_MANGER
-  ENTREMETIER
-  SAUCIER
-  GRILL
-  FRY
-  FISH
-  PASTRY
-  BUTCHERY
-  EXPO
-  CUSTOM
-}
-
 enum KitchenPositionLevel {
   MANAGEMENT
   CHEF_DE_PARTIE
@@ -2454,7 +2441,6 @@ model KitchenStation {
   branchId       String?
   name           String
   code           String
-  type           KitchenStationType @default(CUSTOM)
   color          String?
   sortOrder      Int                @default(0)
   /// Minutos objetivo de preparación; `null` = usa el estimado de la ronda o 15.
