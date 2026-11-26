@@ -15,6 +15,7 @@ import { BranchContextInterceptor } from './branches/branch-context.interceptor'
 import { CatalogModule } from './catalog/catalog.module';
 import { InventoryModule } from './inventory/inventory.module';
 import { OrdersModule } from './orders/orders.module';
+import { DiningTablesModule } from './tables/dining-tables.module';
 import { PaymentsModule } from './payments/payments.module';
 import { CashModule } from './cash/cash.module';
 import { PosModule } from './pos/pos.module';
@@ -58,6 +59,7 @@ import { ReceiptsModule } from './receipts/receipts.module';
     CatalogModule,
     InventoryModule,
     OrdersModule,
+    DiningTablesModule,
     PaymentsModule,
     CashModule,
     PosModule,

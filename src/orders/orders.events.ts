@@ -5,6 +5,7 @@ export type OrderEventType =
   | 'ORDER_CREATED'
   | 'ORDER_CLOSED'
   | 'ORDER_CANCELLED'
+  | 'ORDER_UPDATED'
   | 'ROUND_CREATED'
   | 'ROUND_UPDATED';
 

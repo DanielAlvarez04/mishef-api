@@ -19,6 +19,7 @@ import {
   Prisma,
   PromotionType,
   Role,
+  SplitMode,
   SplitStatus,
   UnitCode,
 } from '@prisma/client';
@@ -60,6 +61,9 @@ const ALLOWED_TRANSITIONS: Record<OrderRoundStatus, OrderRoundStatus[]> = {
     OrderRoundStatus.FIRED,
     OrderRoundStatus.CANCELLED,
   ],
+  [OrderRoundStatus.PENDING_PAYMENT]: [
+    OrderRoundStatus.CANCELLED,
+  ],
   [OrderRoundStatus.FIRED]: [
     OrderRoundStatus.PREPARING,
     OrderRoundStatus.CANCELLED,
@@ -84,6 +88,7 @@ const ALLOWED_TRANSITIONS: Record<OrderRoundStatus, OrderRoundStatus[]> = {
 const OPEN_ROUND_STATUSES = [
   OrderRoundStatus.PENDING,
   OrderRoundStatus.HELD,
+  OrderRoundStatus.PENDING_PAYMENT,
   OrderRoundStatus.FIRED,
   OrderRoundStatus.PREPARING,
   OrderRoundStatus.READY,
@@ -198,6 +203,14 @@ const roundInclude: Prisma.OrderRoundInclude = {
 const orderInclude: Prisma.OrderInclude = {
   rounds: { orderBy: { createdAt: 'asc' }, include: roundInclude },
   guests: { orderBy: { sortOrder: 'asc' } },
+  tables: {
+    orderBy: { isPrimary: 'desc' },
+    include: { table: true },
+  },
+  splits: {
+    where: { status: { not: SplitStatus.CANCELLED } },
+    orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+  },
   user: { select: { id: true, name: true, username: true } },
   payments: {
     orderBy: { createdAt: 'asc' },
@@ -233,6 +246,9 @@ const kitchenInclude: Prisma.OrderRoundInclude = {
       total: true,
       createdAt: true,
       ticketNumber: true,
+      tables: {
+        select: { table: { select: { number: true } } },
+      },
       branch: { select: { id: true, name: true } },
     },
   },
@@ -309,6 +325,59 @@ export class OrdersService {
       (dto.isTakeaway ? OrderChannel.COUNTER : OrderChannel.DINE_IN);
 
     const requestedTable = dto.tableNumber?.trim();
+    const requestedTableIds = [...new Set(dto.tableIds ?? [])];
+
+    if (requestedTableIds.length > 0 && !organizationId) {
+      throw new BadRequestException('La sesión no tiene un negocio activo');
+    }
+
+    const requestedTables =
+      requestedTableIds.length > 0
+        ? await this.prisma.diningTable.findMany({
+            where: {
+              id: { in: requestedTableIds },
+              organizationId: organizationId!,
+              branchId: scopedBranchId,
+              isActive: true,
+            },
+            orderBy: [{ sortOrder: 'asc' }, { number: 'asc' }],
+          })
+        : [];
+
+    if (
+      requestedTableIds.length > 0 &&
+      requestedTables.length !== requestedTableIds.length
+    ) {
+      throw new BadRequestException(
+        'Alguna mesa no existe, está inactiva o es de otra sucursal',
+      );
+    }
+
+    if (requestedTables.length > 0) {
+      if (requestedChannel !== OrderChannel.DINE_IN) {
+        throw new BadRequestException(
+          'Solo las cuentas de mesa pueden ocupar mesas',
+        );
+      }
+
+      const occupied = await this.prisma.orderTable.findFirst({
+        where: {
+          tableId: { in: requestedTables.map((table) => table.id) },
+          order: {
+            organizationId,
+            branchId: scopedBranchId,
+            status: OrderStatus.OPEN,
+          },
+        },
+        select: { orderId: true },
+      });
+
+      if (occupied) {
+        throw new ConflictException(
+          'Una de las mesas seleccionadas ya tiene una cuenta abierta',
+        );
+      }
+    }
 
     if (
       dto.reuseOpenTable &&
@@ -357,12 +426,20 @@ export class OrdersService {
       }
 
       if (
-        (channel === OrderChannel.DELIVERY ||
-          channel === OrderChannel.PHONE) &&
+        channel === OrderChannel.DELIVERY &&
         !dto.customerPhone?.trim()
       ) {
         throw new BadRequestException(
-          'El teléfono del cliente es obligatorio para teléfono o domicilio',
+          'El teléfono del cliente es obligatorio para domicilio',
+        );
+      }
+
+      if (
+        channel === OrderChannel.PHONE &&
+        !dto.customerName?.trim()
+      ) {
+        throw new BadRequestException(
+          'El nombre del cliente es obligatorio para Drive-Thru',
         );
       }
 
@@ -408,7 +485,9 @@ export class OrdersService {
           partySize,
           tableNumber:
             channel === OrderChannel.DINE_IN
-              ? dto.tableNumber?.trim() || null
+              ? requestedTables[0]?.number ??
+                dto.tableNumber?.trim() ??
+                null
               : null,
           isTakeaway:
             dto.isTakeaway ??
@@ -442,6 +521,21 @@ export class OrdersService {
         },
         include: orderInclude,
       });
+
+      if (requestedTables.length > 0) {
+        await tx.orderTable.createMany({
+          data: requestedTables.map((table, index) => ({
+            orderId: order.id,
+            tableId: table.id,
+            isPrimary: index === 0,
+          })),
+        });
+
+        return tx.order.findUniqueOrThrow({
+          where: { id: order.id },
+          include: orderInclude,
+        });
+      }
 
       return order;
     });
@@ -502,6 +596,14 @@ export class OrdersService {
               _count: { select: { items: true } },
             },
           },
+          tables: {
+            orderBy: { isPrimary: 'desc' },
+            include: { table: true },
+          },
+          splits: {
+            where: { status: { not: SplitStatus.CANCELLED } },
+            orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+          },
         },
         orderBy: { createdAt: 'desc' },
         take: limit,
@@ -521,6 +623,270 @@ export class OrdersService {
     }
 
     return this.withBalance(order);
+  }
+
+  /**
+   * Reemplaza las mesas de una cuenta abierta. Sirve para cambiar de mesa y
+   * para juntar mesas libres sin mover los artículos ni los pagos.
+   */
+  async setOrderTables(
+    user: JwtUser,
+    orderId: string,
+    tableIds: string[],
+  ) {
+    if (!user.organizationId) {
+      throw new BadRequestException('La sesión no tiene un negocio activo');
+    }
+
+    const uniqueIds = [...new Set(tableIds)];
+
+    if (uniqueIds.length === 0) {
+      throw new BadRequestException('Selecciona al menos una mesa');
+    }
+
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, organizationId: user.organizationId },
+      include: { tables: true },
+    });
+
+    if (!order) throw new NotFoundException('Pedido no encontrado');
+    if (order.status !== OrderStatus.OPEN) {
+      throw new BadRequestException('La cuenta ya no está abierta');
+    }
+    if (order.channel !== OrderChannel.DINE_IN) {
+      throw new BadRequestException('Solo las cuentas de mesa tienen mesas');
+    }
+    if (!order.branchId) {
+      throw new BadRequestException('La cuenta no tiene sucursal');
+    }
+
+    const tables = await this.prisma.diningTable.findMany({
+      where: {
+        id: { in: uniqueIds },
+        organizationId: user.organizationId,
+        branchId: order.branchId,
+        isActive: true,
+      },
+      orderBy: [{ sortOrder: 'asc' }, { number: 'asc' }],
+    });
+
+    if (tables.length !== uniqueIds.length) {
+      throw new BadRequestException(
+        'Alguna mesa no existe, está inactiva o es de otra sucursal',
+      );
+    }
+
+    const occupied = await this.prisma.orderTable.findFirst({
+      where: {
+        tableId: { in: uniqueIds },
+        orderId: { not: orderId },
+        order: { status: OrderStatus.OPEN },
+      },
+      select: { orderId: true },
+    });
+
+    if (occupied) {
+      throw new ConflictException(
+        'Una de las mesas ya tiene otra cuenta abierta',
+      );
+    }
+
+    const previous = order.tables.map((row) => row.tableId);
+    const primary = tables[0];
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      await tx.orderTable.deleteMany({ where: { orderId } });
+      await tx.orderTable.createMany({
+        data: tables.map((table, index) => ({
+          orderId,
+          tableId: table.id,
+          isPrimary: index === 0,
+        })),
+      });
+      await tx.order.update({
+        where: { id: orderId },
+        data: { tableNumber: primary.number },
+      });
+      await tx.auditLog.create({
+        data: {
+          organizationId: user.organizationId,
+          userId: user.sub,
+          action: 'order.tables_updated',
+          entity: 'Order',
+          entityId: orderId,
+          newValues: {
+            from: previous,
+            to: tables.map((table) => table.id),
+          },
+        },
+      });
+
+      return tx.order.findUniqueOrThrow({
+        where: { id: orderId },
+        include: orderInclude,
+      });
+    });
+
+    this.events.publish({
+      type: 'ORDER_UPDATED',
+      organizationId: user.organizationId,
+      branchId: order.branchId,
+      orderId,
+    });
+
+    return this.withBalance(updated);
+  }
+
+  /**
+   * Une dos cuentas abiertas de mesa en una sola.
+   *
+   * Las rondas y clientes se mueven a la cuenta destino; la cuenta origen queda
+   * cancelada como referencia. Se crean dos partes de cobro (las cuentas
+   * originales) para que puedan pagarse por separado.
+   */
+  async mergeOrders(
+    user: JwtUser,
+    targetOrderId: string,
+    sourceOrderId: string,
+  ) {
+    if (!user.organizationId) {
+      throw new BadRequestException('La sesión no tiene un negocio activo');
+    }
+
+    if (targetOrderId === sourceOrderId) {
+      throw new BadRequestException('No puedes juntar una cuenta consigo misma');
+    }
+
+    const [target, source] = await Promise.all([
+      this.prisma.order.findFirst({
+        where: { id: targetOrderId, organizationId: user.organizationId },
+        include: { tables: true, splits: true },
+      }),
+      this.prisma.order.findFirst({
+        where: { id: sourceOrderId, organizationId: user.organizationId },
+        include: { tables: true, splits: true },
+      }),
+    ]);
+
+    if (!target || !source) throw new NotFoundException('Cuenta no encontrada');
+
+    for (const order of [target, source]) {
+      if (order.status !== OrderStatus.OPEN) {
+        throw new BadRequestException('Solo se pueden juntar cuentas abiertas');
+      }
+      if (order.channel !== OrderChannel.DINE_IN) {
+        throw new BadRequestException('Solo se pueden juntar cuentas de mesa');
+      }
+    }
+
+    if (target.branchId !== source.branchId) {
+      throw new BadRequestException('Las cuentas son de sucursales distintas');
+    }
+
+    if (target.splits.length > 0 || source.splits.length > 0) {
+      throw new BadRequestException(
+        'Una de las cuentas ya está dividida; cancela la división antes de juntarlas',
+      );
+    }
+
+    const payments = await this.prisma.payment.count({
+      where: {
+        orderId: { in: [targetOrderId, sourceOrderId] },
+        status: { in: [PaymentStatus.PENDING, PaymentStatus.CONFIRMED] },
+      },
+    });
+
+    if (payments > 0) {
+      throw new BadRequestException(
+        'Una de las cuentas ya tiene pagos; no se puede juntar',
+      );
+    }
+
+    const targetTotal = target.total;
+    const sourceTotal = source.total;
+    const targetLabel = target.tableNumber
+      ? `Mesa ${target.tableNumber}`
+      : 'Cuenta principal';
+    const sourceLabel = source.tableNumber
+      ? `Mesa ${source.tableNumber}`
+      : 'Cuenta secundaria';
+    const sourceTableIds = source.tables.map((row) => row.tableId);
+
+    const merged = await this.prisma.$transaction(async (tx) => {
+      await tx.orderRound.updateMany({
+        where: { orderId: sourceOrderId },
+        data: { orderId: targetOrderId },
+      });
+      await tx.orderGuest.updateMany({
+        where: { orderId: sourceOrderId },
+        data: { orderId: targetOrderId },
+      });
+
+      if (sourceTableIds.length > 0) {
+        await tx.orderTable.deleteMany({ where: { orderId: sourceOrderId } });
+        await tx.orderTable.createMany({
+          data: sourceTableIds.map((tableId) => ({
+            orderId: targetOrderId,
+            tableId,
+            isPrimary: false,
+          })),
+          skipDuplicates: true,
+        });
+      }
+
+      await this.recalculateTotals(tx, targetOrderId);
+      await this.recalculateTotals(tx, sourceOrderId);
+
+      await tx.order.update({
+        where: { id: sourceOrderId },
+        data: { status: OrderStatus.CANCELLED },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          organizationId: user.organizationId,
+          userId: user.sub,
+          action: 'order.merged',
+          entity: 'Order',
+          entityId: targetOrderId,
+          newValues: { sourceOrderId, targetTotal: targetTotal.toFixed(2), sourceTotal: sourceTotal.toFixed(2) },
+        },
+      });
+
+      return tx.order.findUniqueOrThrow({
+        where: { id: targetOrderId },
+        include: orderInclude,
+      });
+    });
+
+    const mergedTotal = Number(merged.total)
+
+    if (mergedTotal > 0) {
+      const targetAmount = Math.min(Number(targetTotal), mergedTotal)
+      const sourceAmount = Math.max(0, mergedTotal - targetAmount)
+
+      await this.splits.create(
+        user.organizationId,
+        targetOrderId,
+        {
+          mode: SplitMode.CUSTOM,
+          amounts: [
+            { label: targetLabel, amount: targetAmount },
+            { label: sourceLabel, amount: sourceAmount },
+          ],
+        },
+        true,
+      );
+    }
+
+    this.events.publish({
+      type: 'ORDER_UPDATED',
+      organizationId: user.organizationId,
+      branchId: target.branchId,
+      orderId: targetOrderId,
+    });
+
+    return this.get(user.organizationId, targetOrderId);
   }
 
   /**
@@ -731,6 +1097,21 @@ export class OrdersService {
       : null;
     const advanced = branch?.kitchenMode === KitchenMode.ADVANCED;
     const hold = advanced && dto.hold === true;
+    const paymentPending = dto.paymentPending === true;
+
+    if (paymentPending) {
+      if (hold) {
+        throw new BadRequestException(
+          'Una ronda no puede estar retenida y pendiente de pago a la vez',
+        );
+      }
+
+      if (order.channel !== OrderChannel.COUNTER) {
+        throw new BadRequestException(
+          'El pago antes de enviar solo aplica a mostrador',
+        );
+      }
+    }
 
     let courseId: string | null = null;
 
@@ -758,11 +1139,13 @@ export class OrdersService {
       courseId = course.id;
     }
 
-    const initialStatus = hold
-      ? OrderRoundStatus.HELD
-      : advanced
-        ? OrderRoundStatus.FIRED
-        : OrderRoundStatus.PENDING;
+    const initialStatus = paymentPending
+      ? OrderRoundStatus.PENDING_PAYMENT
+      : hold
+        ? OrderRoundStatus.HELD
+        : advanced
+          ? OrderRoundStatus.FIRED
+          : OrderRoundStatus.PENDING;
 
     const { items, selections } = await this.buildItems(
       organizationId,
@@ -806,7 +1189,7 @@ export class OrdersService {
           status: initialStatus,
           courseId,
           heldAt: hold ? new Date() : null,
-          firedAt: advanced && !hold ? new Date() : null,
+          firedAt: advanced && !hold && !paymentPending ? new Date() : null,
           sentAt: new Date(),
           idempotencyKey,
           estimatedMinutes,
@@ -815,7 +1198,7 @@ export class OrdersService {
         include: roundInclude,
       });
 
-      if (!hold) {
+      if (!hold && !paymentPending) {
         await this.kitchenTicketing.createForRound(tx, {
           organizationId,
           branchId: order.branchId,
@@ -833,7 +1216,11 @@ export class OrdersService {
           previousStatus: null,
           newStatus: initialStatus,
           changedById: userId,
-          reason: hold ? 'Ronda retenida para un curso' : 'Ronda enviada a cocina',
+          reason: paymentPending
+            ? 'Ronda pendiente de pago'
+            : hold
+              ? 'Ronda retenida para un curso'
+              : 'Ronda enviada a cocina',
         },
       });
 
@@ -869,7 +1256,7 @@ export class OrdersService {
       order.channel === OrderChannel.DELIVERY
         ? 'Domicilio'
         : order.channel === OrderChannel.PHONE
-          ? 'Teléfono'
+          ? order.customerName?.trim() || 'Drive-Thru'
           : order.channel === OrderChannel.COUNTER
             ? 'Mostrador'
             : order.tableNumber
@@ -951,6 +1338,145 @@ export class OrdersService {
     ]);
 
     return round;
+  }
+
+  /**
+   * Libera una ronda de mostrador retenida por pago.
+   *
+   * Solo se envía a cocina cuando los pagos confirmados cubren el total de la
+   * cuenta. Es idempotente: si la ronda ya fue liberada, la devuelve.
+   */
+  async releasePaymentRound(
+    user: JwtUser,
+    orderId: string,
+    roundId: string,
+  ) {
+    if (!user.organizationId) {
+      throw new BadRequestException('La sesión no tiene un negocio activo');
+    }
+
+    const round = await this.prisma.orderRound.findFirst({
+      where: {
+        id: roundId,
+        orderId,
+        order: { organizationId: user.organizationId },
+      },
+      include: {
+        order: {
+          select: {
+            id: true,
+            status: true,
+            total: true,
+            branchId: true,
+            channel: true,
+          },
+        },
+        items: { select: { id: true, itemId: true } },
+      },
+    });
+
+    if (!round) throw new NotFoundException('Ronda no encontrada');
+
+    if (round.status !== OrderRoundStatus.PENDING_PAYMENT) {
+      if (
+        round.status === OrderRoundStatus.FIRED ||
+        round.status === OrderRoundStatus.PENDING
+      ) {
+        return this.prisma.orderRound.findUniqueOrThrow({
+          where: { id: roundId },
+          include: roundInclude,
+        });
+      }
+
+      throw new BadRequestException('La ronda no está pendiente de pago');
+    }
+
+    if (round.order.status !== OrderStatus.OPEN) {
+      throw new BadRequestException('La cuenta ya no está abierta');
+    }
+
+    if (round.order.channel !== OrderChannel.COUNTER) {
+      throw new BadRequestException(
+        'El pago antes de enviar solo aplica a mostrador',
+      );
+    }
+
+    const paid = await this.prisma.payment.aggregate({
+      where: { orderId, status: PaymentStatus.CONFIRMED },
+      _sum: { amount: true },
+    });
+    const paidTotal = paid._sum.amount ?? new Prisma.Decimal(0);
+
+    if (paidTotal.lt(round.order.total)) {
+      const missing = round.order.total.minus(paidTotal).toFixed(2);
+      throw new BadRequestException(
+        `Faltan ${missing} por cobrar antes de enviar a cocina`,
+      );
+    }
+
+    const branch = round.order.branchId
+      ? await this.prisma.branch.findUnique({
+          where: { id: round.order.branchId },
+          select: { kitchenMode: true },
+        })
+      : null;
+    const advanced = branch?.kitchenMode === KitchenMode.ADVANCED;
+    const nextStatus = advanced
+      ? OrderRoundStatus.FIRED
+      : OrderRoundStatus.PENDING;
+    const now = new Date();
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const claimed = await tx.orderRound.updateMany({
+        where: { id: roundId, status: OrderRoundStatus.PENDING_PAYMENT },
+        data: {
+          status: nextStatus,
+          ...(advanced ? { firedAt: now } : {}),
+        },
+      });
+
+      if (claimed.count === 0) {
+        throw new ConflictException('La ronda ya cambió de estado');
+      }
+
+      if (advanced) {
+        await this.kitchenTicketing.createForRound(tx, {
+          organizationId: user.organizationId,
+          branchId: round.order.branchId,
+          roundId,
+          items: round.items.map((item) => ({
+            id: item.id,
+            itemId: item.itemId,
+          })),
+        });
+      }
+
+      await tx.orderStatusHistory.create({
+        data: {
+          orderRoundId: roundId,
+          previousStatus: OrderRoundStatus.PENDING_PAYMENT,
+          newStatus: nextStatus,
+          changedById: user.sub,
+          reason: 'Pago confirmado; ronda enviada a cocina',
+        },
+      });
+
+      return tx.orderRound.findUniqueOrThrow({
+        where: { id: roundId },
+        include: roundInclude,
+      });
+    });
+
+    this.events.publish({
+      type: 'ROUND_UPDATED',
+      organizationId: user.organizationId,
+      branchId: round.order.branchId,
+      orderId,
+      roundId,
+      status: nextStatus,
+    });
+
+    return updated;
   }
 
   /**
@@ -1708,6 +2234,9 @@ export class OrdersService {
                 tableNumber: true,
                 isTakeaway: true,
                 branchId: true,
+                channel: true,
+                status: true,
+                total: true,
               },
             },
           },
@@ -1901,13 +2430,31 @@ export class OrdersService {
         user.sub,
       );
 
+      const orderClosed =
+        dto.status === KitchenTicketStatus.DELIVERED
+          ? await this.maybeAutoCloseCounterOrder(
+              tx,
+              ticket.orderRound.orderId,
+              user.sub,
+            )
+          : false;
+
       const updated = await tx.kitchenTicket.findUniqueOrThrow({
         where: { id: ticketId },
         include: kitchenTicketInclude,
       });
 
-      return { updated, warnings, roundStatus };
+      return { updated, warnings, roundStatus, orderClosed };
     });
+
+    if (result.orderClosed) {
+      this.events.publish({
+        type: 'ORDER_CLOSED',
+        organizationId: user.organizationId,
+        branchId: ticket.branchId,
+        orderId: ticket.orderRound.orderId,
+      });
+    }
 
     this.events.publish({
       type: 'ROUND_UPDATED',
@@ -1923,6 +2470,83 @@ export class OrdersService {
       warnings: result.warnings,
       roundStatus: result.roundStatus,
     };
+  }
+
+  /**
+   * Cierra automáticamente una cuenta de mostrador cuando ya no tiene rondas
+   * activas y está completamente pagada. Las cuentas de mesa se cierran a mano.
+   */
+  private async maybeAutoCloseCounterOrder(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+    userId: string,
+  ) {
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+      select: {
+        id: true,
+        status: true,
+        channel: true,
+        total: true,
+        organizationId: true,
+      },
+    });
+
+    if (
+      !order ||
+      order.status !== OrderStatus.OPEN ||
+      order.channel !== OrderChannel.COUNTER
+    ) {
+      return false;
+    }
+
+    const activeRounds = await tx.orderRound.count({
+      where: {
+        orderId,
+        status: {
+          in: [
+            OrderRoundStatus.PENDING,
+            OrderRoundStatus.HELD,
+            OrderRoundStatus.PENDING_PAYMENT,
+            OrderRoundStatus.FIRED,
+            OrderRoundStatus.PREPARING,
+            OrderRoundStatus.READY,
+            OrderRoundStatus.PICKED_UP,
+          ],
+        },
+      },
+    });
+
+    if (activeRounds > 0) return false;
+
+    const paid = await tx.payment.aggregate({
+      where: { orderId, status: PaymentStatus.CONFIRMED },
+      _sum: { amount: true },
+    });
+
+    if ((paid._sum.amount ?? new Prisma.Decimal(0)).lt(order.total)) {
+      return false;
+    }
+
+    const claimed = await tx.order.updateMany({
+      where: { id: orderId, status: OrderStatus.OPEN },
+      data: { status: OrderStatus.CLOSED },
+    });
+
+    if (claimed.count === 0) return false;
+
+    await tx.auditLog.create({
+      data: {
+        organizationId: order.organizationId,
+        userId,
+        action: 'order.closed',
+        entity: 'Order',
+        entityId: orderId,
+        newValues: { total: order.total.toFixed(2), automatic: true },
+      },
+    });
+
+    return true;
   }
 
   /**
@@ -2317,7 +2941,11 @@ export class OrdersService {
             status: OrderStatus.OPEN,
             ...(branchId ? { branchId } : {}),
           },
-          status: { in: OPEN_ROUND_STATUSES },
+          status: {
+            in: OPEN_ROUND_STATUSES.filter(
+              (status) => status !== OrderRoundStatus.PENDING_PAYMENT,
+            ),
+          },
         },
         include: kitchenInclude,
         orderBy: [{ sentAt: 'asc' }, { createdAt: 'asc' }],
@@ -2519,6 +3147,7 @@ export class OrdersService {
         partySize: true,
         isTakeaway: true,
         channel: true,
+        customerName: true,
         branchId: true,
         total: true,
       },

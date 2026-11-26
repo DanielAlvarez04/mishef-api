@@ -17,7 +17,7 @@ export const PERMISSIONS = {
   'organization:manage': ['ADMIN'],
   'catalog:manage': ['ADMIN', 'INVENTORY_MANAGER'],
   'orders:draft': ['ADMIN', 'WAITER', 'CASHIER'],
-  'orders:send': ['ADMIN', 'WAITER'],
+  'orders:send': ['ADMIN', 'WAITER', 'CASHIER'],
   'kitchen:transition': ['ADMIN', 'KITCHEN'],
   'kitchen:read': ['ADMIN', 'KITCHEN', 'WAITER'],
   'kitchen:pickup': ['ADMIN', 'WAITER'],

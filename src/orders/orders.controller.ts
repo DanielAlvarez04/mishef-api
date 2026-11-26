@@ -23,9 +23,11 @@ import { RequireFeature } from '../features/require-feature.decorator';
 import {
   CancelOrderDto,
   CreateOrderDto,
+  MergeOrdersDto,
   OrderGuestDto,
   SendRoundDto,
   TransitionRoundDto,
+  UpdateOrderTablesDto,
 } from './dto/orders.dto';
 
 @ApiTags('orders')
@@ -87,6 +89,43 @@ export class OrdersController {
     @Body() dto: SendRoundDto,
   ) {
     return this.orders.sendRound(user.organizationId, user.sub, id, dto);
+  }
+
+  @ApiOperation({
+    summary: 'Liberar a cocina una ronda de mostrador ya pagada',
+  })
+  @RequirePermissions('payments:confirm')
+  @Post(':id/rounds/:roundId/release')
+  releasePaymentRound(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Param('roundId') roundId: string,
+  ) {
+    return this.orders.releasePaymentRound(user, id, roundId);
+  }
+
+  @ApiOperation({
+    summary: 'Cambiar o juntar mesas libres de una cuenta',
+  })
+  @RequirePermissions('orders:draft')
+  @Patch(':id/tables')
+  setTables(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Body() dto: UpdateOrderTablesDto,
+  ) {
+    return this.orders.setOrderTables(user, id, dto.tableIds);
+  }
+
+  @ApiOperation({ summary: 'Juntar dos cuentas abiertas de mesa' })
+  @RequirePermissions('orders:draft')
+  @Post(':id/merge')
+  merge(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Body() dto: MergeOrdersDto,
+  ) {
+    return this.orders.mergeOrders(user, id, dto.sourceOrderId);
   }
 
   @ApiOperation({

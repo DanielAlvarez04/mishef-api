@@ -38,6 +38,7 @@ enum OrderStatus {
 enum OrderRoundStatus {
   PENDING
   HELD
+  PENDING_PAYMENT
   FIRED
   PREPARING
   READY
@@ -258,6 +259,7 @@ model Organization {
   /// Bytes ocupados en R2 (imágenes optimizadas y fotos de merma).
   storageBytes        BigInt      @default(0)
   slugAliases         SlugAlias[]
+  diningTables        DiningTable[]
   taxRate             Decimal     @default(0.16) @db.Decimal(5, 4) // IVA por defecto del negocio (0.16 = 16 %)
   /// Código ISO 4217 de la moneda del negocio (ver `src/common/currency.ts`).
   currency            String      @default("MXN")
@@ -515,6 +517,7 @@ model Branch {
   attendanceEvents      AttendanceEvent[]
   attendanceAdjustments AttendanceAdjustment[]
   kitchenStations       KitchenStation[]
+  diningTables          DiningTable[]
 
   @@unique([organizationId, name])
   @@index([organizationId, isActive])
@@ -1383,6 +1386,7 @@ model Order {
   payments     Payment[]
   guests       OrderGuest[]
   splits       OrderSplit[]
+  tables       OrderTable[]
 
   @@unique([branchId, ticketUid])
   @@index([organizationId, createdAt])
@@ -1390,6 +1394,42 @@ model Order {
   @@index([branchId, status, createdAt])
   @@index([branchId, createdAt])
   @@index([organizationId, ticketUid])
+}
+
+/// Mesa física del salón. El número es único por sucursal.
+model DiningTable {
+  id             String   @id @default(cuid())
+  organizationId String
+  branchId       String
+  number         String
+  zone           String?
+  seats          Int      @default(4)
+  isActive       Boolean  @default(true)
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  orders       OrderTable[]
+
+  @@unique([branchId, number])
+  @@index([organizationId, branchId, isActive])
+}
+
+/// Mesas asignadas a una cuenta. Una cuenta puede ocupar varias mesas juntas.
+model OrderTable {
+  id        String   @id @default(cuid())
+  orderId   String
+  tableId   String
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  order Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  table DiningTable  @relation(fields: [tableId], references: [id], onDelete: Restrict)
+
+  @@unique([orderId, tableId])
+  @@index([tableId])
 }
 
 /// Persona dentro de una cuenta (opcional). Permite pedir por comensal.

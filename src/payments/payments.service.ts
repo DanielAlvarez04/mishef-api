@@ -32,6 +32,7 @@ import { ProviderPaymentRegistry } from './provider-payment.registry';
 const ACTIVE_ROUND_STATUSES = [
   OrderRoundStatus.PENDING,
   OrderRoundStatus.HELD,
+  OrderRoundStatus.PENDING_PAYMENT,
   OrderRoundStatus.FIRED,
   OrderRoundStatus.PREPARING,
   OrderRoundStatus.READY,

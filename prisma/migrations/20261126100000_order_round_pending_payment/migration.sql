@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "OrderRoundStatus" ADD VALUE 'PENDING_PAYMENT';

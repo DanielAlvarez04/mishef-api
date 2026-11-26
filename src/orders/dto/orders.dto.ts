@@ -121,6 +121,27 @@ export class SendRoundDto {
   @IsOptional()
   @IsString()
   courseId?: string;
+
+  /**
+   * Ronda de mostrador que se guarda sin enviar a cocina hasta confirmar el
+   * pago. Solo aplica al canal COUNTER.
+   */
+  @IsOptional()
+  @IsBoolean()
+  paymentPending?: boolean;
+}
+
+export class UpdateOrderTablesDto {
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayMaxSize(10)
+  @IsString({ each: true })
+  tableIds!: string[];
+}
+
+export class MergeOrdersDto {
+  @IsString()
+  sourceOrderId!: string;
 }
 
 /** Apertura de una cuenta (pedido). */
@@ -130,6 +151,13 @@ export class CreateOrderDto {
   @IsString()
   @MaxLength(20)
   tableNumber?: string;
+
+  /** Mesas de la cuenta. La primera se usa como mesa principal. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @IsString({ each: true })
+  tableIds?: string[];
 
   @IsOptional()
   @IsBoolean()

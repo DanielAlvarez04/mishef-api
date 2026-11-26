@@ -612,7 +612,7 @@ function placeLabel(order: PointReceiptInput['order']): string {
       : order.channel === 'DELIVERY'
         ? 'Domicilio'
         : order.channel === 'PHONE'
-          ? 'Teléfono'
+          ? 'Drive-Thru'
           : 'Mostrador';
 }
 
