@@ -22,8 +22,11 @@ import {
 
 const ACTIVE_ROUNDS = [
   OrderRoundStatus.PENDING,
+  OrderRoundStatus.HELD,
+  OrderRoundStatus.FIRED,
   OrderRoundStatus.PREPARING,
   OrderRoundStatus.READY,
+  OrderRoundStatus.PICKED_UP,
 ];
 
 /** Minutos tras los que una comanda pendiente se considera demorada. */
