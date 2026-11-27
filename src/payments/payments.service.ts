@@ -18,6 +18,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AnalyticsService } from '../analytics/analytics.service';
 import { ANALYTICS_EVENTS } from '../analytics/analytics.events';
 import { rolesHavePermission } from '../common/permissions';
+import { ACTIVE_ROUND_STATUSES } from '../common/order-rounds';
 import { OrdersEventsService } from '../orders/orders.events';
 import { OrderSplitsService } from '../orders/order-splits.service';
 import {
@@ -766,7 +767,7 @@ export class PaymentsService {
 
     const now = options.paidAt ?? new Date();
 
-    const result = await this.prisma.$transaction(async (tx) => {
+    const claimedCount = await this.prisma.$transaction(async (tx) => {
       const confirmed = await tx.payment.aggregate({
         where: {
           orderId: payment.orderId,
@@ -802,37 +803,39 @@ export class PaymentsService {
         },
       });
 
-      const current = await tx.payment.findUniqueOrThrow({
-        where: { id: paymentId },
-        include: paymentInclude,
-      });
-
-      if (claimed.count === 0) {
-        return {
-          ...current,
-          duplicated: current.status === PaymentStatus.CONFIRMED,
-        };
+      if (claimed.count > 0) {
+        await tx.auditLog.create({
+          data: {
+            organizationId,
+            userId: options.userId,
+            action: 'payment.confirmed',
+            entity: 'Payment',
+            entityId: paymentId,
+            newValues: {
+              method: payment.method,
+              amount: payment.amount.toFixed(2),
+              source: options.source,
+              providerStatus: options.providerStatus ?? null,
+              recoveredFromCancelled: lateProviderPayment,
+            },
+          },
+        });
       }
 
-      await tx.auditLog.create({
-        data: {
-          organizationId,
-          userId: options.userId,
-          action: 'payment.confirmed',
-          entity: 'Payment',
-          entityId: paymentId,
-          newValues: {
-            method: payment.method,
-            amount: payment.amount.toFixed(2),
-            source: options.source,
-            providerStatus: options.providerStatus ?? null,
-            recoveredFromCancelled: lateProviderPayment,
-          },
-        },
-      });
-
-      return current;
+      return claimed.count;
     });
+
+    const current = await this.prisma.payment.findUniqueOrThrow({
+      where: { id: paymentId },
+      include: paymentInclude,
+    });
+    const result =
+      claimedCount === 0
+        ? {
+            ...current,
+            duplicated: current.status === PaymentStatus.CONFIRMED,
+          }
+        : current;
 
     await this.splits.recomputeStatus(payment.splitId);
 
@@ -872,9 +875,9 @@ export class PaymentsService {
   /**
    * Cierra la cuenta en cuanto los pagos confirmados cubren el total.
    *
-   * No es un error si todavía falta saldo o hay cobros pendientes: la cuenta
-   * sigue abierta y el cierre se reintenta con el siguiente pago. Los tickets
-   * de cocina no bloquean el cierre.
+   * No es un error si todavía falta saldo, hay cobros pendientes o quedan
+   * rondas por entregar: la cuenta sigue abierta y el cierre se reintenta al
+   * confirmar el siguiente pago o al entregar la última ronda.
    */
   private async autoCloseIfPaid(
     organizationId: string | null,
@@ -1011,8 +1014,8 @@ export class PaymentsService {
       ? PaymentStatus.CANCELLED
       : PaymentStatus.REFUNDED;
 
-    const result = await this.prisma.$transaction(async (tx) => {
-      const updated = await tx.payment.update({
+    await this.prisma.$transaction(async (tx) => {
+      await tx.payment.update({
         where: { id: paymentId },
         data: {
           status,
@@ -1025,7 +1028,6 @@ export class PaymentsService {
               }
             : {}),
         },
-        include: paymentInclude,
       });
 
       // Si se devuelve efectivo de un pago confirmado, el dinero sale del
@@ -1086,7 +1088,11 @@ export class PaymentsService {
         },
       });
 
-      return updated;
+    });
+
+    const result = await this.prisma.payment.findUniqueOrThrow({
+      where: { id: paymentId },
+      include: paymentInclude,
     });
 
     await this.splits.recomputeStatus(payment.splitId);
@@ -1117,9 +1123,9 @@ export class PaymentsService {
   /**
    * Cierra la cuenta.
    *
-   * Requisitos: el total debe estar cubierto por pagos confirmados y no puede
-   * haber pagos pendientes. Los tickets de cocina pueden seguir activos: la
-   * cuenta se cierra al cobrar y el ticket conserva su propio ciclo.
+   * Requisitos: el total debe estar cubierto por pagos confirmados, no puede
+   * haber pagos pendientes y todas las rondas deben estar entregadas o
+   * canceladas. Una cuenta prepagada sigue abierta hasta que cocina termine.
    */
   async closeOrder(
     organizationId: string | null,
@@ -1157,7 +1163,7 @@ export class PaymentsService {
       );
     }
 
-    const updated = await this.prisma.$transaction(async (tx) => {
+    await this.prisma.$transaction(async (tx) => {
       const claimed = await tx.order.updateMany({
         where: { id: orderId, status: OrderStatus.OPEN },
         data: { status: OrderStatus.CLOSED },
@@ -1165,6 +1171,23 @@ export class PaymentsService {
 
       if (claimed.count === 0) {
         throw new ConflictException('La cuenta ya cambió de estado');
+      }
+
+      // La entrega es parte del ciclo de la cuenta: si queda una ronda
+      // activa, el cierre se revierte y la cuenta sigue visible en el POS.
+      const activeRounds = await tx.orderRound.count({
+        where: {
+          orderId,
+          status: { in: ACTIVE_ROUND_STATUSES },
+        },
+      });
+
+      if (activeRounds > 0) {
+        throw new ConflictException(
+          activeRounds === 1
+            ? 'No puedes cerrar la cuenta: hay 1 ronda pendiente de entregar.'
+            : `No puedes cerrar la cuenta: hay ${activeRounds} rondas pendientes de entregar.`,
+        );
       }
 
       await tx.auditLog.create({
@@ -1178,16 +1201,17 @@ export class PaymentsService {
         },
       });
 
-      return tx.order.findUniqueOrThrow({
-        where: { id: orderId },
-        include: {
-          user: { select: { id: true, name: true, username: true } },
-          payments: {
-            include: paymentInclude,
-            orderBy: { createdAt: 'asc' },
-          },
+    });
+
+    const updated = await this.prisma.order.findUniqueOrThrow({
+      where: { id: orderId },
+      include: {
+        user: { select: { id: true, name: true, username: true } },
+        payments: {
+          include: paymentInclude,
+          orderBy: { createdAt: 'asc' },
         },
-      });
+      },
     });
 
     this.events.publish({

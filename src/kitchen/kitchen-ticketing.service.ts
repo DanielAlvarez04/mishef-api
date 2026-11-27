@@ -27,51 +27,55 @@ export class KitchenTicketingService {
       branchId: string | null;
       roundId: string;
       items: RoundItemRef[];
+      /** El llamador ya conoce el modo de cocina y evita otra consulta. */
+      advanced?: boolean;
     },
   ) {
     if (!input.organizationId || input.items.length === 0) return [];
 
-    const branch = input.branchId
-      ? await tx.branch.findUnique({
-          where: { id: input.branchId },
-          select: { kitchenMode: true },
-        })
-      : null;
+    const advanced =
+      input.advanced ??
+      (input.branchId
+        ? (
+            await tx.branch.findUnique({
+              where: { id: input.branchId },
+              select: { kitchenMode: true },
+            })
+          )?.kitchenMode === KitchenMode.ADVANCED
+        : false);
 
-    if (branch?.kitchenMode !== KitchenMode.ADVANCED) return [];
+    if (!advanced) return [];
 
     const itemIds = [...new Set(input.items.map((item) => item.itemId))];
-    const [items, rules, stationRows] = await Promise.all([
-      tx.item.findMany({
-        where: { id: { in: itemIds } },
-        select: { id: true, categoryId: true, defaultStationId: true },
-      }),
-      tx.kitchenStationRule.findMany({
-        where: {
-          organizationId: input.organizationId,
-          OR: [
-            { branchId: input.branchId },
-            ...(input.branchId ? [{ branchId: null }] : []),
-          ],
-        },
-        orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
-        select: {
-          stationId: true,
-          itemId: true,
-          categoryId: true,
-          menuId: true,
-        },
-      }),
-      tx.kitchenStation.findMany({
-        where: {
-          organizationId: input.organizationId,
-          branchId: input.branchId,
-          isActive: true,
-        },
-        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
-        select: { id: true },
-      }),
-    ]);
+    const items = await tx.item.findMany({
+      where: { id: { in: itemIds } },
+      select: { id: true, categoryId: true, defaultStationId: true },
+    });
+    const rules = await tx.kitchenStationRule.findMany({
+      where: {
+        organizationId: input.organizationId,
+        OR: [
+          { branchId: input.branchId },
+          ...(input.branchId ? [{ branchId: null }] : []),
+        ],
+      },
+      orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
+      select: {
+        stationId: true,
+        itemId: true,
+        categoryId: true,
+        menuId: true,
+      },
+    });
+    const stationRows = await tx.kitchenStation.findMany({
+      where: {
+        organizationId: input.organizationId,
+        branchId: input.branchId,
+        isActive: true,
+      },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      select: { id: true },
+    });
 
     let stations = stationRows;
 

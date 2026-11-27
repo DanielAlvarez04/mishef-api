@@ -23,8 +23,17 @@ export interface KitchenHistoricalStats {
   available: boolean;
 }
 
+/** El histórico no cambia segundo a segundo; evita escanearlo en cada envío. */
+const FALLBACK_CACHE_TTL_MS = 60_000;
+
 @Injectable()
 export class KitchenService {
+  private readonly fallbackCache = new Map<
+    string,
+    { value: number; expiresAt: number }
+  >();
+  private readonly fallbackInFlight = new Map<string, Promise<number>>();
+
   constructor(private readonly prisma: PrismaService) {}
 
   /**
@@ -131,6 +140,13 @@ export class KitchenService {
         where: { id: organizationId },
         data,
       });
+
+      // El respaldo de tiempos pudo cambiar; se descarta el caché de la org.
+      for (const key of this.fallbackCache.keys()) {
+        if (key.startsWith(`${organizationId}:`)) {
+          this.fallbackCache.delete(key);
+        }
+      }
     }
 
     return this.settings(organizationId, branchId);
@@ -232,6 +248,37 @@ export class KitchenService {
   ): Promise<number> {
     if (!organizationId) return 15;
 
+    const key = `${organizationId}:${branchId ?? ""}`;
+    const cached = this.fallbackCache.get(key);
+
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.value;
+    }
+
+    const inFlight = this.fallbackInFlight.get(key);
+    if (inFlight) return inFlight;
+
+    const pending = this.computeFallbackMinutes(organizationId, branchId)
+      .then((value) => {
+        this.fallbackCache.set(key, {
+          value,
+          expiresAt: Date.now() + FALLBACK_CACHE_TTL_MS,
+        });
+        return value;
+      })
+      .finally(() => {
+        this.fallbackInFlight.delete(key);
+      });
+
+    this.fallbackInFlight.set(key, pending);
+
+    return pending;
+  }
+
+  private async computeFallbackMinutes(
+    organizationId: string,
+    branchId: string | null,
+  ): Promise<number> {
     const organization = await this.prisma.organization.findUnique({
       where: { id: organizationId },
       select: { kitchenPrepMinutes: true, kitchenPrepSource: true },

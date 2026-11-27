@@ -1529,6 +1529,8 @@ model OrderRound {
   cancelledAt      DateTime?
   /// Tiempo estimado de preparación al enviar la ronda, en minutos.
   estimatedMinutes Int?
+  /// Marca del POS para adelantar la ronda en la cola de cocina.
+  prioritizedAt    DateTime?
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 

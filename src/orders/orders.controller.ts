@@ -26,6 +26,7 @@ import {
   MergeOrdersDto,
   OrderGuestDto,
   SendRoundDto,
+  SetPartySizeDto,
   TransitionRoundDto,
   UpdateOrderTablesDto,
 } from './dto/orders.dto';
@@ -72,6 +73,12 @@ export class OrdersController {
   @Get(':id')
   get(@CurrentUser() user: JwtUser, @Param('id') id: string) {
     return this.orders.get(user.organizationId, id);
+  }
+
+  @ApiOperation({ summary: 'Detalle ligero de la comanda' })
+  @Get(':id/comanda')
+  comanda(@CurrentUser() user: JwtUser, @Param('id') id: string) {
+    return this.orders.comandaDetail(user.organizationId, id);
   }
 
   @ApiOperation({ summary: 'Resumen ligero para el diálogo de cobro' })
@@ -146,6 +153,50 @@ export class OrdersController {
       roundId,
       dto,
     );
+  }
+
+  @ApiOperation({ summary: 'Priorizar una ronda en cocina' })
+  @RequirePermissions('orders:send')
+  @Post(':id/rounds/:roundId/prioritize')
+  prioritize(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Param('roundId') roundId: string,
+  ) {
+    return this.orders.prioritizeRound(user, id, roundId);
+  }
+
+  @ApiOperation({ summary: 'Entregar una ronda desde el POS' })
+  @RequirePermissions('orders:send')
+  @Post(':id/rounds/:roundId/deliver')
+  deliverRound(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Param('roundId') roundId: string,
+  ) {
+    return this.orders.deliverRoundFromPos(user, id, roundId);
+  }
+
+  @ApiOperation({ summary: 'Cancelar una ronda desde el POS' })
+  @RequirePermissions('orders:send')
+  @Post(':id/rounds/:roundId/cancel-round')
+  cancelRound(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Param('roundId') roundId: string,
+  ) {
+    return this.orders.cancelRoundFromPos(user, id, roundId);
+  }
+
+  @ApiOperation({ summary: 'Ajustar el número de comensales' })
+  @RequirePermissions('orders:draft')
+  @Patch(':id/party-size')
+  setPartySize(
+    @CurrentUser() user: JwtUser,
+    @Param('id') id: string,
+    @Body() dto: SetPartySizeDto,
+  ) {
+    return this.orders.setPartySize(user.organizationId, id, dto.partySize);
   }
 
   @ApiOperation({ summary: 'Añadir una persona a la cuenta' })

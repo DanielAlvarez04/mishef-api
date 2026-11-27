@@ -28,11 +28,11 @@ import { AnalyticsService } from '../analytics/analytics.service';
 import { ANALYTICS_EVENTS } from '../analytics/analytics.events';
 import { isNoPriceOptionGroup } from '../catalog/option-presets';
 import {
-  DEFAULT_PREP_MINUTES,
   estimatePrepMinutes,
   prepPriority,
   type PrepPriority,
 } from '../common/prep';
+import { ACTIVE_ROUND_STATUSES } from '../common/order-rounds';
 import { KitchenService } from '../kitchen/kitchen.service';
 import { KitchenTicketingService } from '../kitchen/kitchen-ticketing.service';
 import {
@@ -84,16 +84,6 @@ const ALLOWED_TRANSITIONS: Record<OrderRoundStatus, OrderRoundStatus[]> = {
   [OrderRoundStatus.DELIVERED]: [],
   [OrderRoundStatus.CANCELLED]: [],
 };
-
-const OPEN_ROUND_STATUSES = [
-  OrderRoundStatus.PENDING,
-  OrderRoundStatus.HELD,
-  OrderRoundStatus.PENDING_PAYMENT,
-  OrderRoundStatus.FIRED,
-  OrderRoundStatus.PREPARING,
-  OrderRoundStatus.READY,
-  OrderRoundStatus.PICKED_UP,
-];
 
 /** Transiciones de un ticket de estación. */
 const TICKET_TRANSITIONS: Record<
@@ -157,6 +147,7 @@ const kitchenTicketInclude: Prisma.KitchenTicketInclude = {
       createdAt: true,
       orderId: true,
       estimatedMinutes: true,
+      prioritizedAt: true,
       order: {
         select: {
           id: true,
@@ -401,20 +392,20 @@ export class OrdersService {
       }
     }
 
-    const created = await this.prisma.$transaction(async (tx) => {
-      const actor = await tx.membership.findFirst({
-        where: {
-          userId,
-          ...(organizationId ? { organizationId } : {}),
-        },
-        select: {
-          username: true,
-          user: { select: { name: true } },
-        },
-      });
-      const servedByName =
-        actor?.user.name?.trim() || actor?.username?.trim() || null;
+    const actor = await this.prisma.membership.findFirst({
+      where: {
+        userId,
+        ...(organizationId ? { organizationId } : {}),
+      },
+      select: {
+        username: true,
+        user: { select: { name: true } },
+      },
+    });
+    const servedByName =
+      actor?.user.name?.trim() || actor?.username?.trim() || null;
 
+    const createdRow = await this.prisma.$transaction(async (tx) => {
       const channel =
         dto.channel ??
         (dto.isTakeaway ? OrderChannel.COUNTER : OrderChannel.DINE_IN);
@@ -519,7 +510,7 @@ export class OrdersService {
               }
             : {}),
         },
-        include: orderInclude,
+        select: { id: true, branchId: true },
       });
 
       if (requestedTables.length > 0) {
@@ -530,14 +521,14 @@ export class OrdersService {
             isPrimary: index === 0,
           })),
         });
-
-        return tx.order.findUniqueOrThrow({
-          where: { id: order.id },
-          include: orderInclude,
-        });
       }
 
       return order;
+    });
+
+    const created = await this.prisma.order.findUniqueOrThrow({
+      where: { id: createdRow.id },
+      include: orderInclude,
     });
 
     this.events.publish({
@@ -547,7 +538,7 @@ export class OrdersService {
       orderId: created.id,
     });
 
-    return created;
+    return this.withBalance(created);
   }
 
   list(
@@ -565,6 +556,8 @@ export class OrdersService {
           ...(branchId ? { branchId } : {}),
           ...(filters.status ? { status: filters.status } : {}),
         },
+        // `include` devuelve todos los escalares de Order (incluido
+        // `updatedAt`) además de estas relaciones.
         include: {
           branch: { select: { id: true, name: true } },
           user: { select: { id: true, name: true, username: true } },
@@ -581,9 +574,6 @@ export class OrdersService {
               paidAt: true,
               confirmedAt: true,
               createdAt: true,
-              user: { select: { id: true, name: true, username: true } },
-              confirmedBy: { select: { id: true, name: true, username: true } },
-              tipRecipient: { select: { id: true, name: true, username: true } },
             },
           },
           rounds: {
@@ -623,6 +613,62 @@ export class OrdersService {
     }
 
     return this.withBalance(order);
+  }
+
+  /** Detalle ligero para pintar la comanda sin historial, pagos ni relaciones. */
+  async comandaDetail(organizationId: string | null, orderId: string) {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, organizationId },
+      select: {
+        id: true,
+        total: true,
+        rounds: {
+          where: { status: { not: OrderRoundStatus.CANCELLED } },
+          orderBy: { createdAt: 'asc' },
+          select: {
+            id: true,
+            status: true,
+            sentAt: true,
+            createdAt: true,
+            items: {
+              orderBy: { id: 'asc' },
+              select: {
+                id: true,
+                itemId: true,
+                itemVariantId: true,
+                itemName: true,
+                variantName: true,
+                quantity: true,
+                subtotal: true,
+                notes: true,
+                guestId: true,
+                guestName: true,
+                extras: {
+                  select: { id: true, extraName: true, extraPrice: true },
+                },
+                options: {
+                  select: {
+                    itemOptionValueId: true,
+                    groupName: true,
+                    optionName: true,
+                    priceDelta: true,
+                  },
+                },
+                exclusions: {
+                  select: { ingredient: { select: { name: true } } },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException('Pedido no encontrado');
+    }
+
+    return order;
   }
 
   /**
@@ -694,7 +740,7 @@ export class OrdersService {
     const previous = order.tables.map((row) => row.tableId);
     const primary = tables[0];
 
-    const updated = await this.prisma.$transaction(async (tx) => {
+    await this.prisma.$transaction(async (tx) => {
       await tx.orderTable.deleteMany({ where: { orderId } });
       await tx.orderTable.createMany({
         data: tables.map((table, index) => ({
@@ -720,11 +766,21 @@ export class OrdersService {
           },
         },
       });
+    });
 
-      return tx.order.findUniqueOrThrow({
-        where: { id: orderId },
-        include: orderInclude,
-      });
+    const updated = await this.prisma.order.findUniqueOrThrow({
+      where: { id: orderId },
+      select: {
+        id: true,
+        tableNumber: true,
+        partySize: true,
+        status: true,
+        updatedAt: true,
+        tables: {
+          orderBy: { isPrimary: 'desc' },
+          include: { table: true },
+        },
+      },
     });
 
     this.events.publish({
@@ -734,7 +790,7 @@ export class OrdersService {
       orderId,
     });
 
-    return this.withBalance(updated);
+    return updated;
   }
 
   /**
@@ -855,7 +911,7 @@ export class OrdersService {
 
       return tx.order.findUniqueOrThrow({
         where: { id: targetOrderId },
-        include: orderInclude,
+        select: { total: true },
       });
     });
 
@@ -1082,20 +1138,11 @@ export class OrdersService {
       }
     }
 
-    // La tasa del negocio es la que se aplica salvo que el artículo tenga una
-    // propia (importaciones antiguas). Se lee una vez por ronda.
-    const organization = organizationId ? await this.prisma.organization.findUniqueOrThrow({
-      where: { id: organizationId },
-      select: { taxRate: true },
-    }) : { taxRate: new Prisma.Decimal(0) };
-
-    const branch = order.branchId
-      ? await this.prisma.branch.findUnique({
-          where: { id: order.branchId },
-          select: { id: true, kitchenMode: true },
-        })
-      : null;
-    const advanced = branch?.kitchenMode === KitchenMode.ADVANCED;
+    // Datos que ya vienen con la cuenta: evita dos consultas por ronda.
+    const organization = order.organization ?? {
+      taxRate: new Prisma.Decimal(0),
+    };
+    const advanced = order.branch?.kitchenMode === KitchenMode.ADVANCED;
     const hold = advanced && dto.hold === true;
     const paymentPending = dto.paymentPending === true;
 
@@ -1126,17 +1173,7 @@ export class OrdersService {
         throw new BadRequestException('La sesión no tiene un negocio activo');
       }
 
-      const course = await this.prisma.kitchenCourse.findFirst({
-        where: {
-          id: dto.courseId,
-          organizationId,
-          isActive: true,
-        },
-        select: { id: true },
-      });
-
-      if (!course) throw new NotFoundException('Curso no encontrado');
-      courseId = course.id;
+      // La consulta del curso se hace en paralelo con los artículos.
     }
 
     const initialStatus = paymentPending
@@ -1147,18 +1184,45 @@ export class OrdersService {
           ? OrderRoundStatus.FIRED
           : OrderRoundStatus.PENDING;
 
-    const { items, selections } = await this.buildItems(
+    const needsGuests = dto.items.some((line) => line.guestId);
+    const fallbackMinutesPromise = this.kitchen.fallbackMinutes(
       organizationId,
-      dto.items,
-      organization.taxRate,
+      order.branchId,
     );
+    // `buildItems` puede fallar antes de esperar el respaldo; evita un
+    // rechazo no manejado sin alterar el resultado que sí se espera.
+    void fallbackMinutesPromise.catch(() => undefined);
+    const [course, built, guestRows] = await Promise.all([
+      dto.courseId
+        ? this.prisma.kitchenCourse.findFirst({
+            where: {
+              id: dto.courseId,
+              organizationId: organizationId ?? undefined,
+              isActive: true,
+            },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
+      this.buildItems(
+        organizationId,
+        dto.items,
+        organization.taxRate,
+        fallbackMinutesPromise,
+      ),
+      needsGuests
+        ? this.prisma.orderGuest.findMany({
+            where: { orderId },
+            select: { id: true, name: true },
+          })
+        : Promise.resolve([] as Array<{ id: string; name: string }>),
+    ]);
 
-    const guestRows = dto.items.some((line) => line.guestId)
-      ? await this.prisma.orderGuest.findMany({
-          where: { orderId },
-          select: { id: true, name: true },
-        })
-      : [];
+    if (dto.courseId) {
+      if (!course) throw new NotFoundException('Curso no encontrado');
+      courseId = course.id;
+    }
+
+    const { items, selections, estimatedMinutes } = built;
     const guestById = new Map(guestRows.map((guest) => [guest.id, guest.name]));
 
     for (const line of dto.items) {
@@ -1176,14 +1240,9 @@ export class OrdersService {
 
     // Snapshot del estimado: si mañana cambian los tiempos del catálogo, el
     // histórico de esta ronda no se reescribe.
-    const estimatedMinutes = await this.estimateForLines(
-      organizationId,
-      order.branchId,
-      dto.items,
-    );
 
-    const round = await this.prisma.$transaction(async (tx) => {
-      const created = await tx.orderRound.create({
+    const created = await this.prisma.$transaction(async (tx) => {
+      const round = await tx.orderRound.create({
         data: {
           orderId,
           status: initialStatus,
@@ -1195,24 +1254,29 @@ export class OrdersService {
           estimatedMinutes,
           items: { create: itemsWithGuest },
         },
-        include: roundInclude,
+        select: { id: true },
       });
 
       if (!hold && !paymentPending) {
+        const roundItems = advanced
+          ? await tx.orderItem.findMany({
+              where: { orderRoundId: round.id },
+              select: { id: true, itemId: true },
+            })
+          : [];
+
         await this.kitchenTicketing.createForRound(tx, {
           organizationId,
           branchId: order.branchId,
-          roundId: created.id,
-          items: created.items.map((item) => ({
-            id: item.id,
-            itemId: item.itemId,
-          })),
+          roundId: round.id,
+          items: roundItems,
+          advanced,
         });
       }
 
       await tx.orderStatusHistory.create({
         data: {
-          orderRoundId: created.id,
+          orderRoundId: round.id,
           previousStatus: null,
           newStatus: initialStatus,
           changedById: userId,
@@ -1235,12 +1299,17 @@ export class OrdersService {
       await this.splits.addRoundShare(
         tx,
         orderId,
-        created.id,
-        `Adicional · Ronda ${created.id.slice(-4)}`,
+        round.id,
+        `Adicional · Ronda ${round.id.slice(-4)}`,
         roundAmount,
       );
 
-      return created;
+      return round;
+    });
+
+    const round = await this.prisma.orderRound.findUniqueOrThrow({
+      where: { id: created.id },
+      include: roundInclude,
     });
 
     this.events.publish({
@@ -1263,7 +1332,7 @@ export class OrdersService {
               ? `Mesa ${order.tableNumber}`
               : 'Pedido';
 
-    await this.analytics.recordMany([
+    void this.analytics.recordMany([
       {
         name: ANALYTICS_EVENTS.orderRoundSent,
         organizationId,
@@ -1429,7 +1498,7 @@ export class OrdersService {
       : OrderRoundStatus.PENDING;
     const now = new Date();
 
-    const updated = await this.prisma.$transaction(async (tx) => {
+    await this.prisma.$transaction(async (tx) => {
       const claimed = await tx.orderRound.updateMany({
         where: { id: roundId, status: OrderRoundStatus.PENDING_PAYMENT },
         data: {
@@ -1451,6 +1520,7 @@ export class OrdersService {
             id: item.id,
             itemId: item.itemId,
           })),
+          advanced,
         });
       }
 
@@ -1463,11 +1533,11 @@ export class OrdersService {
           reason: 'Pago confirmado; ronda enviada a cocina',
         },
       });
+    });
 
-      return tx.orderRound.findUniqueOrThrow({
-        where: { id: roundId },
-        include: roundInclude,
-      });
+    const updated = await this.prisma.orderRound.findUniqueOrThrow({
+      where: { id: roundId },
+      include: roundInclude,
     });
 
     this.events.publish({
@@ -1734,7 +1804,7 @@ export class OrdersService {
 
     await this.prisma.$transaction(async (tx) => {
       const rounds = await tx.orderRound.findMany({
-        where: { orderId, status: { in: OPEN_ROUND_STATUSES } },
+        where: { orderId, status: { in: ACTIVE_ROUND_STATUSES } },
         select: { id: true, status: true },
       });
 
@@ -1800,6 +1870,286 @@ export class OrdersService {
     return this.get(organizationId, orderId);
   }
 
+  /**
+   * Marca una ronda para que cocina la atienda primero.
+   *
+   * La prioridad se guarda en la ronda y se publica por SSE; el tablero la
+   * ordena antes que las demás sin cambiar el estado de preparación.
+   */
+  async prioritizeRound(user: JwtUser, orderId: string, roundId: string) {
+    if (!user.organizationId) {
+      throw new BadRequestException('La sesión no tiene un negocio activo');
+    }
+
+    const round = await this.prisma.orderRound.findFirst({
+      where: {
+        id: roundId,
+        orderId,
+        order: { organizationId: user.organizationId },
+      },
+      select: {
+        id: true,
+        status: true,
+        order: { select: { branchId: true } },
+      },
+    });
+
+    if (!round) throw new NotFoundException('Ronda no encontrada');
+
+    if (
+      !(
+        [
+          OrderRoundStatus.PENDING,
+          OrderRoundStatus.HELD,
+          OrderRoundStatus.FIRED,
+          OrderRoundStatus.PREPARING,
+        ] as OrderRoundStatus[]
+      ).includes(round.status)
+    ) {
+      throw new BadRequestException(
+        'La ronda ya está lista o cerrada; no necesita prioridad',
+      );
+    }
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.orderRound.update({
+        where: { id: roundId },
+        data: { prioritizedAt: new Date() },
+        include: roundInclude,
+      });
+
+      await tx.auditLog.create({
+        data: {
+          organizationId: user.organizationId,
+          userId: user.sub,
+          action: 'order.round_prioritized',
+          entity: 'OrderRound',
+          entityId: roundId,
+          newValues: { orderId },
+        },
+      });
+
+      return row;
+    });
+
+    this.events.publish({
+      type: 'ROUND_UPDATED',
+      organizationId: user.organizationId,
+      branchId: round.order.branchId,
+      orderId,
+      roundId,
+      status: round.status,
+    });
+
+    return updated;
+  }
+
+  /** Entrega una ronda desde el POS, en modo General o Avanzado. */
+  deliverRoundFromPos(user: JwtUser, orderId: string, roundId: string) {
+    return this.finishRoundFromPos(user, orderId, roundId, 'DELIVER');
+  }
+
+  /** Cancela una ronda desde el POS, en modo General o Avanzado. */
+  cancelRoundFromPos(user: JwtUser, orderId: string, roundId: string) {
+    return this.finishRoundFromPos(user, orderId, roundId, 'CANCEL');
+  }
+
+  private async finishRoundFromPos(
+    user: JwtUser,
+    orderId: string,
+    roundId: string,
+    action: 'DELIVER' | 'CANCEL',
+  ) {
+    if (!user.organizationId) {
+      throw new BadRequestException('La sesión no tiene un negocio activo');
+    }
+
+    const round = await this.prisma.orderRound.findFirst({
+      where: {
+        id: roundId,
+        orderId,
+        order: { organizationId: user.organizationId },
+      },
+      select: {
+        id: true,
+        status: true,
+        order: {
+          select: {
+            id: true,
+            branchId: true,
+            status: true,
+            organizationId: true,
+          },
+        },
+        tickets: { select: { id: true, status: true } },
+      },
+    });
+
+    if (!round) throw new NotFoundException('Ronda no encontrada');
+
+    if (action === 'DELIVER') {
+      if (
+        round.status !== OrderRoundStatus.READY &&
+        round.status !== OrderRoundStatus.PICKED_UP
+      ) {
+        throw new BadRequestException('La ronda todavía no está lista');
+      }
+    } else {
+      if (
+        round.status === OrderRoundStatus.DELIVERED ||
+        round.status === OrderRoundStatus.CANCELLED
+      ) {
+        throw new BadRequestException('La ronda ya está cerrada');
+      }
+
+      if (round.order.status !== OrderStatus.OPEN) {
+        throw new BadRequestException(
+          'La cuenta ya está cerrada; no se puede cancelar la ronda',
+        );
+      }
+    }
+
+    const branch = round.order.branchId
+      ? await this.prisma.branch.findUnique({
+          where: { id: round.order.branchId },
+          select: { kitchenMode: true },
+        })
+      : null;
+    const advanced =
+      branch?.kitchenMode === KitchenMode.ADVANCED &&
+      round.tickets.length > 0;
+    const now = new Date();
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      if (advanced) {
+        const next = action === 'DELIVER'
+          ? KitchenTicketStatus.DELIVERED
+          : KitchenTicketStatus.CANCELLED;
+
+        for (const ticket of round.tickets) {
+          if (
+            ticket.status === KitchenTicketStatus.DELIVERED ||
+            ticket.status === KitchenTicketStatus.CANCELLED
+          ) {
+            continue;
+          }
+
+          const claimed = await tx.kitchenTicket.updateMany({
+            where: { id: ticket.id, status: ticket.status },
+            data: {
+              status: next,
+              ...(action === 'DELIVER'
+                ? { deliveredAt: now }
+                : {
+                    cancelledAt: now,
+                    cancelReason: 'Cancelada desde el POS',
+                  }),
+            },
+          });
+
+          if (claimed.count === 0) continue;
+
+          await tx.kitchenTicketItem.updateMany({
+            where: { ticketId: ticket.id },
+            data: {
+              status:
+                action === 'DELIVER'
+                  ? KitchenItemStatus.DELIVERED
+                  : KitchenItemStatus.VOID,
+              ...(action === 'CANCEL'
+                ? { voidReason: 'Cancelada desde el POS' }
+                : {}),
+            },
+          });
+
+          await tx.kitchenTicketHistory.create({
+            data: {
+              ticketId: ticket.id,
+              previousStatus: ticket.status,
+              newStatus: next,
+              changedById: user.sub,
+              changedByName: user.email ?? user.sub,
+              reason:
+                action === 'DELIVER'
+                  ? 'Entregada desde el POS'
+                  : 'Cancelada desde el POS',
+            },
+          });
+        }
+
+        await this.syncRoundFromTickets(tx, roundId, user.sub);
+      } else {
+        const claimed = await tx.orderRound.updateMany({
+          where: { id: roundId, status: round.status },
+          data: {
+            status:
+              action === 'DELIVER'
+                ? OrderRoundStatus.DELIVERED
+                : OrderRoundStatus.CANCELLED,
+            ...(action === 'DELIVER'
+              ? { deliveredAt: now }
+              : { cancelledAt: now }),
+          },
+        });
+
+        if (claimed.count === 0) {
+          throw new ConflictException(
+            'La ronda ya cambió de estado; recarga el POS',
+          );
+        }
+
+        await tx.orderStatusHistory.create({
+          data: {
+            orderRoundId: roundId,
+            previousStatus: round.status,
+            newStatus:
+              action === 'DELIVER'
+                ? OrderRoundStatus.DELIVERED
+                : OrderRoundStatus.CANCELLED,
+            changedById: user.sub,
+            reason:
+              action === 'DELIVER'
+                ? 'Entregada desde el POS'
+                : 'Cancelada desde el POS',
+          },
+        });
+      }
+
+      await this.recalculateTotals(tx, orderId);
+      const orderClosed = await this.maybeAutoClosePaidOrder(
+        tx,
+        orderId,
+        user.sub,
+      );
+      const updated = await tx.orderRound.findUniqueOrThrow({
+        where: { id: roundId },
+        include: roundInclude,
+      });
+
+      return { updated, orderClosed };
+    });
+
+    if (result.orderClosed) {
+      this.events.publish({
+        type: 'ORDER_CLOSED',
+        organizationId: user.organizationId,
+        branchId: round.order.branchId,
+        orderId,
+      });
+    }
+
+    this.events.publish({
+      type: 'ROUND_UPDATED',
+      organizationId: user.organizationId,
+      branchId: round.order.branchId,
+      orderId,
+      roundId,
+      status: result.updated.status,
+    });
+
+    return result.updated;
+  }
+
   /** Añade una persona a la cuenta para pedir por comensal. */
   async addGuest(
     organizationId: string | null,
@@ -1851,6 +2201,69 @@ export class OrdersService {
       });
 
       return guest;
+    });
+  }
+
+  /** Ajusta el número de comensales creando/eliminando en una sola transacción. */
+  async setPartySize(
+    organizationId: string | null,
+    orderId: string,
+    nextPartySize: number,
+  ) {
+    const order = await this.getOrderRow(organizationId, orderId);
+
+    if (order.status !== OrderStatus.OPEN) {
+      throw new BadRequestException('La cuenta ya no está abierta');
+    }
+
+    const target = Math.min(20, Math.max(1, Math.trunc(nextPartySize)));
+    const guests = await this.prisma.orderGuest.findMany({
+      where: { orderId },
+      orderBy: { sortOrder: 'asc' },
+    });
+
+    if (order.partySize === target && guests.length === target) {
+      return guests;
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const current = await tx.orderGuest.findMany({
+        where: { orderId },
+        orderBy: { sortOrder: 'asc' },
+      });
+
+      if (target > current.length) {
+        const maxSortOrder = current.reduce(
+          (max, guest) => Math.max(max, guest.sortOrder),
+          -1,
+        );
+
+        await tx.orderGuest.createMany({
+          data: Array.from({ length: target - current.length }, (_, index) => ({
+            orderId,
+            name: '',
+            sortOrder: maxSortOrder + index + 1,
+          })),
+        });
+      } else if (target < current.length) {
+        const removed = current.slice(target);
+
+        await tx.orderGuest.deleteMany({
+          where: { id: { in: removed.map((guest) => guest.id) } },
+        });
+      }
+
+      if (order.partySize !== target) {
+        await tx.order.update({
+          where: { id: orderId },
+          data: { partySize: target },
+        });
+      }
+
+      return tx.orderGuest.findMany({
+        where: { orderId },
+        orderBy: { sortOrder: 'asc' },
+      });
     });
   }
 
@@ -1970,6 +2383,47 @@ export class OrdersService {
 
   kitchenRounds(organizationId: string | null, branchId: string | null = null) {
     return this.enrichedKitchenRounds(organizationId, branchId);
+  }
+
+  /** Resumen ligero para contadores del POS; no trae artículos. */
+  kitchenRoundsSummary(
+    organizationId: string | null,
+    branchId: string | null = null,
+  ) {
+    return this.prisma.orderRound.findMany({
+      where: {
+        order: {
+          organizationId: organizationId,
+          ...(branchId ? { branchId } : {}),
+        },
+        status: {
+          in: ACTIVE_ROUND_STATUSES.filter(
+            (status) => status !== OrderRoundStatus.PENDING_PAYMENT,
+          ),
+        },
+      },
+      select: {
+        id: true,
+        status: true,
+        sentAt: true,
+        createdAt: true,
+        prioritizedAt: true,
+        estimatedMinutes: true,
+        order: {
+          select: {
+            id: true,
+            tableNumber: true,
+            channel: true,
+            customerName: true,
+            isTakeaway: true,
+            status: true,
+            ticketNumber: true,
+          },
+        },
+        _count: { select: { items: true } },
+      },
+      orderBy: [{ sentAt: 'asc' }, { createdAt: 'asc' }],
+    });
   }
 
   /** Modo efectivo de la sucursal (para POS y cocina). */
@@ -2212,6 +2666,18 @@ export class OrdersService {
         include: kitchenTicketInclude,
       }),
     ]);
+
+    // Las rondas priorizadas desde el POS se atienden primero en todas las
+    // estaciones, sin cambiar el orden dentro del mismo grupo.
+    tickets.sort((left, right) => {
+      const leftPriority = left.orderRound.prioritizedAt ? 1 : 0;
+      const rightPriority = right.orderRound.prioritizedAt ? 1 : 0;
+
+      return (
+        rightPriority - leftPriority ||
+        left.createdAt.getTime() - right.createdAt.getTime()
+      );
+    });
 
     return {
       mode: KitchenMode.ADVANCED,
@@ -2496,7 +2962,7 @@ export class OrdersService {
    *
    * El cierre normal ocurre al confirmar el pago; este respaldo se ejecuta al
    * entregar o cancelar tickets para cuentas que se pagaron antes del cierre
-   * automático. Exige que no queden rondas activas.
+   * automático. Exige que no queden rondas activas ni cobros pendientes.
    */
   private async maybeAutoClosePaidOrder(
     tx: Prisma.TransactionClient,
@@ -2520,21 +2986,18 @@ export class OrdersService {
     const activeRounds = await tx.orderRound.count({
       where: {
         orderId,
-        status: {
-          in: [
-            OrderRoundStatus.PENDING,
-            OrderRoundStatus.HELD,
-            OrderRoundStatus.PENDING_PAYMENT,
-            OrderRoundStatus.FIRED,
-            OrderRoundStatus.PREPARING,
-            OrderRoundStatus.READY,
-            OrderRoundStatus.PICKED_UP,
-          ],
-        },
+        status: { in: ACTIVE_ROUND_STATUSES },
       },
     });
 
     if (activeRounds > 0) return false;
+
+    // Un cobro sin confirmar tampoco permite cerrar: primero se resuelve.
+    const pendingPayments = await tx.payment.count({
+      where: { orderId, status: PaymentStatus.PENDING },
+    });
+
+    if (pendingPayments > 0) return false;
 
     const paid = await tx.payment.aggregate({
       where: { orderId, status: PaymentStatus.CONFIRMED },
@@ -2958,7 +3421,7 @@ export class OrdersService {
             ...(branchId ? { branchId } : {}),
           },
           status: {
-            in: OPEN_ROUND_STATUSES.filter(
+            in: ACTIVE_ROUND_STATUSES.filter(
               (status) => status !== OrderRoundStatus.PENDING_PAYMENT,
             ),
           },
@@ -2996,6 +3459,7 @@ export class OrdersService {
       const actionable =
         round.status === OrderRoundStatus.PENDING ||
         round.status === OrderRoundStatus.PREPARING;
+      const prioritized = round.prioritizedAt !== null;
       const urgency = actionable
         ? estimateMinutes > 0
           ? stageMinutes / estimateMinutes
@@ -3007,9 +3471,13 @@ export class OrdersService {
       const score = actionable
         ? Math.round(
             urgency * 100 + waitMinutes * 0.4 + items * 0.3,
-          )
+          ) + (prioritized ? 10_000 : 0)
         : 0;
       const reasons: string[] = [];
+
+      if (prioritized) {
+        reasons.push('Priorizada desde el POS');
+      }
 
       if (priority === 'late') {
         reasons.push(
@@ -3031,6 +3499,7 @@ export class OrdersService {
         ...round,
         estimateMinutes,
         estimateFromSnapshot: round.estimatedMinutes !== null,
+        prioritized,
         stageMinutes,
         waitMinutes,
         itemCount: items,
@@ -3059,68 +3528,6 @@ export class OrdersService {
       ...round,
       suggestedRank: rankById.get(round.id) ?? null,
     }));
-  }
-
-  /**
-   * Minutos estimados de una ronda a partir de sus líneas.
-   *
-   * Los combos toman el máximo de sus componentes; los artículos sin tiempo
-   * propio heredan el del negocio (manual o histórico ya calibrado).
-   */
-  private async estimateForLines(
-    organizationId: string | null,
-    branchId: string | null,
-    lines: Array<{ itemId: string }>,
-  ): Promise<number> {
-    if (lines.length === 0) return DEFAULT_PREP_MINUTES;
-
-    const fallback = await this.kitchen.fallbackMinutes(
-      organizationId,
-      branchId,
-    );
-    const itemIds = [...new Set(lines.map((line) => line.itemId))];
-    const items = await this.prisma.item.findMany({
-      where: { id: { in: itemIds } },
-      select: { id: true, prepMinutes: true, isCombo: true },
-    });
-    const comboIds = items
-      .filter((item) => item.isCombo)
-      .map((item) => item.id);
-    const components =
-      comboIds.length > 0
-        ? await this.prisma.comboComponent.findMany({
-            where: { comboId: { in: comboIds } },
-            select: {
-              comboId: true,
-              componentItem: { select: { prepMinutes: true } },
-            },
-          })
-        : [];
-    const comboMinutes = new Map<string, number>();
-
-    for (const component of components) {
-      const minutes = component.componentItem.prepMinutes ?? fallback;
-      comboMinutes.set(
-        component.comboId,
-        Math.max(comboMinutes.get(component.comboId) ?? 0, minutes),
-      );
-    }
-
-    const byId = new Map(items.map((item) => [item.id, item]));
-    const lineMinutes = lines.map((line) => {
-      const item = byId.get(line.itemId);
-
-      if (!item) return fallback;
-      if (item.prepMinutes !== null) return item.prepMinutes;
-      if (item.isCombo) return comboMinutes.get(item.id) ?? fallback;
-
-      return fallback;
-    });
-
-    return estimatePrepMinutes({
-      lineMinutes,
-      distinctLines: itemIds.length,
-    });
   }
 
   // --------------------------------------------------------------------------
@@ -3166,6 +3573,8 @@ export class OrdersService {
         customerName: true,
         branchId: true,
         total: true,
+        organization: { select: { taxRate: true } },
+        branch: { select: { kitchenMode: true } },
       },
     });
 
@@ -3186,6 +3595,7 @@ export class OrdersService {
     organizationId: string | null,
     items: RoundItemDto[],
     defaultTaxRate: Prisma.Decimal,
+    fallbackMinutesPromise: Promise<number>,
   ) {
     const itemIds = [...new Set(items.map((line) => line.itemId))];
 
@@ -3217,7 +3627,9 @@ export class OrdersService {
         promotions: { where: { isActive: true } },
         comboComponents: {
           include: {
-            componentItem: { select: { id: true, name: true, price: true } },
+            componentItem: {
+              select: { id: true, name: true, price: true, prepMinutes: true },
+            },
             variant: { select: { id: true, name: true, priceAdjust: true } },
           },
         },
@@ -3378,7 +3790,39 @@ export class OrdersService {
       };
     });
 
-    return { items: rows, selections };
+    const fallbackMinutes = await fallbackMinutesPromise;
+    const comboMinutes = new Map<string, number>();
+
+    for (const item of catalogItems) {
+      if (!item.isCombo || item.comboComponents.length === 0) continue;
+
+      let minutes = 0;
+
+      for (const component of item.comboComponents) {
+        minutes = Math.max(
+          minutes,
+          component.componentItem.prepMinutes ?? fallbackMinutes,
+        );
+      }
+
+      comboMinutes.set(item.id, minutes);
+    }
+
+    const lineMinutes = items.map((line) => {
+      const item = byId.get(line.itemId);
+
+      if (!item) return fallbackMinutes;
+      if (item.prepMinutes !== null) return item.prepMinutes;
+      if (item.isCombo) return comboMinutes.get(item.id) ?? fallbackMinutes;
+
+      return fallbackMinutes;
+    });
+    const estimatedMinutes = estimatePrepMinutes({
+      lineMinutes,
+      distinctLines: itemIds.length,
+    });
+
+    return { items: rows, selections, estimatedMinutes };
   }
 
   /**
@@ -3710,6 +4154,10 @@ export class OrdersService {
           orderRound: {
             orderId,
             status: { not: OrderRoundStatus.CANCELLED },
+          },
+          // Un artículo con todos sus tickets anulados ya no se cobra.
+          kitchenTickets: {
+            none: { status: { not: KitchenItemStatus.VOID } },
           },
         },
         select: { subtotal: true, taxAmount: true },

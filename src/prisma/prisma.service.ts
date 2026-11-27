@@ -17,7 +17,12 @@ export class PrismaService
       max: 10,
       idleTimeoutMillis: 30_000,
     });
-    super({ adapter });
+    const logQueries = process.env.PRISMA_LOG_QUERIES === '1';
+
+    super({
+      adapter,
+      ...(logQueries ? { log: ['query' as const] } : {}),
+    });
   }
 
   async onModuleInit() {

@@ -35,8 +35,9 @@ export class PosDraftsService implements OnModuleInit, OnModuleDestroy {
   /**
    * Limpieza periódica de vencidos.
    *
-   * La lista y el reanudar también purgan, pero este barrido garantiza que un
-   * borrador abandonado desaparezca aunque nadie vuelva a abrir la bandeja.
+   * Listar ya excluye los vencidos por `expiresAt` y reanudar valida la
+   * vigencia, pero este barrido garantiza que un borrador abandonado
+   * desaparezca aunque nadie vuelva a abrir la bandeja.
    */
   onModuleInit() {
     this.purgeTimer = setInterval(() => {
@@ -67,8 +68,6 @@ export class PosDraftsService implements OnModuleInit, OnModuleDestroy {
     if (!organizationId) {
       throw new BadRequestException('La sesión no tiene un negocio activo');
     }
-
-    await this.purgeExpired(organizationId, branchId);
 
     const actor = await this.prisma.membership.findFirst({
       where: { userId, organizationId },
@@ -110,13 +109,16 @@ export class PosDraftsService implements OnModuleInit, OnModuleDestroy {
     return this.toPayload(draft);
   }
 
-  /** Borradores vigentes de la sucursal; los vencidos se eliminan al listar. */
+  /**
+   * Borradores vigentes de la sucursal.
+   *
+   * Los vencidos se excluyen por `expiresAt`; el barrido periódico se encarga
+   * de borrarlos aunque nadie abra la bandeja.
+   */
   async list(organizationId: string | null, branchId: string | null) {
     if (!organizationId) {
       throw new BadRequestException('La sesión no tiene un negocio activo');
     }
-
-    await this.purgeExpired(organizationId, branchId);
 
     const drafts = await this.prisma.posDraft.findMany({
       where: {
@@ -194,19 +196,6 @@ export class PosDraftsService implements OnModuleInit, OnModuleDestroy {
     }
 
     return { id, deleted: true };
-  }
-
-  private async purgeExpired(
-    organizationId: string,
-    branchId: string | null,
-  ) {
-    await this.prisma.posDraft.deleteMany({
-      where: {
-        organizationId,
-        branchId,
-        expiresAt: { lte: new Date() },
-      },
-    });
   }
 
   private toPayload(draft: PosDraft) {

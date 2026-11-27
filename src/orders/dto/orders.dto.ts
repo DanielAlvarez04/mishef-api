@@ -261,6 +261,14 @@ export class OrderGuestDto {
   ageRange?: GuestAgeRange | null;
 }
 
+/** Ajuste del número de comensales en una sola operación. */
+export class SetPartySizeDto {
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  partySize!: number;
+}
+
 /** Transición de estado de una ronda. */
 export class TransitionRoundDto {
   @IsEnum(OrderRoundStatus)

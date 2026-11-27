@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Patch,
+  Query,
   Sse,
   UseGuards,
   type MessageEvent,
@@ -37,7 +38,12 @@ export class KitchenController {
   rounds(
     @CurrentUser() user: JwtUser,
     @CurrentBranch() branchId: string | null,
+    @Query('summary') summary?: string,
   ) {
+    if (summary === '1' || summary === 'true') {
+      return this.orders.kitchenRoundsSummary(user.organizationId, branchId);
+    }
+
     return this.orders.kitchenRounds(user.organizationId, branchId);
   }
 

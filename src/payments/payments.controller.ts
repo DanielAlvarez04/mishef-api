@@ -134,7 +134,9 @@ export class PaymentsController {
     );
   }
 
-  @ApiOperation({ summary: 'Cerrar una cuenta pagada' })
+  @ApiOperation({
+    summary: 'Cerrar una cuenta pagada y sin rondas pendientes de entrega',
+  })
   @RequirePermissions('payments:confirm')
   @Post('orders/:id/close')
   close(@CurrentUser() user: JwtUser, @Param('id') id: string) {
